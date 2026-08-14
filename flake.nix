@@ -45,6 +45,7 @@
             nativeCheckInputs = [ pkgs.git ];
 
             postInstall = ''
+              ln -s rad-backup $out/bin/rad-restore
               installManPage <($out/bin/rad-backup man)
               installShellCompletion --cmd rad-backup \
                 --bash <($out/bin/rad-backup completions bash) \
