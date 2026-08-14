@@ -142,12 +142,17 @@ impl Home {
 
     /// Storage directory names are repository identifiers without the `rad:` prefix, so the
     /// inventory of a home is a directory listing and needs neither `rad` nor a running node.
-    pub fn repository_ids(&self) -> Result<Vec<String>> {
+    ///
+    /// The second half of the answer is the directories it could not read as identifiers. A
+    /// caller has to say so: skipping one quietly writes an archive missing a repository and
+    /// still reports success.
+    pub fn repository_ids(&self) -> Result<(Vec<String>, Vec<String>)> {
         let storage = self.storage();
         if !storage.is_dir() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let mut rids = Vec::new();
+        let mut skipped = Vec::new();
         for entry in std::fs::read_dir(&storage).map_err(|e| Error::io(&storage, e))? {
             let entry = entry.map_err(|e| Error::io(&storage, e))?;
             if !entry.path().is_dir() {
@@ -156,16 +161,20 @@ impl Home {
             // `to_str`, not `to_string_lossy`: a lossy name would become replacement
             // characters and then be handed on as a repository id, and ids address paths.
             let name = entry.file_name();
-            if let Some(name) = name.to_str()
-                && name.starts_with('z')
-            {
-                rids.push(format!("rad:{name}"));
+            match name.to_str() {
+                Some(name) if name.starts_with('z') => rids.push(format!("rad:{name}")),
+                Some(_) => {}
+                // Skipped, and said so. Dropping it silently would write an archive missing a
+                // repository and call the run a success, which is the failure this whole tool
+                // exists to make impossible.
+                None => skipped.push(entry.file_name().to_string_lossy().into_owned()),
             }
         }
-        // Sorted so that two archives of an unchanged home are byte-identical, which is what
-        // lets restic and borg deduplicate them.
+        // Sorted, so the inventory of one home is the same list whatever order the filesystem
+        // hands its entries back in.
         rids.sort();
-        Ok(rids)
+        skipped.sort();
+        Ok((rids, skipped))
     }
 
     /// The storage directory for a repository, by `rad:`-prefixed or bare identifier.

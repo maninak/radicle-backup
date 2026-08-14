@@ -170,11 +170,34 @@ pub fn copy_plain(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Fill `{{PLACEHOLDER}}` markers in one of the shipped documents.
+/// Substitute `{{KEY}}` markers, in ONE pass over the template.
+///
+/// Sequential `replace` calls read their own output, so a value containing a marker was
+/// expanded by a later key. An alias of `{{SECRET}}`, which arrives in a `config.json` copied
+/// verbatim out of somebody else's archive, put the 24-word mnemonic in the title of the
+/// recovery sheet. Scanning once means an inserted value is never looked at again, so no
+/// value can name another key, whatever it holds.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let mut text = template.to_string();
-    for (key, value) in values {
-        text = text.replace(&format!("{{{{{key}}}}}"), value);
+    let mut text = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            break;
+        };
+        let key = &after[..end];
+        match values.iter().find(|(name, _)| *name == key) {
+            Some((_, value)) => {
+                text.push_str(&rest[..start]);
+                text.push_str(value);
+            }
+            // An unknown marker is left as it was written. A template carrying `{{` for its
+            // own reasons is not this function's business to mangle.
+            None => text.push_str(&rest[..start + 2 + end + 2]),
+        }
+        rest = &after[end + 2..];
     }
+    text.push_str(rest);
     text
 }
 
@@ -289,6 +312,18 @@ mod tests {
     }
 
     #[test]
+    fn a_value_cannot_name_another_key() {
+        // The alias arrives in a `config.json` that a restore copies verbatim out of somebody
+        // else's archive, and `paper` puts it in the title of a sheet printed next to the key.
+        let filled = fill(
+            "{{ALIAS}} holds {{SECRET}}",
+            &[("ALIAS", "{{SECRET}}"), ("SECRET", "the 24 words")],
+        );
+        assert_eq!(filled, "{{SECRET}} holds the 24 words");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_working_directory_is_owner_only_from_the_moment_it_exists() {
         use std::os::unix::fs::PermissionsExt;
 

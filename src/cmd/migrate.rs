@@ -39,7 +39,17 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         keep: None,
         dry_run: false,
     };
-    let archive = backup::run(ctx, &create)?.ok_or_else(|| {
+    let outcome = backup::run(ctx, &create)?;
+    // A move retires the key on this machine, so an archive that is missing repositories must
+    // not be the one it is retired against. `backup` carries on past a repository it cannot
+    // bundle, which is right for a backup and wrong for the last copy before a machine is left.
+    if outcome.incomplete {
+        return Err(Error::refused(
+            "the archive this move would rely on is missing repositories that could not be bundled",
+            "fix or remove the damaged repositories, then run the move again",
+        ));
+    }
+    let archive = outcome.path.ok_or_else(|| {
         Error::refused(
             "a move needs an archive on disk",
             "give a path to write it to",
@@ -73,7 +83,7 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         ctx.term
             .warn("--keep-source: this machine keeps its key, and you now have two copies");
         ctx.term
-            .hint("start only one of them, ever, or your peer id will fork");
+            .detail("start only one of them, ever, or your peer id will fork");
     } else {
         retire(ctx, &archive)?;
     }

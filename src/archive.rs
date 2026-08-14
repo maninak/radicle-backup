@@ -115,6 +115,21 @@ impl<'a> Writer<'a> {
         manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
 
         let json = serde_json::to_vec_pretty(manifest)?;
+        // The same ceiling the reader enforces, checked here so the tool cannot write an
+        // archive it would then refuse to open. A home would need on the order of a hundred
+        // thousand repositories to reach it; if one ever does, this says so at the moment the
+        // archive is written rather than at the moment somebody needs it back.
+        if json.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(Error::Refused {
+                what: format!(
+                    "the manifest for this home is {} bytes, more than the {MAX_MANIFEST_BYTES} \
+                     an archive can carry",
+                    json.len()
+                ),
+                remedy: "take several archives with `--repos`, each covering part of the home"
+                    .to_string(),
+            });
+        }
         let mut header = header(json.len() as u64, DOC_MODE);
         self.tar
             .append_data(&mut header, MANIFEST_ENTRY, json.as_slice())
@@ -245,7 +260,10 @@ impl<'a> Reader<'a> {
                 .to_string();
             reject_traversal(&entry_path, path)?;
 
-            let declared = entry.header().size().map_err(Error::Bare)?;
+            // `entry.size()`, not `header().size()`: a PAX header can override the ustar
+            // size field, and the override is what bounds the reader. Read from the header,
+            // both ceilings below saw a declared 1 while the entry handed out gigabytes.
+            let declared = entry.size();
 
             if entry_path == MANIFEST_ENTRY {
                 if declared > MAX_MANIFEST_BYTES {
@@ -453,6 +471,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn unpacking_writes_every_entry_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
