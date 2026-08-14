@@ -468,3 +468,37 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     let after = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
     assert_eq!(before, after, "a refused restore still touched the key");
 }
+
+#[test]
+fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
+    let fixture = Fixture::create("restored-state");
+    let backups = fixture.path("backups");
+
+    // A `state` archive describes the repository without carrying it, which is the case that
+    // made a freshly restored home report the repositories it never asked for as missing.
+    let out = fixture.run(
+        &["--output", &backups.to_string_lossy(), "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a state backup");
+    let archive = only_archive(&backups);
+
+    let restored = fixture.path("restored");
+    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
+    assert_success(&out, "restoring the archive");
+
+    let out = fixture.run(&["diff"], &restored);
+    assert_success(&out, "diffing a freshly restored home");
+    assert!(
+        stderr(&out).contains("nothing has changed"),
+        "a restore should leave nothing to report: {}",
+        stderr(&out)
+    );
+
+    let out = fixture.run(&["doctor"], &restored);
+    assert!(
+        stderr(&out).contains("a backup exists"),
+        "a restored home should know its archive: {}",
+        stderr(&out)
+    );
+}

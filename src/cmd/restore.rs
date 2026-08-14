@@ -4,7 +4,7 @@
 //! target home and checked there; only then is it installed. A half-restored identity is worse
 //! than none, because it looks like one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
@@ -20,6 +20,7 @@ use crate::home::NodeState;
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
 use crate::rad::Rad;
+use crate::state;
 use crate::term;
 
 /// How a restored repository stands next to what the network holds.
@@ -135,8 +136,36 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     } else {
         reconcile(ctx, &manifest, &restored)?
     };
+    remember(ctx, &manifest, &restored, archive);
 
     report(ctx, &manifest, &restored, &standings)
+}
+
+/// Record the archive this home came from.
+///
+/// Without this, a machine that has only ever restored believes it has no backup at all:
+/// `doctor` fails a check that is not true and `diff` has nothing to compare against, on the
+/// one day the user most wants to hear that they are covered.
+fn remember(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord], archive: &Path) {
+    let encrypted = crypt::looks_encrypted(archive).unwrap_or(false);
+    let mut record = state::Record::of(
+        manifest,
+        Some(archive),
+        &manifest.identity.node_id,
+        encrypted,
+    );
+    // The archive described repositories it deliberately did not carry, the public ones the
+    // network still has. A record that claimed those are here would make the next `diff`
+    // report them as newly missing.
+    let present: BTreeSet<String> = restored.iter().map(|repo| repo.rid.clone()).collect();
+    record.sigrefs.retain(|rid, _| present.contains(rid));
+    record.repos.clone_from(&present);
+    record.described = present;
+    if let Err(e) = state::write(&record) {
+        ctx.term.warn(&format!(
+            "the restore is done, but it could not be recorded: {e}"
+        ));
+    }
 }
 
 /// Refuse to install a key that is not the key the manifest names.
