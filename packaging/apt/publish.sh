@@ -57,7 +57,19 @@ log "signing with $KEY_ID"
 
 log "fetching the current pool"
 mkdir -p "$ROOT/pool/$COMPONENT"
-rclone copy "$REMOTE/pool/$COMPONENT" "$ROOT/pool/$COMPONENT" --quiet || true
+# `|| true` here swallowed every failure, so a rotated token or a 5xx rebuilt the indexes from
+# this run's .debs alone and delisted every version already published. rclone exits 3 for
+# "directory not found", which is the only case that legitimately starts from an empty pool.
+probe=0
+rclone lsf "$REMOTE/pool/$COMPONENT" > /dev/null 2>&1 || probe=$?
+if [ "$probe" -eq 0 ]; then
+  rclone copy "$REMOTE/pool/$COMPONENT" "$ROOT/pool/$COMPONENT" --quiet
+elif [ "$probe" -eq 3 ]; then
+  log "nothing in the pool yet, so this is the first publish"
+else
+  echo "could not read the existing pool (rclone exit $probe); refusing to publish an index that would drop every version already there" >&2
+  exit 1
+fi
 cp -v "${debs[@]}" "$ROOT/pool/$COMPONENT/"
 
 for arch in $ARCHITECTURES; do

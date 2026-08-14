@@ -5,8 +5,9 @@
 #
 #   ./verify.sh <directory of downloaded files>
 #
-# Needs nothing but openssh and coreutils. It deliberately does not fetch anything: point it
-# at what you already downloaded, including allowed_signers from the repository.
+# Needs nothing but openssh and either coreutils or the `shasum` macOS ships. It does not fetch
+# anything: point it at what you already downloaded, including allowed_signers from the
+# repository.
 set -euo pipefail
 
 DIR="${1:?usage: verify.sh <directory of downloaded files>}"
@@ -39,5 +40,12 @@ while read -r sum name; do
 done < <(sed 's/^\\//' sha256sums.txt)
 [ -s "$present" ] || { echo "none of the files in sha256sums.txt are here" >&2; exit 1; }
 
-sha256sum -c "$present"
+# macOS ships `shasum` and no GNU coreutils, and this project publishes two darwin binaries and
+# a Homebrew formula, so the one script that tells a downloader whether to trust them must run
+# there. The release workflow already falls back the same way.
+if command -v sha256sum > /dev/null 2>&1; then
+  sha256sum -c "$present"
+else
+  shasum -a 256 -c "$present"
+fi
 echo "every file present matches what the signed checksum file says it should be"
