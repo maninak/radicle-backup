@@ -5,6 +5,10 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  # For the advisory job alone, below. An advisory is filed against a dependency of a release
+  # that already shipped, so waiting for somebody to push is waiting for the wrong event.
+  schedule:
+    - cron: "17 5 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,10 +18,17 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Stated rather than inherited from the repository default, which is a setting somebody can
+# change without touching this file. Nothing here writes.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.os }})
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +52,9 @@ jobs:
 
   msrv:
     name: msrv
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Read rust-version
@@ -63,7 +76,9 @@ jobs:
 
   reproducible:
     name: reproducible build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -74,7 +89,9 @@ jobs:
 
   nix:
     name: nix build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
@@ -83,19 +100,18 @@ jobs:
       # reproducible only by accident of caching.
       - name: Build
         run: nix build --print-build-logs
-      - name: Build again and compare
-        run: |
-          first=$(readlink -f result)
-          rm -f result
-          nix build --rebuild --print-build-logs
-          second=$(readlink -f result)
-          echo "$first"
-          echo "$second"
-          [ "$first" = "$second" ]
+      # `--rebuild` IS the comparison: it builds the derivation again and fails with "may not
+      # be deterministic" when the outputs differ. Comparing the two `result` symlinks would
+      # look like a check and never be one, because a store path is derived from the inputs and
+      # is identical across a rebuild whatever bytes came out of it.
+      - name: Build again and fail if the output differs
+        run: nix build --rebuild --print-build-logs
 
   package:
     name: debian package
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
@@ -112,6 +128,11 @@ jobs:
   audit:
     name: advisories
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: write
+      issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
