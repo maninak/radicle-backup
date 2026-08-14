@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `rad backup`: encrypted archives of a Radicle identity, node state and repositories, in three tiers (`identity`, `state`, `full`) with `--repos` to override what each carries.
 - `restore`: staged, digest-checked restores that compare every restored repository with the network before handing back control, so a stale archive cannot fork your peer history.
 - `verify` and `verify --deep`: digests, and a proof that the archive really does rebuild the identity it names.
-- `doctor`: seven checks on how recoverable an identity currently is, each naming the command that fixes it.
+- `doctor`: seven checks on how recoverable an identity currently is, each naming the command that fixes it. Each line names the subject on the left and what was found on the right, so it can never read as a claim it is denying; `?` marks a check that could not be run, and the summary names every bucket instead of scoring one.
 - `diff`: what has changed since the last archive, with no passphrase and no decryption. Exits `3` on drift, so `rad backup diff || rad backup` is a complete scheduling policy.
 - `show`: what is inside an archive, as prose or as JSON.
 - `ls`: every archive of this identity on disk, newest first, without opening any of them.

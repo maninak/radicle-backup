@@ -36,17 +36,21 @@ pub enum Verdict {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Check {
-    pub name: String,
+    /// What was looked at, never what was hoped for. A topic cannot be read as a claim, so a
+    /// failing line can never say the opposite of what it means: "backup: no archive has ever
+    /// been taken" is unambiguous where "✗ a backup exists" is a sentence arguing with itself.
+    pub topic: String,
     pub verdict: Verdict,
+    /// What was actually found, as a complete statement that is true on its own.
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
 }
 
 impl Check {
-    fn new(name: &str, verdict: Verdict, detail: impl Into<String>) -> Self {
+    fn new(topic: &str, verdict: Verdict, detail: impl Into<String>) -> Self {
         Self {
-            name: name.to_string(),
+            topic: topic.to_string(),
             verdict,
             detail: detail.into(),
             remedy: None,
@@ -62,19 +66,26 @@ impl Check {
 pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
     ctx.home.require()?;
     let checks = examine(ctx, args)?;
-    let failed = checks
-        .iter()
-        .filter(|check| check.verdict == Verdict::Fail)
-        .count();
-    let passed = checks
-        .iter()
-        .filter(|check| check.verdict == Verdict::Pass)
-        .count();
+    let tally = |wanted| {
+        checks
+            .iter()
+            .filter(|check| check.verdict == wanted)
+            .count()
+    };
+    let (passed, warned, failed, unknown) = (
+        tally(Verdict::Pass),
+        tally(Verdict::Warn),
+        tally(Verdict::Fail),
+        tally(Verdict::Unknown),
+    );
 
     if ctx.global.json {
         ctx.term.print_json(&serde_json::json!({
             "home": ctx.home.path().display().to_string(),
             "passed": passed,
+            "warned": warned,
+            "failed": failed,
+            "unknown": unknown,
             "total": checks.len(),
             "checks": checks,
         }))?;
@@ -86,21 +97,21 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
         ));
         term.blank();
         for check in &checks {
-            let line = format!("{}: {}", check.name, check.detail);
+            let line = format!("{}: {}", check.topic, check.detail);
             match check.verdict {
                 Verdict::Pass => term.ok(&line),
                 Verdict::Warn => term.warn(&line),
                 Verdict::Fail => term.fail(&line),
-                Verdict::Unknown => term.step(&line),
+                Verdict::Unknown => term.unknown(&line),
             }
             if let Some(remedy) = &check.remedy {
-                term.hint(remedy);
+                term.hint(&format!("--> {remedy}"));
             }
         }
         term.blank();
-        term.headline(&format!("{passed} of {} checks pass", checks.len()));
+        term.headline(&summary(passed, warned, failed, unknown));
         if failed > 0 {
-            term.hint("the failing lines above are the ones that cost you an identity");
+            term.hint("every ✗ is a way to lose this identity; the line under it is the fix");
         }
     }
 
@@ -109,6 +120,29 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
     } else {
         std::process::ExitCode::from(EXIT_CHECKS_FAILED)
     })
+}
+
+/// Name every bucket that has something in it, rather than reporting a score.
+///
+/// "2 of 7 checks pass" leaves the other five to the reader's imagination, and it counts a
+/// check that could not be run as one that did not pass. Naming the buckets means the line
+/// adds up to the number of checks and says which of them need a person.
+fn summary(passed: usize, warned: usize, failed: usize, unknown: usize) -> String {
+    let total = passed + warned + failed + unknown;
+    if passed == total {
+        return format!("all {total} checks pass");
+    }
+    let mut parts = vec![format!("{passed} pass")];
+    if warned > 0 {
+        parts.push(format!("{warned} worth improving"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failing"));
+    }
+    if unknown > 0 {
+        parts.push(format!("{unknown} could not be checked"));
+    }
+    parts.join(", ")
 }
 
 fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
@@ -141,7 +175,7 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let mut checks = vec![key_protection(&secret)];
     checks.push(backup_freshness(&stored, now, args));
     checks.push(backup_encryption(record));
-    checks.push(backup_locality(ctx, record));
+    checks.push(backup_locality(home.path(), record));
     checks.push(private_coverage(&inventory, record));
     checks.push(delegate_quorum(&inventory));
     checks.push(replication(&inventory, &routing));
@@ -149,27 +183,29 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
 }
 
 fn key_protection(secret: &SecretKey) -> Check {
+    const TOPIC: &str = "key passphrase";
     match secret.protection() {
         crate::key::Protection::Encrypted { cipher, kdf } => Check::new(
-            "the key has a passphrase",
+            TOPIC,
             Verdict::Pass,
-            format!("{cipher} with {kdf}"),
+            format!("the key is encrypted with {cipher} ({kdf})"),
         ),
         crate::key::Protection::Plaintext => Check::new(
-            "the key has a passphrase",
+            TOPIC,
             Verdict::Fail,
-            "it is stored in the clear, so anyone who reads the file is you",
+            "the key is stored in the clear, so anyone who can read the file is you",
         )
         .with_remedy("add one: ssh-keygen -p -f $RAD_HOME/keys/radicle"),
     }
 }
 
 fn backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor) -> Check {
+    const TOPIC: &str = "backup";
     if let state::Stored::Unreadable { .. } = stored {
         return Check::new(
-            "a backup exists",
+            TOPIC,
             Verdict::Unknown,
-            "one was recorded, but the record no longer parses",
+            "an archive was recorded, but the record no longer parses",
         )
         .with_remedy("take another to replace it: rad backup");
     }
@@ -180,95 +216,97 @@ fn backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor)
             .map(|dir| format!(" --output {}", dir.display()))
             .unwrap_or_default();
         return Check::new(
-            "a backup exists",
+            TOPIC,
             Verdict::Fail,
-            "this tool has never written one for this identity",
+            "no archive has ever been taken for this identity",
         )
         .with_remedy(format!("rad backup{where_to}"));
     };
     match record.age_in_days(now) {
         Some(days) if days <= STALE_AFTER_DAYS => Check::new(
-            "a backup exists",
+            TOPIC,
             Verdict::Pass,
-            format!("{} tier, taken {}", record.tier, term::days_ago(days)),
+            format!(
+                "a {}-tier archive was taken {}",
+                record.tier,
+                term::days_ago(days)
+            ),
         ),
         Some(days) => Check::new(
-            "a backup exists",
+            TOPIC,
             Verdict::Warn,
-            format!("the newest one was taken {}", term::days_ago(days)),
+            format!("the newest archive was taken {}", term::days_ago(days)),
         )
         .with_remedy("rad backup"),
         None => Check::new(
-            "a backup exists",
+            TOPIC,
             Verdict::Unknown,
-            "there is a record of one, but its timestamp does not parse",
+            "an archive was recorded, but its timestamp does not parse",
         ),
     }
 }
 
 fn backup_encryption(record: Option<&state::Record>) -> Check {
+    const TOPIC: &str = "archive encryption";
     match record {
         Some(record) if record.encrypted => Check::new(
-            "the backup is encrypted",
+            TOPIC,
             Verdict::Pass,
-            "it cannot be read without its passphrase or key",
+            "the newest archive cannot be read without its passphrase or key",
         ),
         Some(_) => Check::new(
-            "the backup is encrypted",
+            TOPIC,
             Verdict::Fail,
             "the newest archive holds your private key in the clear",
         )
         .with_remedy("take another without --plaintext, then delete the old one"),
-        None => Check::new(
-            "the backup is encrypted",
-            Verdict::Unknown,
-            "there is no backup to judge",
-        ),
+        None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to judge"),
     }
 }
 
-fn backup_locality(ctx: &Ctx, record: Option<&state::Record>) -> Check {
+fn backup_locality(home: &std::path::Path, record: Option<&state::Record>) -> Check {
+    const TOPIC: &str = "archive location";
     let Some(archive) = record.and_then(|record| record.archive.as_ref()) else {
         return Check::new(
-            "the backup is off this disk",
+            TOPIC,
             Verdict::Unknown,
-            "no archive path was recorded, so this cannot be judged",
+            "no archive path was recorded, so this could not be judged",
         );
     };
     let path = std::path::Path::new(archive);
     if !path.exists() {
         return Check::new(
-            "the backup is off this disk",
+            TOPIC,
             Verdict::Warn,
             format!("{archive} is no longer where it was written"),
         )
         .with_remedy("if you moved it somewhere safe, this is fine; if not, take another");
     }
-    match state::same_device(path, ctx.home.path()) {
+    match state::same_device(path, home) {
         Some(true) => Check::new(
-            "the backup is off this disk",
+            TOPIC,
             Verdict::Fail,
-            "it is on the same filesystem as the home it protects",
+            "the newest archive is on the same filesystem as the home it protects",
         )
         .with_remedy("copy it to another disk, another machine, or a service you trust"),
         Some(false) => Check::new(
-            "the backup is off this disk",
+            TOPIC,
             Verdict::Pass,
-            "it is on a different filesystem",
+            "the newest archive is on a different filesystem from the home it protects",
         ),
         None => Check::new(
-            "the backup is off this disk",
+            TOPIC,
             Verdict::Unknown,
-            "the filesystems could not be compared",
+            "the two filesystems could not be compared",
         ),
     }
 }
 
 fn private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Check {
-    const CHECK: &str = "private repositories are backed up";
+    const CHECK: &str = "private repositories";
     let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
     if private.is_empty() {
-        return Check::new(CHECK, Verdict::Pass, "there are none");
+        return Check::new(CHECK, Verdict::Pass, "there are none to lose");
     }
 
     // A private repository is not automatically the only copy. Its owner can allow peers to
@@ -289,21 +327,21 @@ fn private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Ch
         .iter()
         .filter(|repo| !repo.has_another_holder())
         .count();
+    let (count, verb) = (missing.len(), term::agree(missing.len()));
     let detail = if alone == 0 {
         format!(
-            "{} in no archive, though every one of them is allowed to a peer that could hold a \
-             copy",
-            term::count(missing.len(), "is", "are"),
+            "{count} of {} {verb} in no archive, though every one of those is allowed to a peer \
+             that could hold a copy",
+            private.len(),
         )
     } else if alone == missing.len() {
         format!(
-            "{} in no archive and on no other node",
-            term::count(alone, "is", "are")
+            "{count} of {} {verb} in no archive and on no other node",
+            private.len()
         )
     } else {
         format!(
-            "{} of {} in no archive, and {alone} of those on no other node",
-            term::count(missing.len(), "is", "are"),
+            "{count} of {} {verb} in no archive, and {alone} of those on no other node",
             private.len(),
         )
     };
@@ -325,25 +363,31 @@ fn delegate_quorum(inventory: &Inventory) -> Check {
         .iter()
         .filter(|repo| repo.delegate)
         .count();
+    const TOPIC: &str = "delegate quorum";
     if sole.is_empty() {
         return Check::new(
-            "no repository depends on this key alone",
+            TOPIC,
             Verdict::Pass,
             if delegated == 0 {
                 "you are not a delegate of anything".to_string()
             } else {
                 format!(
-                    "all {} you delegate have another delegate",
+                    "all {} you delegate have another delegate too",
                     term::count(delegated, "repository", "repositories")
                 )
             },
         );
     }
+    let (has, whose) = if sole.len() == 1 {
+        ("has", "its")
+    } else {
+        ("have", "their")
+    };
     Check::new(
-        "no repository depends on this key alone",
+        TOPIC,
         Verdict::Warn,
         format!(
-            "{} have you as their only delegate: {}",
+            "{} {has} you as {whose} only delegate: {}",
             term::count(sole.len(), "repository", "repositories"),
             sole.join(", ")
         ),
@@ -364,9 +408,10 @@ fn replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check 
         .map(|repo| repo.display_name())
         .collect();
 
+    const TOPIC: &str = "seeding elsewhere";
     if routing.is_empty() {
         return Check::new(
-            "your public repositories are seeded elsewhere",
+            TOPIC,
             Verdict::Unknown,
             "the routing table is empty, so no other node is known to hold anything",
         )
@@ -374,17 +419,18 @@ fn replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check 
     }
     if alone.is_empty() {
         return Check::new(
-            "your public repositories are seeded elsewhere",
+            TOPIC,
             Verdict::Pass,
-            "every one of them is announced by at least one other node",
+            "every public repository is announced by at least one other node",
         );
     }
     Check::new(
-        "your public repositories are seeded elsewhere",
+        TOPIC,
         Verdict::Warn,
         format!(
-            "{} of them are announced by no other node: {}",
-            alone.len(),
+            "{} {} announced by no other node: {}",
+            term::count(alone.len(), "public repository", "public repositories"),
+            term::agree(alone.len()),
             alone.join(", ")
         ),
     )
@@ -394,6 +440,78 @@ fn replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every topic the report can print, one per check, whatever the verdict turns out to be.
+    fn every_topic() -> Vec<String> {
+        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        let args = Doctor { backup_dir: None };
+        let empty = Inventory {
+            records: Vec::new(),
+            selected: Default::default(),
+            warnings: Vec::new(),
+        };
+        vec![
+            backup_freshness(&state::Stored::Absent, now, &args),
+            backup_encryption(None),
+            backup_locality(std::path::Path::new("/nowhere"), None),
+            private_coverage(&empty, None),
+            delegate_quorum(&empty),
+            replication(&empty, &BTreeMap::new()),
+        ]
+        .into_iter()
+        .map(|check| check.topic)
+        .collect()
+    }
+
+    /// The bug this guards, seen in the wild: `✗ a backup exists` printed when none did.
+    ///
+    /// A topic phrased as a claim asserts the good state, so the marker and the words say
+    /// opposite things the moment a check fails. A topic must name the subject and leave every
+    /// assertion to the detail beside it, which is written to be true whatever was found.
+    #[test]
+    fn no_topic_asserts_a_state_so_a_failing_line_cannot_contradict_its_own_marker() {
+        const CLAIMS: [&str; 7] = ["exists", " is ", " are ", " has ", " have ", "no ", "not "];
+        for topic in every_topic() {
+            let padded = format!(" {topic} ");
+            for claim in CLAIMS {
+                assert!(
+                    !padded.contains(claim),
+                    "the topic {topic:?} asserts a state with {claim:?}; name the subject instead"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_topic_does_not_change_with_the_verdict_so_two_runs_can_be_compared_line_by_line() {
+        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        let args = Doctor { backup_dir: None };
+        let mut fresh = record();
+        fresh.created = "2026-08-13T12:00:00Z".to_string();
+        let mut stale = record();
+        stale.created = "2026-05-01T12:00:00Z".to_string();
+
+        let taken = backup_freshness(&state::Stored::Record(Box::new(fresh)), now, &args);
+        let old = backup_freshness(&state::Stored::Record(Box::new(stale)), now, &args);
+        let never = backup_freshness(&state::Stored::Absent, now, &args);
+        assert_eq!(taken.verdict, Verdict::Pass);
+        assert_eq!(old.verdict, Verdict::Warn);
+        assert_eq!(never.verdict, Verdict::Fail);
+        assert_eq!(taken.topic, never.topic);
+        assert_eq!(old.topic, never.topic);
+    }
+
+    #[test]
+    fn the_summary_names_every_bucket_rather_than_folding_them_into_a_score() {
+        assert_eq!(summary(7, 0, 0, 0), "all 7 checks pass");
+        assert_eq!(
+            summary(2, 2, 1, 2),
+            "2 pass, 2 worth improving, 1 failing, 2 could not be checked"
+        );
+        // The old line said "6 of 7 checks pass" here, which reads as one failure when there
+        // is none: a check nobody could run is not a check that went wrong.
+        assert_eq!(summary(6, 0, 0, 1), "6 pass, 1 could not be checked");
+    }
 
     #[test]
     fn a_plaintext_key_fails_and_says_how_to_fix_it() {

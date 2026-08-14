@@ -44,7 +44,7 @@ curl -fsSL https://github.com/maninak/radicle-backup/releases/latest/download/ra
 sudo install -m 755 rad-backup /usr/local/bin/
 ```
 
-The Linux builds are statically linked against musl, so they run on any distribution and inside `scratch` containers. There are aarch64 builds for Linux and macOS as well as x86_64. Every release ships `sha256sums.txt` and a signature beside it.
+The Linux builds are statically linked against musl, so they run on any distribution and inside `scratch` containers. There are aarch64 builds for Linux and macOS as well as x86_64, a Windows `.zip`, and an x86_64 FreeBSD build that is cross-compiled and **untested**, because there is no FreeBSD runner to test it on; a report either way is welcome. Every release ships `sha256sums.txt` and a signature beside it, and `verify.sh` in the same release checks both.
 
 ### From source
 
@@ -242,22 +242,24 @@ sh restore.sh ~/.radicle                                # or just run it
 ```
 recovery posture of /home/maninak/.radicle
 
-✓ the key has a passphrase: aes256-ctr with bcrypt
-✗ a backup exists: this tool has never written one for this identity
-  rad backup
-· the backup is encrypted: there is no backup to judge
-· the backup is off this disk: no archive path was recorded, so this cannot be judged
-! private repositories are backed up: 3 are in no archive, though every one of them is allowed to a peer that could hold a copy
-  rad backup --repos private
-! no repository depends on this key alone: 10 repositories have you as their only delegate: maninak-eslint-config, radicle-tools-web, radicle-vscode-extension, ts-xor, taiga-grove, radicle-seed-prune, ...
-  a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
-✓ your public repositories are seeded elsewhere: every one of them is announced by at least one other node
+✓ key passphrase: the key is encrypted with aes256-ctr (bcrypt)
+✗ backup: no archive has ever been taken for this identity
+  --> rad backup
+? archive encryption: there is no archive to judge
+? archive location: no archive path was recorded, so this could not be judged
+! private repositories: 3 of 3 are in no archive, though every one of those is allowed to a peer that could hold a copy
+  --> rad backup --repos private
+! delegate quorum: 10 repositories have you as their only delegate: maninak-eslint-config, radicle-tools-web, radicle-vscode-extension, ts-xor, taiga-grove, radicle-seed-prune, ...
+  --> a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
+✓ seeding elsewhere: every public repository is announced by at least one other node
 
-2 of 7 checks pass
-  the failing lines above are the ones that cost you an identity
+2 pass, 2 worth improving, 1 failing, 2 could not be checked
+  every ✗ is a way to lose this identity; the line under it is the fix
 ```
 
-Seven checks, each naming the command that fixes it. A `!` is a warning and a `✗` is a failure: a private repository in no archive fails when no other node has it and warns when its identity allows a peer that could, and an archive older than 30 days warns rather than fails.
+Seven checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line is the command that fixes the one above it.
+
+The line between a `!` and a `✗` is whether anything else holds a copy: a private repository in no archive fails when no other node has it and warns when its identity allows a peer that could, and an archive older than 30 days warns rather than fails.
 
 `doctor --json` prints the same as structured data. It exits `3` when any check fails, which makes it a monitoring probe.
 

@@ -495,9 +495,11 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
         stderr(&out)
     );
 
+    // Asserted on the detail rather than the topic, because the topic prints whatever the
+    // verdict is: matching it would pass just as happily on "no archive has ever been taken".
     let out = fixture.run(&["doctor"], &restored);
     assert!(
-        stderr(&out).contains("a backup exists"),
+        stderr(&out).contains("archive was taken"),
         "a restored home should know its archive: {}",
         stderr(&out)
     );

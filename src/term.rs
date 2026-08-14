@@ -78,6 +78,12 @@ impl Term {
         self.say(&format!("{} {text}", self.paint("33", "!")));
     }
 
+    /// For a question that could not be answered. `·` would read as a neutral bullet, and a
+    /// reader is owed the difference between "this is fine" and "this could not be looked at".
+    pub fn unknown(&self, text: &str) {
+        self.say(&format!("{} {text}", self.dim("?")));
+    }
+
     pub fn hint(&self, text: &str) {
         self.say(&self.dim(&format!("  {text}")));
     }
@@ -144,6 +150,11 @@ pub fn count(n: usize, singular: &str, plural: &str) -> String {
     } else {
         format!("{n} {plural}")
     }
+}
+
+/// The verb that agrees with a count, so no line ever reads "1 of 3 are in no archive".
+pub fn agree(n: usize) -> &'static str {
+    if n == 1 { "is" } else { "are" }
 }
 
 /// Render a duration in whole days, for "this backup is 40 days old" style reporting.
