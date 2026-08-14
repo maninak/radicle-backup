@@ -23,6 +23,19 @@ use crate::manifest::{Entry, MANIFEST_ENTRY, Manifest};
 /// archive on the text-heavy contents of a Radicle home. Levels above ~15 stop paying.
 const COMPRESSION_LEVEL: i32 = 10;
 
+/// A ceiling on the manifest, checked before a byte of it is allocated.
+///
+/// `read_to_string` grows to whatever the tar header declares, so an archive whose manifest
+/// header claims 8 GiB costs 8 GiB of memory to reject. The real thing is a few kilobytes of
+/// JSON per entry; a home with a hundred thousand entries would not reach a tenth of this.
+const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A ceiling on any single entry, likewise checked from the header before copying.
+///
+/// Generous on purpose: the largest thing this tool writes is one repository bundle, and the
+/// point is not to guess a real size but to refuse the absurd before it fills a disk.
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
 pub use crate::perms::{DOC_MODE, SECRET_MODE};
 
 pub struct Writer<'a> {
@@ -57,8 +70,11 @@ impl<'a> Writer<'a> {
     /// Add a file from disk, hashing it in the same pass that copies it.
     ///
     /// The tar header needs the size before the content, so a file that changes length while
-    /// it is being read would produce a corrupt entry. Everything this tool archives is either
-    /// static (keys, config) or a snapshot it just took, so that cannot happen here.
+    /// it is being read produces a corrupt entry. Most of what this tool archives is a
+    /// snapshot it just took, but some of it is read live out of the home, so the two are
+    /// compared afterwards rather than assumed equal: a `config.json` rewritten mid-run would
+    /// otherwise be padded or truncated to fit a header that no longer describes it, and the
+    /// archive would be reported as written.
     pub fn add_file(&mut self, path: &str, source: &Path, mode: u32) -> Result<Entry> {
         let file = std::fs::File::open(source).map_err(|e| Error::io(source, e))?;
         let size = file.metadata().map_err(|e| Error::io(source, e))?.len();
@@ -68,6 +84,20 @@ impl<'a> Writer<'a> {
         self.tar
             .append_data(&mut header, path, &mut reader)
             .map_err(Error::Bare)?;
+
+        let written = reader.bytes_read();
+        if written != size {
+            return Err(Error::Refused {
+                what: format!(
+                    "{} changed while it was being archived: the entry says {size} bytes and \
+                     {written} were read",
+                    source.display()
+                ),
+                remedy: "take the backup again, and if it keeps happening, stop whatever is \
+                     writing to the home while it runs (`--stop-node` covers the node itself)"
+                    .to_string(),
+            });
+        }
 
         let entry = Entry {
             path: path.to_string(),
@@ -201,18 +231,46 @@ impl<'a> Reader<'a> {
 
         for entry in self.archive.entries().map_err(Error::Bare)? {
             let mut entry = entry.map_err(Error::Bare)?;
-            let entry_path = entry
-                .path()
-                .map_err(Error::Bare)?
-                .to_string_lossy()
-                .into_owned();
+            let raw = entry.path().map_err(Error::Bare)?.into_owned();
+            // Refused rather than lossily converted: two names differing only outside UTF-8
+            // both become the same string of replacement characters, so one file would
+            // silently overwrite the other and the digest check would still pass. The format
+            // says entry names are ASCII paths this tool wrote, so there is nothing to lose.
+            let entry_path = raw
+                .to_str()
+                .ok_or_else(|| Error::NotAnArchive {
+                    path: path.to_path_buf(),
+                    reason: format!("entry name is not valid UTF-8: {}", raw.display()),
+                })?
+                .to_string();
             reject_traversal(&entry_path, path)?;
 
+            let declared = entry.header().size().map_err(Error::Bare)?;
+
             if entry_path == MANIFEST_ENTRY {
+                if declared > MAX_MANIFEST_BYTES {
+                    return Err(Error::NotAnArchive {
+                        path: path.to_path_buf(),
+                        reason: format!(
+                            "{MANIFEST_ENTRY} declares {declared} bytes, more than the \
+                             {MAX_MANIFEST_BYTES} this reads"
+                        ),
+                    });
+                }
                 let mut json = String::new();
                 entry.read_to_string(&mut json).map_err(Error::Bare)?;
                 manifest = Some(serde_json::from_str::<Manifest>(&json)?);
                 continue;
+            }
+
+            if declared > MAX_ENTRY_BYTES {
+                return Err(Error::NotAnArchive {
+                    path: path.to_path_buf(),
+                    reason: format!(
+                        "entry {entry_path} declares {declared} bytes, more than the \
+                         {MAX_ENTRY_BYTES} this reads"
+                    ),
+                });
             }
 
             let mut reader = HashingReader::new(entry);
@@ -229,6 +287,9 @@ impl<'a> Reader<'a> {
                 found: manifest.format,
                 supported: crate::manifest::FORMAT_VERSION,
             });
+        }
+        for repo in &manifest.repos {
+            reject_hostile_rid(&repo.rid, path)?;
         }
         Ok(Scan { manifest, observed })
     }
@@ -263,6 +324,24 @@ fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
         return Err(Error::NotAnArchive {
             path: archive.to_path_buf(),
             reason: format!("entry `{entry_path}` points outside the archive"),
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a repository id that would not stay a single directory under `storage/`.
+///
+/// Entry names are checked above, but the ids in the manifest are a second, separate source of
+/// paths: `Home::repository_path` joins one onto the home, and `Path::join` with an absolute
+/// component throws the base away. An id of `rad:../../x` got `git init --bare` run on it
+/// outside the home. A real id is `rad:` and base58, so anything else is refused here, once,
+/// rather than at each of restore, verify and sync.
+fn reject_hostile_rid(rid: &str, archive: &Path) -> Result<()> {
+    let bare = rid.strip_prefix("rad:").unwrap_or(rid);
+    if bare.is_empty() || !bare.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(Error::NotAnArchive {
+            path: archive.to_path_buf(),
+            reason: format!("`{rid}` is not a repository id"),
         });
     }
     Ok(())

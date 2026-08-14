@@ -153,8 +153,12 @@ impl Home {
             if !entry.path().is_dir() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('z') {
+            // `to_str`, not `to_string_lossy`: a lossy name would become replacement
+            // characters and then be handed on as a repository id, and ids address paths.
+            let name = entry.file_name();
+            if let Some(name) = name.to_str()
+                && name.starts_with('z')
+            {
                 rids.push(format!("rad:{name}"));
             }
         }

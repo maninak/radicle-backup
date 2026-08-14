@@ -65,20 +65,16 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         format!("<pre class=\"key\">{}</pre>", escape(&secret_text))
     };
 
-    let sheet = fill(
-        SHEET,
-        &[
-            ("ALIAS", ctx.home.alias()?.as_deref().unwrap_or("unnamed")),
-            ("DID", &identity.did()),
-            ("FINGERPRINT", &identity.fingerprint()),
-            ("CREATED", &iso_stamp(jiff::Timestamp::now())),
-            ("HEADING", heading),
-            ("CAUTION", caution),
-            ("SECRET", &words_html),
-            ("QR", &qr),
-            ("TOOL", env!("CARGO_PKG_VERSION")),
-        ],
-    );
+    let sheet = render(Sheet {
+        alias: ctx.home.alias()?.as_deref().unwrap_or("unnamed"),
+        did: &identity.did(),
+        fingerprint: &identity.fingerprint(),
+        created: &iso_stamp(jiff::Timestamp::now()),
+        heading,
+        caution,
+        secret_html: &words_html,
+        qr: &qr,
+    });
 
     match &args.output {
         Some(path) => {
@@ -90,6 +86,43 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         None => ctx.term.print(&sheet),
     }
     Ok(())
+}
+
+/// Everything the sheet says, already computed. Split from `run` so that the escaping can be
+/// tested against the real template without a home to read it from.
+struct Sheet<'a> {
+    /// Raw, straight out of `config.json`. `render` escapes it; nothing else may.
+    alias: &'a str,
+    did: &'a str,
+    fingerprint: &'a str,
+    created: &'a str,
+    heading: &'a str,
+    caution: &'a str,
+    secret_html: &'a str,
+    qr: &'a str,
+}
+
+/// Fill the template in.
+///
+/// The alias is escaped here because it is the one field that is neither derived from the key
+/// nor written by this program: it arrives in a `config.json`, which a restore copies verbatim
+/// out of somebody else's archive, and it lands in the `<title>` and a `<td>` of a page the
+/// user is told to open in a browser next to their private key.
+fn render(sheet: Sheet<'_>) -> String {
+    fill(
+        SHEET,
+        &[
+            ("ALIAS", &escape(sheet.alias)),
+            ("DID", sheet.did),
+            ("FINGERPRINT", sheet.fingerprint),
+            ("CREATED", sheet.created),
+            ("HEADING", sheet.heading),
+            ("CAUTION", sheet.caution),
+            ("SECRET", sheet.secret_html),
+            ("QR", sheet.qr),
+            ("TOOL", env!("CARGO_PKG_VERSION")),
+        ],
+    )
 }
 
 /// The 32-byte seed as a BIP-39 mnemonic: 24 words, checksummed, and readable after a bad
@@ -166,6 +199,25 @@ mod tests {
     #[test]
     fn markup_in_an_alias_or_a_key_cannot_break_out_of_the_sheet() {
         assert_eq!(escape("<script>&"), "&lt;script&gt;&amp;");
+    }
+
+    #[test]
+    fn an_alias_out_of_a_stranger_s_config_cannot_put_script_on_the_sheet() {
+        let sheet = render(Sheet {
+            alias: "<img src=x onerror=alert(1)>",
+            did: "did:key:z6Mk",
+            fingerprint: "SHA256:x",
+            created: "2026-01-01T00:00:00Z",
+            heading: "24 words",
+            caution: "caution",
+            secret_html: "<ol></ol>",
+            qr: "<svg></svg>",
+        });
+        assert!(
+            !sheet.contains("<img src=x"),
+            "the alias reached the page as markup"
+        );
+        assert!(sheet.contains("&lt;img src=x onerror=alert(1)&gt;"));
     }
 
     #[test]

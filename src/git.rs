@@ -144,8 +144,15 @@ impl Git {
     }
 
     /// Pull every ref out of a bundle and into a repository, keeping ref names as they were.
+    ///
+    /// With `fetch.fsckObjects`, because the bundle is the one part of an archive nothing else
+    /// validates: the digests only prove it is the bundle the archive author shipped. Git's
+    /// default is off, which would write a tree entry named `.git`, or a `..` component,
+    /// straight into storage for the next checkout to materialise.
     pub fn unbundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
         self.tool.output(&[
+            "-c".as_ref(),
+            "fetch.fsckObjects=true".as_ref(),
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "fetch".as_ref(),
