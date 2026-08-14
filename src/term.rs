@@ -87,12 +87,21 @@ impl Term {
 
     /// For a question that could not be answered. `·` would read as a neutral bullet, and a
     /// reader is owed the difference between "this is fine" and "this could not be looked at".
+    /// Never swallowed: an unanswerable check is a diagnostic, not narration.
     pub fn unknown(&self, text: &str) {
-        self.say(&format!("{} {text}", self.dim("?")));
+        self.always(&format!("{} {text}", self.dim("?")));
     }
 
+    /// A hint attached to a step that went fine. Narration, and `--quiet` drops it.
     pub fn hint(&self, text: &str) {
         self.say(&self.dim(&format!("  {text}")));
+    }
+
+    /// The lines under a `warn` or a `fail` that carry the substance: which repositories
+    /// diverged, what to run next, where to look. Printed like a hint and never swallowed,
+    /// because `--quiet` otherwise reported that something was wrong and withheld what.
+    pub fn detail(&self, text: &str) {
+        self.always(&self.dim(&format!("  {text}")));
     }
 
     pub fn blank(&self) {
@@ -169,6 +178,9 @@ pub fn days_ago(days: i64) -> String {
     match days {
         0 => "today".to_string(),
         1 => "yesterday".to_string(),
+        // A clock that ran fast on the machine that took it, so the age is not a fact about
+        // the archive. "-36 days ago" reads as a typo; this reads as what it is.
+        n if n < 0 => "at a time in the future".to_string(),
         n => format!("{n} days ago"),
     }
 }
@@ -176,6 +188,13 @@ pub fn days_ago(days: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_archive_stamped_ahead_of_this_clock_is_not_reported_as_negative_days_old() {
+        assert_eq!(days_ago(-36), "at a time in the future");
+        assert_eq!(days_ago(0), "today");
+        assert_eq!(days_ago(2), "2 days ago");
+    }
 
     #[test]
     fn a_count_of_one_takes_the_singular_and_everything_else_takes_the_plural() {

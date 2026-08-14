@@ -4,6 +4,7 @@
 //! working out the inventory, asking for a passphrase) happens before a single byte is
 //! written, so that a run that is going to fail does so before it has touched anything.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ use crate::manifest::{
 use crate::perms::create_private;
 use crate::rad::Rad;
 use crate::state;
-use crate::term;
+use crate::term::{self, Term};
 
 const RESTORE_DOC: &str = include_str!("../../assets/RESTORE.md");
 const RESTORE_SCRIPT: &str = include_str!("../../assets/restore.sh");
@@ -38,7 +39,19 @@ const NODE_STOP_POLL: Duration = Duration::from_millis(200);
 /// Permissions for the restore script, which is meant to be run straight out of the archive.
 const SCRIPT_MODE: u32 = 0o755;
 
-pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
+/// What a run produced, and whether it produced all of it.
+///
+/// `incomplete` exists because a backup that lost a repository still writes a usable archive:
+/// refusing the whole run over one damaged repository is worse for the user than carrying the
+/// rest. So the loss travels out as a flag and becomes exit 3, which is what an unattended
+/// timer can actually see. Without it, `rad backup` exited 0 on a run that dropped the one
+/// repository nothing else has a copy of.
+pub struct Outcome {
+    pub path: Option<PathBuf>,
+    pub incomplete: bool,
+}
+
+pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
     ctx.home.require()?;
     let home = &ctx.home;
     let term = &ctx.term;
@@ -71,7 +84,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
     }
 
     let mut warnings = Vec::new();
-    let node = quiesce(ctx, args, rad.as_ref(), &mut warnings)?;
+    let mut node = quiesce(ctx, args, rad.as_ref(), &mut warnings)?;
 
     term.step("reading policies and inventory");
     let policies = db::read_policies(&home.policies_db())?;
@@ -93,8 +106,11 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
         // `quiesce` already ran, so a rehearsal with `--stop-node` really did stop the node.
         // Put it back before returning, or `--dry-run` leaves the thing it promised not to
         // touch switched off.
-        restart_node(ctx, &node, rad.as_ref())?;
-        return Ok(None);
+        node.restart();
+        return Ok(Outcome {
+            path: None,
+            incomplete: false,
+        });
     }
 
     let encryption = encryption_for(ctx, args)?;
@@ -186,8 +202,16 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
         }
     }
 
-    let archived =
-        archive_repositories(ctx, &mut writer, &scratch, &git, &inventory, &mut manifest)?;
+    let bundled = archive_repositories(
+        ctx,
+        &mut writer,
+        &scratch,
+        &git,
+        &inventory,
+        &mut manifest,
+        &mut warnings,
+    )?;
+    let archived = bundled.archived;
 
     let restore_doc = fill(
         RESTORE_DOC,
@@ -232,19 +256,22 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
 
     manifest.warnings = warnings;
     writer.finish(&mut manifest)?;
-    let path = destination.commit()?;
+    let path = destination.commit(&ctx.term)?;
 
     if let Some(path) = &path {
         write_sidecar(path, &manifest, &encryption, archived)?;
     }
-    restart_node(ctx, &node, rad.as_ref())?;
+    node.restart();
     if let (Some(path), Some(keep)) = (&path, args.keep) {
         prune(ctx, path, &manifest, keep)?;
     }
     remember(ctx, &manifest, path.as_deref(), &node_id, &encryption);
 
     report(ctx, &manifest, &inventory, archived, path.as_deref())?;
-    Ok(path)
+    Ok(Outcome {
+        path,
+        incomplete: bundled.dropped > 0,
+    })
 }
 
 /// Say what a run would carry, and how much of it, without writing anything.
@@ -332,9 +359,47 @@ fn remember(
 }
 
 /// What the node was doing, and what we did about it.
-struct NodeHandling {
+/// A node this run may have stopped, and the promise to put it back.
+///
+/// A guard rather than a pair of booleans and a call at the end, because `run` has about
+/// fifteen `?` sites between the stop and the restart: a passphrase that cannot be read, a
+/// repository that changes size mid-read, a full disk. Every one of them used to unwind past
+/// the restart and leave a seed offline until somebody noticed. `Drop` runs on all of them.
+struct NodeHandling<'a> {
+    ctx: &'a Ctx,
+    rad: Option<&'a Rad>,
     was_running: bool,
     stopped_by_backup: bool,
+}
+
+impl NodeHandling<'_> {
+    /// Put the node back now rather than at the end of the scope, for the paths that want to
+    /// report it in order. Idempotent: the flag is cleared, so `Drop` then does nothing.
+    fn restart(&mut self) {
+        if !self.stopped_by_backup {
+            return;
+        }
+        self.stopped_by_backup = false;
+        self.ctx.term.step("starting the node again");
+        let Some(rad) = self.rad else {
+            self.ctx
+                .term
+                .warn("rad is no longer on PATH, so the node this run stopped is still stopped");
+            return;
+        };
+        if !matches!(rad.start_node(), Ok(true)) {
+            self.ctx
+                .term
+                .warn("`rad node start` failed, so the node this run stopped is still stopped");
+            self.ctx.term.detail("start it with `rad node start`");
+        }
+    }
+}
+
+impl Drop for NodeHandling<'_> {
+    fn drop(&mut self) {
+        self.restart();
+    }
 }
 
 /// Stop the node if asked, and say so plainly if it is running and we were not.
@@ -342,15 +407,17 @@ struct NodeHandling {
 /// Only git storage is at risk from a running node: the databases are snapshotted through
 /// SQLite's own backup API, and keys and config do not change. So a running node is a warning
 /// with a reason attached, not a refusal.
-fn quiesce(
-    ctx: &Ctx,
+fn quiesce<'a>(
+    ctx: &'a Ctx,
     args: &Create,
-    rad: Option<&Rad>,
+    rad: Option<&'a Rad>,
     warnings: &mut Vec<String>,
-) -> Result<NodeHandling> {
+) -> Result<NodeHandling<'a>> {
     let was_running = ctx.home.node_state() == NodeState::Running;
     if !was_running {
         return Ok(NodeHandling {
+            ctx,
+            rad,
             was_running: false,
             stopped_by_backup: false,
         });
@@ -364,6 +431,8 @@ fn quiesce(
         ctx.term
             .warn("the node is running; pass --stop-node for a guaranteed-clean copy");
         return Ok(NodeHandling {
+            ctx,
+            rad,
             was_running: true,
             stopped_by_backup: false,
         });
@@ -378,42 +447,29 @@ fn quiesce(
     ctx.term.step("stopping the node");
     rad.stop_node()?;
 
+    // The guard exists from the moment the stop is asked for, not from the moment it is
+    // confirmed. `rad node stop` can succeed and the socket still be up when the deadline
+    // passes, and that path returned an error with nothing recorded as owing a restart.
+    let mut node = NodeHandling {
+        ctx,
+        rad: Some(rad),
+        was_running: true,
+        stopped_by_backup: true,
+    };
+
     let deadline = Instant::now() + NODE_STOP_TIMEOUT;
     while Instant::now() < deadline {
         if ctx.home.node_state() == NodeState::Stopped {
-            return Ok(NodeHandling {
-                was_running: true,
-                stopped_by_backup: true,
-            });
+            return Ok(node);
         }
         std::thread::sleep(NODE_STOP_POLL);
     }
+    // It never went down, so there is nothing this run stopped and nothing to put back.
+    node.stopped_by_backup = false;
     Err(Error::refused(
         "the node is still serving its control socket after being asked to stop",
         "stop it by hand and run again, or run without --stop-node",
     ))
-}
-
-/// Put back a node this run stopped, on every path that leaves `run`.
-///
-/// A non-zero `rad node start` is said out loud rather than dropped: leaving a seed down after
-/// a backup is a silent outage, and the exit status was the only sign of it.
-fn restart_node(ctx: &Ctx, node: &NodeHandling, rad: Option<&Rad>) -> Result<()> {
-    if !node.stopped_by_backup {
-        return Ok(());
-    }
-    ctx.term.step("starting the node again");
-    let Some(rad) = rad else {
-        ctx.term
-            .warn("rad is no longer on PATH, so the node this run stopped is still stopped");
-        return Ok(());
-    };
-    if !rad.start_node()? {
-        ctx.term
-            .warn("`rad node start` failed, so the node this run stopped is still stopped");
-        ctx.term.hint("start it with `rad node start`");
-    }
-    Ok(())
 }
 
 fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
@@ -439,12 +495,29 @@ fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
 ///
 /// A file is written under a `.partial` name and renamed once it is complete, so an
 /// interrupted run cannot leave something that looks like a usable backup.
+///
+/// The `.partial` is removed on drop when it was never committed. Nothing lists or prunes
+/// those files, so every failed run left one behind: a directory of encrypted-looking rubble
+/// beside the real archives, growing without limit and impossible to tell apart by eye.
 enum Destination {
     Stdout,
     File {
         final_path: PathBuf,
         partial: PathBuf,
+        committed: std::cell::Cell<bool>,
     },
+}
+
+impl Drop for Destination {
+    fn drop(&mut self) {
+        if let Self::File {
+            partial, committed, ..
+        } = self
+            && !committed.get()
+        {
+            let _ = std::fs::remove_file(partial);
+        }
+    }
 }
 
 impl Destination {
@@ -462,27 +535,54 @@ impl Destination {
         }
     }
 
-    fn commit(&self) -> Result<Option<PathBuf>> {
+    fn commit(&self, term: &Term) -> Result<Option<PathBuf>> {
         match self {
             Self::Stdout => Ok(None),
             Self::File {
                 final_path,
                 partial,
+                committed,
             } => {
                 // Flushed is not durable: `Write::flush` on a `File` is a no-op, so without
                 // this the rename could land before the bytes and a crash would leave an empty
-                // file under the finished name, which is exactly what `.partial` exists to
-                // stop. The directory is synced too, or the rename itself can be lost.
-                std::fs::File::open(partial)
+                // file under the finished name, which is what `.partial` exists to stop.
+                // Opened for WRITING, because Windows refuses FlushFileBuffers on a read-only
+                // handle, which failed every backup there after the whole archive was written.
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(partial)
                     .and_then(|file| file.sync_all())
                     .map_err(|e| Error::io(partial, e))?;
                 std::fs::rename(partial, final_path).map_err(|e| Error::io(final_path, e))?;
-                if let Some(directory) = final_path.parent() {
-                    let _ = std::fs::File::open(directory).map(|dir| dir.sync_all());
-                }
+                sync_directory(term, final_path.parent());
+                committed.set(true);
                 Ok(Some(final_path.clone()))
             }
         }
+    }
+}
+
+/// Fsync the directory, so the rename that just happened survives a crash.
+///
+/// Unix only: there is no portable way to open a directory as a file, and Windows does not
+/// need one, since NTFS orders the rename against the file's own flushed data. A failure is
+/// reported rather than swallowed, because the whole point of the rename was durability.
+fn sync_directory(term: &Term, directory: Option<&Path>) {
+    #[cfg(unix)]
+    {
+        if let Some(directory) = directory
+            && let Err(error) = std::fs::File::open(directory).and_then(|dir| dir.sync_all())
+        {
+            term.warn(&format!(
+                "{}: the directory entry could not be flushed, so a crash now could lose the \
+                 archive that was just written ({error})",
+                directory.display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (term, directory);
     }
 }
 
@@ -517,6 +617,7 @@ fn destination(
     Ok(Destination::File {
         final_path,
         partial,
+        committed: std::cell::Cell::new(false),
     })
 }
 
@@ -553,6 +654,12 @@ fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &
 }
 
 /// Bundle each selected repository and record what went in.
+/// How many repositories reached the archive, and how many were selected but could not.
+struct Bundled {
+    archived: usize,
+    dropped: usize,
+}
+
 fn archive_repositories(
     ctx: &Ctx,
     writer: &mut Writer,
@@ -560,9 +667,13 @@ fn archive_repositories(
     git: &Git,
     inventory: &Inventory,
     manifest: &mut Manifest,
-) -> Result<usize> {
+    warnings: &mut Vec<String>,
+) -> Result<Bundled> {
     if inventory.selected.is_empty() {
-        return Ok(0);
+        return Ok(Bundled {
+            archived: 0,
+            dropped: 0,
+        });
     }
     ctx.term.step(&format!(
         "bundling {} repositor{}",
@@ -607,10 +718,10 @@ fn archive_repositories(
         archived += 1;
     }
 
-    // Left in `record.bundle = None`, which is already how the rest of the tool spells "this
-    // archive does not carry that repository", so `show`, `verify` and `doctor` all read it
-    // without being taught anything new.
-    manifest.warnings.extend(failed.iter().cloned());
+    // Into the run's own vec, NOT `manifest.warnings`: `run` assigns that field wholesale
+    // just before `finish`, so anything put there here was dropped on the floor and the
+    // archive recorded nothing about the repositories it had lost.
+    warnings.extend(failed.iter().cloned());
     if !failed.is_empty() {
         ctx.term.warn(&format!(
             "{} of {} selected repositories could not be bundled and are NOT in this archive",
@@ -618,7 +729,10 @@ fn archive_repositories(
             inventory.selected.len()
         ));
     }
-    Ok(archived)
+    Ok(Bundled {
+        archived,
+        dropped: failed.len(),
+    })
 }
 
 fn write_sidecar(
@@ -726,9 +840,21 @@ fn report(
     }
     // A private repository left out of the archive is only lost if nobody else has it: the
     // owner may have allowed a peer to hold it, and a peer that holds it can hand it back.
+    //
+    // Judged on what REACHED the archive, not on what was selected for it. `inventory.records`
+    // never has its `bundle` set (that field is filled on `manifest.repos`, a different
+    // collection), so the old first clause was a constant true, and a repository whose bundle
+    // failed stayed in `selected` and was therefore counted as carried. The one repository
+    // that had just become unrecoverable was the one this line stayed silent about.
+    let carried: BTreeSet<&str> = manifest
+        .repos
+        .iter()
+        .filter(|record| record.bundle.is_some())
+        .map(|record| record.rid.as_str())
+        .collect();
     let stranded = inventory
         .private()
-        .filter(|record| record.bundle.is_none() && !inventory.selected.contains(&record.rid))
+        .filter(|record| !carried.contains(record.rid.as_str()))
         .filter(|record| !record.has_another_holder())
         .count();
     if stranded > 0 {
@@ -785,7 +911,7 @@ mod tests {
         )
         .expect("a directory is a destination");
         match destination {
-            Destination::File { final_path, .. } => {
+            Destination::File { ref final_path, .. } => {
                 assert!(final_path.starts_with("/tmp"));
                 assert!(
                     final_path

@@ -32,6 +32,14 @@ use crate::error::Result;
 use crate::home::Home;
 use crate::term::{Term, Verbosity};
 
+fn backup_code(outcome: cmd::backup::Outcome) -> ExitCode {
+    if outcome.incomplete {
+        ExitCode::from(crate::error::EXIT_CHECKS_FAILED)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn main() -> ExitCode {
     let cli = cli::parse();
     let term = Term::new(
@@ -96,19 +104,39 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
         global: cli.global.clone(),
     };
 
+    let outcome = dispatch(&ctx, cli);
+
+    // Every verb, not just `backup`. `db.rs` promises in its own doc comment that a database it
+    // could not open read-only is reported, and only `backup` was draining that list, so
+    // `doctor`, `verify`, `diff` and `restore` all touched files they said they would only
+    // read and said nothing. `backup` drains it first, to put the same fact in the manifest.
+    for path in db::drain_writable_opens() {
+        ctx.term.warn(&format!(
+            "{} could not be opened read-only, so it was opened for writing to recover its \
+             write-ahead log",
+            path.display()
+        ));
+    }
+    outcome
+}
+
+fn dispatch(ctx: &Ctx, cli: &Cli) -> Result<ExitCode> {
     match &cli.command {
-        None => cmd::backup::run(&ctx, &cli.create).map(|_| ExitCode::SUCCESS),
-        Some(Command::Create(args)) => cmd::backup::run(&ctx, args).map(|_| ExitCode::SUCCESS),
-        Some(Command::Restore(args)) => cmd::restore::run(&ctx, args),
-        Some(Command::Verify(args)) => cmd::verify::run(&ctx, args),
-        Some(Command::Ls(args)) => cmd::ls::run(&ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Show(args)) => cmd::show::run(&ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Prune(args)) => cmd::prune::run(&ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Schedule(args)) => cmd::schedule::run(&ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Doctor(args)) => cmd::doctor::run(&ctx, args),
-        Some(Command::Paper(args)) => cmd::paper::run(&ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Migrate(args)) => cmd::migrate::run(&ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Diff) => cmd::diff::run(&ctx),
+        // Exit 3 when a run wrote an archive but lost a repository doing it, the same code
+        // `doctor` and `diff` use for "it worked and you should look". A timer that only reads
+        // the exit status could not otherwise tell a complete backup from a gutted one.
+        None => cmd::backup::run(ctx, &cli.create).map(backup_code),
+        Some(Command::Create(args)) => cmd::backup::run(ctx, args).map(backup_code),
+        Some(Command::Restore(args)) => cmd::restore::run(ctx, args),
+        Some(Command::Verify(args)) => cmd::verify::run(ctx, args),
+        Some(Command::Ls(args)) => cmd::ls::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Show(args)) => cmd::show::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Prune(args)) => cmd::prune::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Schedule(args)) => cmd::schedule::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Doctor(args)) => cmd::doctor::run(ctx, args),
+        Some(Command::Paper(args)) => cmd::paper::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Migrate(args)) => cmd::migrate::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Diff) => cmd::diff::run(ctx),
         Some(Command::Completions(_) | Command::Man) => Ok(ExitCode::SUCCESS),
     }
 }

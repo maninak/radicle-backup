@@ -59,7 +59,13 @@ pub fn collect(
     routing: &BTreeMap<String, u64>,
 ) -> Result<Inventory> {
     let mut warnings = Vec::new();
-    let stored = home.repository_ids()?;
+    let (stored, unreadable) = home.repository_ids()?;
+    for name in &unreadable {
+        warnings.push(format!(
+            "storage/{name} was skipped: its directory name is not valid UTF-8, so it cannot \
+             be a repository id and nothing in this archive carries it"
+        ));
+    }
 
     let mine = own_repository_ids(home, rad, node_id, &stored, &mut warnings)?;
     let selected: BTreeSet<String> = match selection {
