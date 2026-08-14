@@ -4,7 +4,10 @@ name: Release
 # publishes the release, refreshes the apt repository and pushes the crate.
 on:
   push:
-    tags: ["v*"]
+    # `*` matches any character but `/`, so a bare "v*" fires a full release on
+    # "vendor-test". These say digits. The exact shape is asserted in the `version` job,
+    # because a filter pattern cannot express "and it agrees with Cargo.toml".
+    tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -18,8 +21,39 @@ permissions:
   contents: write
 
 jobs:
+  # First, because every later job trusts the tag: the binaries carry its version, the release
+  # page quotes its changelog section, and crates.io cannot take a publish back.
+  version:
+    name: check the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: check
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Repeated here rather than trusted from the trigger, because workflow_dispatch takes
+          # the tag as typed and never passes through that filter at all.
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::$TAG is not a release tag, expected vMAJOR.MINOR.PATCH[-prerelease]"
+            exit 1
+          fi
+          version="${TAG#v}"
+          declared=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$version" != "$declared" ]; then
+            echo "::error::tag $TAG says $version but Cargo.toml says $declared"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   binaries:
     name: ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -125,6 +159,7 @@ jobs:
 
   packages:
     name: deb (${{ matrix.arch }})
+    needs: version
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -172,7 +207,7 @@ jobs:
 
   release:
     name: publish the release
-    needs: [binaries, packages]
+    needs: [version, binaries, packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,10 +223,12 @@ jobs:
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' \) -exec cp {} release/ \;
           cd release && shasum -a 256 * > sha256sums.txt
       - name: Notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          # The section of CHANGELOG.md for this tag, so the release page and the file agree.
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
+          # From the version job, not GITHUB_REF_NAME, which on workflow_dispatch is the
+          # branch the run was started from and would quietly yield no section at all.
+          awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\]" { printing = 1; next }
             printing && /^## / { exit }
             printing { print }
