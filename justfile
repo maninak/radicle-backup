@@ -25,6 +25,10 @@ generated: build
     ./target/release/rad-backup completions bash > packaging/generated/rad-backup.bash
     ./target/release/rad-backup completions zsh > packaging/generated/_rad-backup
     ./target/release/rad-backup completions fish > packaging/generated/rad-backup.fish
+    # `rad restore` is the same binary under the name someone in trouble reaches for, and a
+    # roff include so `man rad-restore` answers rather than saying there is no such page.
+    ln -sfn rad-backup packaging/generated/rad-restore
+    printf '.so man1/rad-backup.1\n' > packaging/generated/rad-restore.1
     printf 'rad-backup (%s-1) stable; urgency=medium\n\n  * Upstream release %s. The changelog for it is at\n    https://github.com/maninak/radicle-backup/blob/master/CHANGELOG.md\n\n -- Konstantinos Maninakis <info@radicle.tools>  %s\n' "$(just version)" "$(just version)" "$(just rfc-date)" > packaging/generated/changelog.Debian
 
 # The version in Cargo.toml, which is the one every artefact is named after.
@@ -93,6 +97,7 @@ dist target=`rustc -vV | sed -n 's|host: ||p'`: generated
 # Install into ~/.local/bin with completions and the man page.
 install-local: generated
     install -Dm755 target/release/rad-backup ~/.local/bin/rad-backup
+    ln -sfn rad-backup ~/.local/bin/rad-restore
     install -Dm644 packaging/generated/rad-backup.1 ~/.local/share/man/man1/rad-backup.1
     install -Dm644 packaging/generated/rad-backup.bash ~/.local/share/bash-completion/completions/rad-backup
     install -Dm644 packaging/generated/_rad-backup ~/.local/share/zsh/site-functions/_rad-backup

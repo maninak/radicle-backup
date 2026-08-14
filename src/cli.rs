@@ -4,6 +4,7 @@
 //! `rad backup ...` sentence. Creating an archive is what an unqualified `rad backup` does,
 //! because that is the thing people came for.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::parser::ValueSource;
@@ -53,7 +54,12 @@ const CREATE_ONLY: [&str; 10] = [
 /// ecosystem is used. So the global flags stay usable in either position and the
 /// archive-shaping ones are checked by hand.
 pub fn parse() -> Cli {
-    let matches = Cli::command().get_matches();
+    let called = as_called(std::env::args_os());
+    let mut command = Cli::command();
+    if let Some(name) = called.bin_name {
+        command = command.bin_name(name);
+    }
+    let matches = command.get_matches_from(called.argv);
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
@@ -64,6 +70,43 @@ pub fn parse() -> Cli {
             .exit();
     }
     cli
+}
+
+/// The command line as the name it was started under implies.
+///
+/// Installed beside the binary, a `rad-restore` symlink makes `rad restore <archive>` work,
+/// because `rad` runs `rad-<name>` from `PATH` for any subcommand it does not know. That is
+/// the command somebody reaches for when something has already gone wrong, and it should not
+/// depend on their remembering that it lives under `rad backup`.
+fn as_called<I: Iterator<Item = OsString>>(args: I) -> Invocation {
+    let mut argv: Vec<OsString> = args.collect();
+    let called_restore = argv
+        .first()
+        .map(PathBuf::from)
+        .and_then(|path| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })
+        .is_some_and(|name| name == "rad-restore" || name == "restore");
+    if !called_restore {
+        return Invocation {
+            argv,
+            bin_name: None,
+        };
+    }
+    argv.insert(1, OsString::from("restore"));
+    Invocation {
+        argv,
+        // So the help and the usage line say `rad restore`, which is what was typed, rather
+        // than the `rad-restore restore` that the rewritten argv would otherwise spell out.
+        bin_name: Some("rad"),
+    }
+}
+
+/// A command line, and the name to show it under.
+struct Invocation {
+    argv: Vec<OsString>,
+    bin_name: Option<&'static str>,
 }
 
 /// The complaint to make when an archive-shaping flag was passed to a verb that makes no
@@ -442,6 +485,35 @@ mod tests {
         assert_eq!(TierArg::Identity.default_repos(), RepoSelection::None);
         assert_eq!(TierArg::State.default_repos(), RepoSelection::Private);
         assert_eq!(TierArg::Full.default_repos(), RepoSelection::Mine);
+    }
+
+    #[test]
+    fn started_as_rad_restore_the_program_is_already_at_the_restore_verb() {
+        let called = as_called(
+            ["/usr/bin/rad-restore", "--yes", "archive.tar.zst.age"]
+                .into_iter()
+                .map(OsString::from),
+        );
+        assert_eq!(
+            called.argv,
+            [
+                "/usr/bin/rad-restore",
+                "restore",
+                "--yes",
+                "archive.tar.zst.age"
+            ]
+            .map(OsString::from)
+            .to_vec()
+        );
+
+        assert_eq!(called.bin_name, Some("rad"));
+
+        let untouched = ["/usr/bin/rad-backup", "doctor"]
+            .map(OsString::from)
+            .to_vec();
+        let called = as_called(untouched.clone().into_iter());
+        assert_eq!(called.argv, untouched);
+        assert_eq!(called.bin_name, None);
     }
 
     #[test]

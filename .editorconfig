@@ -1,0 +1,22 @@
+root = true
+
+[*]
+indent_style = space
+indent_size = 2
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+# What rustfmt does anyway. Here so an editor agrees with it before the formatter runs.
+[*.rs]
+indent_size = 4
+max_line_length = 100
+
+# just recipes are shell, and just is whitespace-sensitive about how they are indented.
+[justfile]
+indent_size = 4
+
+# A trailing double space is a line break in markdown, so trimming it changes the text.
+[*.md]
+trim_trailing_whitespace = false

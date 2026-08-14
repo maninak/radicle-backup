@@ -56,7 +56,7 @@ Needs Rust 1.88 or newer. `git` on `PATH` is required at runtime; `rad` is optio
 
 ### As a `rad` subcommand
 
-Any executable called `rad-<name>` on `PATH` becomes `rad <name>`. Installing this as `rad-backup` is what makes `rad backup` work, and every example below can be written either way.
+Any executable called `rad-<name>` on `PATH` becomes `rad <name>`. Installing this as `rad-backup` is what makes `rad backup` work, and every example below can be written either way. The package also installs a `rad-restore` symlink to the same binary, so `rad restore <archive>` works for someone who is already having a bad day and does not want to remember which command it lives under.
 
 ### Tab completion
 
@@ -99,14 +99,7 @@ rad backup prune --keep 7               # delete the older ones, keeping the new
 
 `doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped.
 
-Every knob that is not a one-off is an environment variable, so a run is configured the way `rad` itself is:
-
-```sh
-RAD_HOME=/var/lib/radicle rad backup       # a home that is not yours
-RAD_BACKUP_DIR=~/backups rad backup        # where archives go, without passing --output
-RAD_BACKUP_PASSPHRASE=... rad backup       # the archive passphrase, for cron
-RAD=/nix/store/.../bin/rad rad backup      # a specific rad binary
-```
+Every knob that is not a one-off is an environment variable, so a run is configured the way `rad` itself is. They are listed under [Configuration](#configuration).
 
 ### Example output
 
@@ -125,7 +118,7 @@ Taking the default archive of a home with four repositories, two of them private
   check it: rad-backup verify ~/backups/maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age
 ```
 
-Two repositories were carried and two were not, and that is the point: the two public ones are on other nodes, and the two private ones are on no machine but this one, because their identities allow nobody else to hold them.
+Two were carried and two were not, and that is the point: the public ones are on other nodes, the private ones are on no machine but this one.
 
 ### Exit codes
 
@@ -264,17 +257,7 @@ recovery posture of /home/maninak/.radicle
   the failing lines above are the ones that cost you an identity
 ```
 
-Seven checks, each with the command that fixes it:
-
-| Check | Fails when |
-|---|---|
-| the key has a passphrase | The key is stored in the clear, so reading the file is enough to be you |
-| a backup exists | This tool has never written one, or the newest is over 30 days old (a warning) |
-| the backup is encrypted | The newest archive holds the private key in the clear |
-| the backup is off this disk | The archive is on the same filesystem as the home it protects |
-| private repositories are backed up | A private repository is in no archive. It fails when no other node has it, and warns when its identity allows a peer that could |
-| no repository depends on this key alone | You are the only delegate of a repository, so losing the key ends its governance (a warning, not a failure) |
-| your public repositories are seeded elsewhere | No other node is known to hold a copy of a repository of yours |
+Seven checks, each naming the command that fixes it. A `!` is a warning and a `✗` is a failure: a private repository in no archive fails when no other node has it and warns when its identity allows a peer that could, and an archive older than 30 days warns rather than fails.
 
 `doctor --json` prints the same as structured data. It exits `3` when any check fails, which makes it a monitoring probe.
 
@@ -343,22 +326,7 @@ rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 
 It refuses to enable a timer that cannot work: an unattended run has nobody to type a passphrase at, so a passphrase file (or `RAD_BACKUP_PASSPHRASE` in the timer's environment) is not optional. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
 
-The units it writes are `~/.config/systemd/user/rad-backup.{service,timer}`, and their settings live in `~/.config/rad-backup/env`:
-
-```sh
-RAD_BACKUP_DIR=/mnt/backups/radicle
-RAD_BACKUP_PASSPHRASE_FILE=/home/you/.config/rad-backup/passphrase
-RAD_BACKUP_TIER=state
-RAD_BACKUP_KEEP=14
-```
-
-Edit either by hand and they will not be overwritten: anything without this tool's marker line at the top is left alone. The package also ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up themselves:
-
-```sh
-systemctl --user enable --now rad-backup.timer
-systemctl --user list-timers rad-backup.timer
-journalctl --user -u rad-backup.service -n 50
-```
+It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. Edit any of the three by hand and they will not be overwritten: a file without this tool's marker line at the top is left alone. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
 
 Or with cron, if you prefer:
 

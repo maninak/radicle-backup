@@ -85,12 +85,15 @@ recommends = "age"
 suggests = "radicle-node"
 assets = [
     ["target/release/rad-backup", "usr/bin/", "755"],
+    # A symlink, so `rad restore` is the same 6 MB binary rather than a second copy of it.
+    ["packaging/generated/rad-restore", "usr/bin/rad-restore", "777"],
     ["README.md", "usr/share/doc/rad-backup/README.md", "644"],
     ["ARCHIVE-FORMAT.md", "usr/share/doc/rad-backup/ARCHIVE-FORMAT.md", "644"],
     ["SECURITY.md", "usr/share/doc/rad-backup/SECURITY.md", "644"],
     ["LICENSE-APACHE", "usr/share/doc/rad-backup/LICENSE-APACHE", "644"],
     ["packaging/systemd/env.example", "usr/share/doc/rad-backup/examples/env", "644"],
     ["packaging/generated/rad-backup.1", "usr/share/man/man1/", "644"],
+    ["packaging/generated/rad-restore.1", "usr/share/man/man1/", "644"],
     ["packaging/generated/rad-backup.bash", "usr/share/bash-completion/completions/rad-backup", "644"],
     ["packaging/generated/rad-backup.fish", "usr/share/fish/vendor_completions.d/rad-backup.fish", "644"],
     ["packaging/generated/_rad-backup", "usr/share/zsh/vendor-completions/", "644"],

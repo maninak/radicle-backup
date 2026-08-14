@@ -26,3 +26,4 @@ All notable changes to this project are documented here. The format follows [Kee
 - Signed releases: `sha256sums.txt` carries an ssh signature that `packaging/release/verify.sh` checks against `packaging/release/allowed_signers`.
 - Packages: `.deb` for amd64 and arm64 from a signed apt repository at <https://apt.radicle.tools>, tarballs for Linux and macOS, a `.zip` for Windows, a crate, and a Nix flake.
 - An audit map in `SECURITY.md`: the five files that touch a secret and what each has to convince a reviewer of.
+- `rad restore <archive>`: a `rad-restore` symlink to the same binary, for the day nobody wants to remember which command a restore lives under.
