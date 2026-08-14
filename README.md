@@ -2,10 +2,10 @@
 
 [![Sponsor maninak on Liberapay](https://img.shields.io/badge/Liberapay-Donate-F6C915?logo=liberapay&logoColor=black)](https://liberapay.com/maninak/donate)
 
-[![a radicle.tools artifact](https://img.shields.io/badge/a_radicle.tools-artifact-ff1aff?labelColor=15161c)](https://radicle.tools)
 [![version](https://img.shields.io/github/v/release/maninak/radicle-backup?sort=semver&label=version&color=44CC11)](https://github.com/maninak/radicle-backup/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-000000.svg?logo=rust&logoColor=white)](./Cargo.toml)
+[![radicle.tools artifact](https://img.shields.io/badge/radicle.tools-artifact-ff1aff?labelColor=15161c)](https://radicle.tools)
 
 **Back up, restore and move a [Radicle](https://radicle.xyz) identity, node state and repositories. `rad backup`.**
 
