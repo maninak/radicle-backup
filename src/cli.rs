@@ -99,8 +99,9 @@ pub enum Command {
 
 #[derive(Parser, Debug, Clone)]
 pub struct Create {
-    /// Where to write the archive: a directory, or a file name. Defaults to the working
-    /// directory, or to RAD_BACKUP_DIR when it is set.
+    /// Where to write the archive. A path ending in `.tar.zst`, `.age` or `.tar` names the
+    /// file; anything else is a directory, created if it is missing, and the archive is named
+    /// inside it. Defaults to the working directory, or to RAD_BACKUP_DIR when it is set.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
 

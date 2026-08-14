@@ -386,21 +386,36 @@ fn destination(
         .or_else(|| std::env::var_os("RAD_BACKUP_DIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // A path that exists as a directory, or that ends in a separator, names a directory to put
-    // the archive in. Anything else names the archive itself.
-    let final_path = if chosen.is_dir() {
-        chosen.join(name)
-    } else {
+    let final_path = if names_an_archive(&chosen) {
         if let Some(parent) = chosen.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
         chosen
+    } else {
+        std::fs::create_dir_all(&chosen).map_err(|e| Error::io(&chosen, e))?;
+        chosen.join(name)
     };
     let partial = final_path.with_extension("partial");
     Ok(Destination::File {
         final_path,
         partial,
     })
+}
+
+/// Whether a path names the archive itself rather than a directory to put it in.
+///
+/// An existing directory is a directory. Otherwise the extension decides: someone naming a
+/// file names it `.tar.zst` or `.age`, and someone naming a directory that does not exist yet
+/// does not. Guessing "file" for a bare name is the worse mistake, because it writes what the
+/// user reads as a folder as a single archive, and the next run silently replaces it.
+fn names_an_archive(path: &Path) -> bool {
+    const ARCHIVE_SUFFIXES: [&str; 3] = [".age", ".zst", ".tar"];
+
+    if path.is_dir() {
+        return false;
+    }
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    ARCHIVE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
 /// Take a consistent copy of a database, then archive that copy.
@@ -661,6 +676,17 @@ mod tests {
             }
             Destination::Stdout => panic!("a path is not stdout"),
         }
+    }
+
+    #[test]
+    fn a_path_is_a_directory_unless_it_is_named_like_an_archive() {
+        assert!(names_an_archive(Path::new("/backups/mine.tar.zst")));
+        assert!(names_an_archive(Path::new("/backups/mine.tar.zst.age")));
+        assert!(names_an_archive(Path::new("mine.age")));
+        // The trap this guards: a directory that does not exist yet, named like a directory.
+        assert!(!names_an_archive(Path::new("/backups")));
+        assert!(!names_an_archive(Path::new("backups/radicle")));
+        assert!(!names_an_archive(Path::new("/tmp")));
     }
 
     #[test]
