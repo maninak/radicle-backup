@@ -28,6 +28,14 @@ impl Tool {
         }
     }
 
+    /// Any other program on PATH, with no Radicle home to point it at.
+    pub fn on_path(program: &str) -> Self {
+        Self {
+            program: program.to_string(),
+            home: None,
+        }
+    }
+
     /// `git`, which needs no Radicle home of its own.
     pub fn git() -> Self {
         Self {

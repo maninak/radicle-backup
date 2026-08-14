@@ -33,7 +33,7 @@ pub struct Cli {
 }
 
 /// The flags that shape an archive, and so mean nothing to any other verb.
-const CREATE_ONLY: [&str; 9] = [
+const CREATE_ONLY: [&str; 10] = [
     "output",
     "tier",
     "repos",
@@ -43,6 +43,7 @@ const CREATE_ONLY: [&str; 9] = [
     "stop_node",
     "with_node_db",
     "keep",
+    "dry_run",
 ];
 
 /// Parse the command line, then enforce the one rule clap cannot state here.
@@ -146,8 +147,19 @@ pub enum Command {
     /// Check that an archive is complete, readable and holds the identity it claims.
     Verify(Verify),
 
+    /// List the archives of this identity, newest first.
+    #[command(visible_alias = "list")]
+    Ls(Ls),
+
     /// Show what is inside an archive.
-    List(Target),
+    #[command(visible_alias = "inspect")]
+    Show(Target),
+
+    /// Delete older archives of this identity, keeping the newest few.
+    Prune(Prune),
+
+    /// Take an archive automatically, on a timer.
+    Schedule(Schedule),
 
     /// Report how recoverable this identity currently is.
     Doctor(Doctor),
@@ -208,13 +220,68 @@ pub struct Create {
     /// Delete older archives of this identity in the output directory, keeping this many.
     #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: Option<usize>,
+
+    /// Say what would be carried, and how much of it, without writing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct Ls {
+    /// Where to look. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
+    #[arg(long, short = 'd', value_name = "PATH", env = "RAD_BACKUP_DIR")]
+    pub dir: Option<PathBuf>,
+
+    /// Caught rather than rejected, so that naming an archive here is answered with the verb
+    /// that does what was meant instead of with a usage dump.
+    #[arg(value_name = "ARCHIVE", hide = true)]
+    pub mistaken: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct Prune {
+    /// How many of the newest archives to keep.
+    #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
+    pub keep: usize,
+
+    /// Where to prune. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
+    #[arg(long, short = 'd', value_name = "PATH")]
+    pub dir: Option<PathBuf>,
+
+    /// List what would be deleted, and delete nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct Schedule {
+    /// How often to take one: `daily`, `weekly`, `hourly`, or any systemd calendar
+    /// expression such as `Mon,Thu 04:00`.
+    #[arg(long, value_name = "WHEN", default_value = "daily")]
+    pub every: String,
+
+    /// Where the scheduled run should write its archives.
+    #[arg(long, short = 'o', value_name = "PATH", env = "RAD_BACKUP_DIR")]
+    pub output: Option<PathBuf>,
+
+    /// How many archives the scheduled run should keep.
+    #[arg(long, value_name = "N")]
+    pub keep: Option<usize>,
+
+    /// Turn the timer off again. The unit files are left in place.
+    #[arg(long, conflicts_with_all = ["every", "output", "keep"])]
+    pub off: bool,
+
+    /// Say whether it is on, and when it next runs, without changing anything.
+    #[arg(long, conflicts_with_all = ["every", "output", "keep", "off"])]
+    pub status: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Target {
-    /// The archive to read.
+    /// The archive to read. Defaults to the newest one this tool knows about.
     #[arg(value_name = "ARCHIVE")]
-    pub archive: PathBuf,
+    pub archive: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]

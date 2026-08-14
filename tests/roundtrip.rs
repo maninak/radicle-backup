@@ -416,10 +416,10 @@ fn a_state_archive_carries_the_paperwork_but_not_the_repositories() {
     let archive = only_archive(&backups);
 
     let out = fixture.run(
-        &["list", "--json", &archive.to_string_lossy()],
+        &["show", "--json", &archive.to_string_lossy()],
         &fixture.home(),
     );
-    assert_success(&out, "listing the archive");
+    assert_success(&out, "showing the archive");
     let manifest: serde_json::Value =
         serde_json::from_str(&stdout(&out)).expect("--json prints json");
 
@@ -500,5 +500,109 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
         stderr(&out).contains("a backup exists"),
         "a restored home should know its archive: {}",
         stderr(&out)
+    );
+}
+
+#[test]
+fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
+    let fixture = Fixture::create("newest");
+    let backups = fixture.path("backups");
+    let dir = backups.to_string_lossy().into_owned();
+
+    let out = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    assert_success(&out, "taking the first archive");
+    // The name carries a whole-second stamp, so two archives need a second between them.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fixture.advance();
+    let out = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    assert_success(&out, "taking the second archive");
+
+    let mut archives: Vec<PathBuf> = std::fs::read_dir(&backups)
+        .expect("the backup directory is readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.to_string_lossy().ends_with(".age"))
+        .collect();
+    archives.sort();
+    assert_eq!(archives.len(), 2, "two archives should exist");
+    let newest = archives[1].to_string_lossy().into_owned();
+
+    // RAD_BACKUP_DIR is how a command with no argument knows where to look.
+    let out = fixture.command(&["show", "--json"], &fixture.home())
+        .env("RAD_BACKUP_DIR", &dir)
+        .output()
+        .expect("rad-backup runs");
+    assert_success(&out, "showing the newest archive");
+    assert!(
+        stderr(&out).contains(&newest),
+        "the archive it chose must be named on stderr: {}",
+        stderr(&out)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("--json prints json");
+    let shown = manifest["created"].as_str().expect("a created stamp");
+
+    let out = fixture.command(&["show", "--json", &archives[0].to_string_lossy()], &fixture.home())
+        .output()
+        .expect("rad-backup runs");
+    let older: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("--json prints json");
+    assert!(
+        shown > older["created"].as_str().expect("a created stamp"),
+        "the newest archive is the one that should have been chosen"
+    );
+}
+
+#[test]
+fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
+    let fixture = Fixture::create("prune");
+    let backups = fixture.path("backups");
+    let dir = backups.to_string_lossy().into_owned();
+
+    for _ in 0..2 {
+        let out = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+        assert_success(&out, "taking an archive");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    // A file this tool did not write, and one belonging to another identity.
+    let bystander = backups.join("holiday-photos.tar.zst");
+    let other = backups.join("someone-z6MkvAFBkdph-20200101T000000Z.tar.zst.age");
+    std::fs::write(&bystander, b"not an archive").expect("the fixture file is writable");
+    std::fs::write(&other, b"another identity").expect("the fixture file is writable");
+
+    let out = fixture.run(&["prune", "--keep", "1", "--dir", &dir, "--yes"], &fixture.home());
+    assert_success(&out, "pruning");
+
+    let left: Vec<String> = std::fs::read_dir(&backups)
+        .expect("the backup directory is readable")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with(".README.txt"))
+        .collect();
+    assert!(bystander.exists(), "a file this tool never wrote must survive");
+    assert!(other.exists(), "another identity's archive must survive");
+    assert_eq!(
+        left.iter().filter(|name| name.starts_with("fixture-")).count(),
+        1,
+        "exactly one archive of this identity should be left: {left:?}"
+    );
+}
+
+#[test]
+fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
+    let fixture = Fixture::create("rehearsal");
+    let backups = fixture.path("backups");
+    let dir = backups.to_string_lossy().into_owned();
+
+    let out = fixture.run(&["--dry-run", "--tier", "full", "--output", &dir], &fixture.home());
+    assert_success(&out, "rehearsing a backup");
+    assert!(
+        stderr(&out).contains("nothing was written"),
+        "a dry run must say that it wrote nothing: {}",
+        stderr(&out)
+    );
+    assert!(
+        !backups.exists() || std::fs::read_dir(&backups).into_iter().flatten().count() == 0,
+        "a dry run must leave the output directory empty"
     );
 }

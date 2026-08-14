@@ -68,17 +68,24 @@ rad backup --repos all --stop-node      # everything in storage, with the node s
 rad backup --stdout | ssh box 'cat > radicle.tar.zst.age'   # straight to somewhere else
 rad backup --keep 7                     # delete this identity's older archives, keep the newest 7
 
+rad backup --dry-run                    # what it would carry, and roughly how big, writing nothing
+rad backup schedule --output ~/backups  # and never think about it again
+
 rad backup doctor                       # what you would lose right now
 rad backup diff                         # has anything changed since the last archive?
-rad backup list <archive>               # what is inside one, without unpacking it
-rad backup verify <archive>             # do its bytes still match what it says they are
+rad backup ls                           # which archives exist, newest first
+rad backup show                         # what is inside the newest one, without unpacking it
+rad backup verify                       # do its bytes still match what it says they are
 rad backup verify --deep <archive>      # ...and does it actually restore the identity it claims
 rad backup restore <archive>            # put it back
 rad backup move <archive-path>          # move this identity to another machine, safely
 rad backup paper                        # a printable recovery sheet, for the drawer
+rad backup prune --keep 7               # delete the older ones, keeping the newest 7
 ```
 
-There is no `--dry-run`. `doctor` and `diff` are the read-only verbs, and `verify` proves an archive without touching anything.
+**Every command that takes an archive can be given none**, and then acts on the newest archive of this identity it can find, saying on stderr which one that was. It looks in `RAD_BACKUP_DIR`, then wherever the last archive actually went. Naming a path is always allowed and always wins.
+
+`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped.
 
 Every knob that is not a one-off is an environment variable, so a run is configured the way `rad` itself is:
 
@@ -269,6 +276,16 @@ rad backup diff || rad backup      # take a new archive only when something chan
 
 It exits `0` when nothing has moved and `3` when something has: a new repository, one that is gone, one whose signed refs have moved on, or a policy change.
 
+## Keeping the pile tidy
+
+```sh
+rad backup ls                       # every archive of this identity, newest first
+rad backup prune --keep 7           # delete the rest, after showing you what goes
+rad backup prune --keep 7 --dry-run # ...or just show it
+```
+
+Only files this tool named, for this identity, in that one directory are ever considered. Another identity's archives and anything else in the folder are not candidates for deletion, whatever `--keep` says. `--keep` on a backup run applies the same rule at the same moment the new archive lands.
+
 ## Moving to another machine
 
 ```sh
@@ -301,21 +318,34 @@ The sheet with `--words` on it *is* the key: it is not protected by anything, an
 
 ## Running it on a schedule
 
-A systemd user timer is installed with the package and does nothing until you turn it on:
+The backup people lose their identity without is the one they meant to take last month. One command sets up a systemd user timer, writes the environment it needs, and turns it on:
 
 ```sh
-systemctl --user enable --now rad-backup.timer      # daily, a random minute in the hour after 03:00
-systemctl --user list-timers rad-backup.timer
-journalctl --user -u rad-backup.service -n 50
+rad backup schedule --output /mnt/backups/radicle --keep 14 \
+                    --passphrase-file ~/.config/rad-backup/passphrase
+
+rad backup schedule --status        # is it on, when does it next run, did the last one fail
+rad backup schedule --off           # stop, leaving the unit files in place
+rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 ```
 
-It reads its settings from `~/.config/rad-backup/env`:
+It refuses to enable a timer that cannot work: an unattended run has nobody to type a passphrase at, so a passphrase file (or `RAD_BACKUP_PASSPHRASE` in the timer's environment) is not optional. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
+
+The units it writes are `~/.config/systemd/user/rad-backup.{service,timer}`, and their settings live in `~/.config/rad-backup/env`:
 
 ```sh
 RAD_BACKUP_DIR=/mnt/backups/radicle
 RAD_BACKUP_PASSPHRASE_FILE=/home/you/.config/rad-backup/passphrase
 RAD_BACKUP_TIER=state
 RAD_BACKUP_KEEP=14
+```
+
+Edit either by hand and they will not be overwritten: anything without this tool's marker line at the top is left alone. The package also ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up themselves:
+
+```sh
+systemctl --user enable --now rad-backup.timer
+systemctl --user list-timers rad-backup.timer
+journalctl --user -u rad-backup.service -n 50
 ```
 
 Or with cron, if you prefer:
@@ -355,9 +385,9 @@ Unattended-Upgrade::Allowed-Origins {
 | `RAD_BACKUP_SCRATCH_DIR` | Where working files go: database snapshots, fresh bundles, and the staging copy a restore is checked in. Defaults to beside whatever the command is producing. |
 | `XDG_STATE_HOME` | Where this tool remembers what it last wrote. Holds no secrets. |
 
-## What this does not do
+## What this tool doesn't do
 
-- **It is not a node backup for a public seed.** `--repos all` will happily archive twelve thousand repositories, and you will be happier with `btrfs send`, ZFS snapshots, or [radicle-seed-prune](https://github.com/maninak/radicle-seed-prune) and a filesystem-level tool.
+- **It is not a node backup for a public seed.** `--repos all` will happily archive twelve thousand repositories, and you will be happier with `btrfs send`, ZFS snapshots, or [radicle-seed-prune](https://app.radicle.at/nodes/seed.radicle.at/rad:zxvTkxzouwrYFwycnsctrMT3iM2E) and a filesystem-level tool.
 - **It does not rotate keys.** Radicle has no key rotation to drive. A compromised key needs a new identity and a delegate change.
 - **It does not talk to any service.** No telemetry, no upload, no phone home. Where the archive goes is entirely your business.
 
@@ -375,10 +405,14 @@ Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.
 
 ## Support
 
-Issues and questions: [GitHub issues](https://github.com/maninak/radicle-backup/issues), or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com).
+Issues live on Radicle: `rad issue open` in a clone of this repository, or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com). Patches are welcome either as `rad patch` or as a GitHub pull request.
 
-If this tool ever saves your identity, [that is what the donate button is for](https://liberapay.com/maninak/donate).
+If this tool ever saves your identity, or just lets you sleep at night knowing it could, [that is what the donate button is for](https://liberapay.com/maninak/donate).
 
 ## License
 
 MIT OR Apache-2.0, at your option. Permissive on purpose: a backup tool that people cannot bundle, fork, repackage or vendor into a distribution is a backup tool that fewer people have when they need it.
+
+---
+
+[![A radicle.tools artifact - homegrown apps and tools for Radicle](https://radicle.tools/badge/artifact.svg)](https://radicle.tools)

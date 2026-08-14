@@ -105,7 +105,8 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
 /// carries the digest of every entry as written, which is a claim that can only be made once
 /// the entries exist.
 pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
-    let passphrase = if crypt::looks_encrypted(&args.archive)? {
+    let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
+    let passphrase = if crypt::looks_encrypted(&archive)? {
         Some(crypt::passphrase(
             crypt::PASSPHRASE_ENV,
             ctx.global.passphrase_file.as_deref(),
@@ -116,8 +117,8 @@ pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
     } else {
         None
     };
-    let reader = Reader::open(&args.archive, passphrase.as_ref(), ctx.identity_files())?;
-    Ok(reader.scan(&args.archive)?.manifest)
+    let reader = Reader::open(&archive, passphrase.as_ref(), ctx.identity_files())?;
+    Ok(reader.scan(&archive)?.manifest)
 }
 
 fn truncate(text: &str, width: usize) -> String {

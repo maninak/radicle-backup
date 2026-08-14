@@ -23,6 +23,9 @@ pub struct Report {
     pub manifest: Manifest,
     pub problems: Vec<String>,
     pub checks: Vec<(String, bool)>,
+    /// The archive that was checked, which is not always the one the caller named: with no
+    /// argument this is whichever one was newest.
+    pub archive: std::path::PathBuf,
 }
 
 impl Report {
@@ -36,7 +39,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
 
     if ctx.global.json {
         ctx.term.print_json(&serde_json::json!({
-            "archive": args.target.archive.display().to_string(),
+            "archive": report.archive.display().to_string(),
             "passed": report.passed(),
             "checks": report.checks.iter()
                 .map(|(name, ok)| serde_json::json!({"check": name, "passed": ok}))
@@ -61,7 +64,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
         if report.passed() {
             term.ok(&format!(
                 "{} is complete: {} entries, {}",
-                args.target.archive.display(),
+                report.archive.display(),
                 report.manifest.entries.len(),
                 term::bytes(report.manifest.total_bytes())
             ));
@@ -71,7 +74,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
         } else {
             term.fail(&format!(
                 "{} has {} problem(s)",
-                args.target.archive.display(),
+                report.archive.display(),
                 report.problems.len()
             ));
         }
@@ -85,7 +88,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
 }
 
 pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
-    let archive = &args.target.archive;
+    let archive = &crate::cmd::resolve_archive(ctx, args.target.archive.as_deref())?;
     let passphrase = if crypt::looks_encrypted(archive)? {
         Some(crypt::passphrase(
             crypt::PASSPHRASE_ENV,
@@ -134,6 +137,7 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
         manifest: scan.manifest,
         problems,
         checks,
+        archive: archive.clone(),
     })
 }
 

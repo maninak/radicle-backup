@@ -4,6 +4,7 @@
 //! binary is all it takes for `rad backup` to work.
 
 mod archive;
+mod archives;
 mod cli;
 mod cmd;
 mod crypt;
@@ -99,7 +100,10 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
         Some(Command::Create(args)) => cmd::backup::run(&ctx, args).map(|_| ExitCode::SUCCESS),
         Some(Command::Restore(args)) => cmd::restore::run(&ctx, args),
         Some(Command::Verify(args)) => cmd::verify::run(&ctx, args),
-        Some(Command::List(args)) => cmd::list::run(&ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Ls(args)) => cmd::ls::run(&ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Show(args)) => cmd::show::run(&ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Prune(args)) => cmd::prune::run(&ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Schedule(args)) => cmd::schedule::run(&ctx, args).map(|()| ExitCode::SUCCESS),
         Some(Command::Doctor(args)) => cmd::doctor::run(&ctx, args),
         Some(Command::Paper(args)) => cmd::paper::run(&ctx, args).map(|()| ExitCode::SUCCESS),
         Some(Command::Migrate(args)) => cmd::migrate::run(&ctx, args).map(|()| ExitCode::SUCCESS),

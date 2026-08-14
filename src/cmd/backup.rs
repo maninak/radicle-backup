@@ -81,6 +81,11 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
     )?;
     warnings.extend(inventory.warnings.iter().cloned());
 
+    if args.dry_run {
+        rehearse(ctx, &inventory, tier, selection, &warnings);
+        return Ok(None);
+    }
+
     let encryption = encryption_for(ctx, args)?;
     let now = jiff::Timestamp::now();
     let destination = destination(args, &identity, home.alias()?.as_deref(), &now, &encryption)?;
@@ -221,6 +226,71 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
 
     report(ctx, &manifest, &inventory, archived, path.as_deref())?;
     Ok(path)
+}
+
+/// Say what a run would carry, and how much of it, without writing anything.
+///
+/// The sizes are what the repositories occupy in storage, not what the bundles will weigh: a
+/// bundle is compressed and holds only reachable objects, so the real archive comes out
+/// smaller. An over-estimate is the safe direction for "will this fit".
+fn rehearse(
+    ctx: &Ctx,
+    inventory: &Inventory,
+    tier: Tier,
+    selection: RepoSelection,
+    warnings: &[String],
+) {
+    let term = &ctx.term;
+    term.headline(&format!(
+        "a {} archive, carrying {} repositories, would hold:",
+        tier.as_str(),
+        selection.as_str()
+    ));
+    term.blank();
+
+    let mut total = 0;
+    for record in &inventory.records {
+        if !inventory.selected.contains(&record.rid) {
+            continue;
+        }
+        let bytes = directory_size(&ctx.home.repository_path(&record.rid));
+        total += bytes;
+        term.print(&format!(
+            "  {:<40} {:>9}{}",
+            record.display_name(),
+            term::bytes(bytes),
+            if record.is_private() { "  private" } else { "" }
+        ));
+    }
+    if inventory.selected.is_empty() {
+        term.print("  no repositories, only the identity and its paperwork");
+    }
+    term.blank();
+    term.ok(&format!(
+        "{} selected, about {} of git storage before compression",
+        term::count(inventory.selected.len(), "repository", "repositories"),
+        term::bytes(total)
+    ));
+    for warning in warnings {
+        term.warn(warning);
+    }
+    term.hint("nothing was written; drop --dry-run to take it");
+}
+
+/// What a directory occupies, following no symlinks and crossing no filesystems it was not
+/// pointed at. Used only for the estimate a dry run prints.
+fn directory_size(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map(|meta| meta.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Record what was written, for `doctor` and `diff` to read later.
@@ -518,45 +588,21 @@ fn write_sidecar(
 
 /// Delete older archives of the same identity, keeping the newest `keep` of them.
 ///
-/// Only files this tool named, for this identity, in this directory are ever considered. A
-/// retention rule that could reach anything else is a deletion bug waiting for a bad argument.
+/// The same rule `rad backup prune` applies, from the same listing, so a retention policy
+/// cannot mean two different things depending on which command enforced it.
 fn prune(ctx: &Ctx, current: &Path, manifest: &Manifest, keep: usize) -> Result<()> {
     let Some(directory) = current.parent() else {
         return Ok(());
     };
-    let short: String = manifest.identity.node_id.chars().take(12).collect();
-    let alias = manifest.identity.alias.as_deref().unwrap_or("radicle");
-    let prefix = format!("{alias}-{short}-");
-
-    let mut archives: Vec<PathBuf> = std::fs::read_dir(directory)
-        .map_err(|e| Error::io(directory, e))?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            name.starts_with(&prefix)
-                && (name.ends_with(".tar.zst") || name.ends_with(".tar.zst.age"))
-        })
-        .collect();
-    // The name carries a sortable UTC stamp, so sorting by name is sorting by age.
-    archives.sort();
-
-    if archives.len() <= keep {
-        return Ok(());
-    }
-    for path in &archives[..archives.len() - keep] {
-        if path == current {
+    let archives = crate::archives::in_dir(directory, &manifest.identity.node_id)?;
+    for archive in archives.iter().skip(keep) {
+        if archive.path == current {
             continue;
         }
-        std::fs::remove_file(path).map_err(|e| Error::io(path, e))?;
-        let _ = std::fs::remove_file(sidecar_path(path));
-        ctx.term.step(&format!(
-            "removed the older archive {}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ));
+        std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
+        let _ = std::fs::remove_file(sidecar_path(&archive.path));
+        ctx.term
+            .step(&format!("removed the older archive {}", archive.name()));
     }
     Ok(())
 }
@@ -717,6 +763,7 @@ mod tests {
             stop_node: false,
             with_node_db: false,
             keep: None,
+            dry_run: false,
         }
     }
 }

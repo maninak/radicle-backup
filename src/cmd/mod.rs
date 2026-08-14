@@ -3,10 +3,13 @@
 pub mod backup;
 pub mod diff;
 pub mod doctor;
-pub mod list;
+pub mod ls;
 pub mod migrate;
 pub mod paper;
+pub mod prune;
 pub mod restore;
+pub mod schedule;
+pub mod show;
 pub mod verify;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +31,68 @@ impl Ctx {
     pub fn identity_files(&self) -> &[PathBuf] {
         &self.global.identity
     }
+
+    /// The node id of the identity being worked on, for finding its archives.
+    pub fn node_id(&self) -> Result<String> {
+        self.home.require()?;
+        Ok(crate::key::Identity::read(self.home.public_key())?.node_id())
+    }
+}
+
+/// Where this identity's archives are expected to live.
+///
+/// In order: what the caller said, then RAD_BACKUP_DIR, then wherever the last archive
+/// actually went, then the working directory. The remembered directory matters most: someone
+/// who has taken a backup once has already answered this question, and asking again by way of
+/// an empty listing is a worse answer than using what they said.
+pub fn archive_dir(
+    ctx: &Ctx,
+    given: Option<&Path>,
+    record: Option<&crate::state::Record>,
+) -> PathBuf {
+    if let Some(dir) = given {
+        return dir.to_path_buf();
+    }
+    if let Some(dir) = std::env::var_os("RAD_BACKUP_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(parent) = record
+        .and_then(|record| record.archive.as_ref())
+        .map(PathBuf::from)
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        return parent;
+    }
+    let _ = ctx;
+    PathBuf::from(".")
+}
+
+/// The archive a command was pointed at, or the newest one of this identity that can be
+/// found. Says which it chose, because a command that reads a file the user did not name has
+/// to be obvious about which file that was.
+pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = given {
+        return Ok(path.to_path_buf());
+    }
+    let node_id = ctx.node_id()?;
+    let record = crate::state::read(&crate::key::Identity::read(ctx.home.public_key())?.did())?;
+    let directory = archive_dir(ctx, None, record.record());
+    let found = crate::archives::newest(&directory, &node_id)?;
+    let Some(archive) = found else {
+        return Err(Error::refused(
+            format!(
+                "no archive was named, and none of this identity is in {}",
+                directory.display()
+            ),
+            "name one, or set RAD_BACKUP_DIR to where you keep them",
+        ));
+    };
+    ctx.term.step(&format!(
+        "using the newest archive: {}",
+        archive.path.display()
+    ));
+    Ok(archive.path)
 }
 
 /// A directory for working files, removed when it goes out of scope.

@@ -37,6 +37,7 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         stop_node: false,
         with_node_db: true,
         keep: None,
+        dry_run: false,
     };
     let archive = backup::run(ctx, &create)?.ok_or_else(|| {
         Error::refused(
@@ -52,7 +53,7 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         ctx,
         &Verify {
             target: crate::cli::Target {
-                archive: archive.clone(),
+                archive: Some(archive.clone()),
             },
             deep: true,
         },
