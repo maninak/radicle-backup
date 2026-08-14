@@ -1,0 +1,7 @@
+/target
+# Archives and recovery sheets are the one kind of file that must never be committed.
+*.tar.zst
+*.tar.zst.age
+*.partial
+*.README.txt
+recovery-sheet*.html

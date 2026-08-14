@@ -1,0 +1,131 @@
+//! Running the two programs this tool delegates to, `rad` and `git`.
+//!
+//! Delegating instead of linking is deliberate. The user's own `rad` and `git` are by
+//! definition the right versions for the home being backed up, so an archive taken by an old
+//! build of this tool still reads a new storage format, and a new build still reads an old
+//! one. Revisit when heartwood publishes a stable on-disk format guarantee that makes linking
+//! `radicle` safe across versions.
+
+use std::ffi::OsStr;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+use crate::error::{Error, Result};
+
+/// A program we shell out to, with the environment it needs to see.
+pub struct Tool {
+    program: String,
+    home: Option<String>,
+}
+
+impl Tool {
+    /// `rad`, pointed at a specific Radicle home. Honours `RAD` so an operator can name a
+    /// specific binary, the same way radicle-seed-prune does.
+    pub fn rad(home: &Path) -> Self {
+        Self {
+            program: std::env::var("RAD").unwrap_or_else(|_| "rad".to_string()),
+            home: Some(home.to_string_lossy().into_owned()),
+        }
+    }
+
+    /// `git`, which needs no Radicle home of its own.
+    pub fn git() -> Self {
+        Self {
+            program: std::env::var("GIT").unwrap_or_else(|_| "git".to_string()),
+            home: None,
+        }
+    }
+
+    /// Run and capture stdout, failing when the program does.
+    pub fn output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<String> {
+        let out = self.raw(args)?;
+        if !out.status.success() {
+            return Err(self.failure(args, &out));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Run and capture stdout, treating a non-zero exit as "no answer" rather than as a
+    /// failure. For queries whose absence is a legitimate result, such as a ref that does not
+    /// exist.
+    pub fn raw_output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
+        let out = self.raw(args)?;
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    }
+
+    /// Run and report only whether it succeeded. For probes where a non-zero exit is an
+    /// answer rather than an error, such as `git merge-base --is-ancestor`.
+    pub fn succeeds<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<bool> {
+        Ok(self.raw(args)?.status.success())
+    }
+
+    /// Run with stdout and stderr inherited, for commands whose own output is the point.
+    pub fn passthrough<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<bool> {
+        let status = self
+            .command(args)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .map_err(|source| Error::Spawn {
+                program: self.program.clone(),
+                source,
+            })?;
+        Ok(status.success())
+    }
+
+    pub fn is_available(&self) -> bool {
+        Command::new(&self.program)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn command<S: AsRef<OsStr>>(&self, args: &[S]) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.args(args);
+        if let Some(home) = &self.home {
+            cmd.env("RAD_HOME", home);
+        }
+        // Git must not read the invoking user's aliases, hooks or pager: this tool parses
+        // git's output, and a `[pager] log = less` in someone's config would hang the run.
+        cmd.env("GIT_PAGER", "cat");
+        cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd
+    }
+
+    fn raw<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Output> {
+        self.command(args)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|source| Error::Spawn {
+                program: self.program.clone(),
+                source,
+            })
+    }
+
+    fn failure<S: AsRef<OsStr>>(&self, args: &[S], out: &Output) -> Error {
+        Error::Command {
+            command: self.display(args),
+            status: match out.status.code() {
+                Some(code) => format!("exit code {code}"),
+                None => "a signal".to_string(),
+            },
+            stderr: String::from_utf8_lossy(&out.stderr).trim_end().to_string(),
+        }
+    }
+
+    fn display<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
+        let mut line = self.program.clone();
+        for arg in args {
+            line.push(' ');
+            line.push_str(&arg.as_ref().to_string_lossy());
+        }
+        line
+    }
+}

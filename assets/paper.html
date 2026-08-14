@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radicle recovery sheet: {{ALIAS}}</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 18mm;
+    background: #fff;
+    color: #111;
+    font: 11pt/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, sans-serif;
+  }
+  h1 { font-size: 20pt; margin: 0 0 2mm; letter-spacing: -0.01em; }
+  h2 { font-size: 11pt; margin: 8mm 0 2mm; text-transform: uppercase; letter-spacing: 0.08em; }
+  .lede { margin: 0 0 6mm; color: #444; max-width: 150mm; }
+  .facts { border-collapse: collapse; width: 100%; margin-bottom: 6mm; }
+  .facts th { text-align: left; width: 30mm; font-weight: 600; padding: 1.5mm 0; vertical-align: top; }
+  .facts td { padding: 1.5mm 0; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+              font-size: 9.5pt; word-break: break-all; }
+  .caution { border: 1.5pt solid #111; padding: 4mm; margin: 0 0 6mm; font-weight: 600; }
+  .split { display: flex; gap: 8mm; align-items: flex-start; }
+  .qr { flex: 0 0 62mm; }
+  .qr svg { width: 62mm; height: 62mm; display: block; }
+  .qr figcaption { font-size: 8.5pt; color: #555; margin-top: 2mm; }
+  .secret { flex: 1 1 auto; min-width: 0; }
+  pre.key { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 7pt;
+            line-height: 1.35; white-space: pre-wrap; word-break: break-all; margin: 0;
+            border: 0.5pt solid #bbb; padding: 3mm; }
+  ol.words { columns: 3; column-gap: 8mm; margin: 0; padding-left: 7mm;
+             font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11pt; line-height: 1.9; }
+  ol.words li { break-inside: avoid; }
+  .how { font-size: 9.5pt; }
+  .how ol { padding-left: 5mm; }
+  .how code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 9pt;
+              background: #f2f2f2; padding: 0.4mm 1mm; }
+  footer { margin-top: 8mm; padding-top: 3mm; border-top: 0.5pt solid #ccc;
+           font-size: 8.5pt; color: #666; display: flex; justify-content: space-between; }
+  @page { size: A4; margin: 12mm; }
+  @media print { body { padding: 0; } .split { break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<h1>Radicle recovery sheet</h1>
+<p class="lede">
+  This sheet holds the private key of a Radicle identity. That key is the identity: it signs
+  every commit, patch, issue and comment made under the name below, and nothing and nobody can
+  reissue it. Keep this sheet, and keep it out of sight.
+</p>
+
+<table class="facts">
+  <tr><th>Alias</th><td>{{ALIAS}}</td></tr>
+  <tr><th>Identity</th><td>{{DID}}</td></tr>
+  <tr><th>Fingerprint</th><td>{{FINGERPRINT}}</td></tr>
+  <tr><th>Printed</th><td>{{CREATED}}</td></tr>
+</table>
+
+<p class="caution">{{CAUTION}}</p>
+
+<h2>The key, as {{HEADING}}</h2>
+<div class="split">
+  <figure class="qr">
+    {{QR}}
+    <figcaption>Same content as the text beside it. Scan it, or type it.</figcaption>
+  </figure>
+  <div class="secret">{{SECRET}}</div>
+</div>
+
+<h2>How to use this sheet</h2>
+<div class="how">
+  <ol>
+    <li>Install Radicle, then <code>rad-backup</code>, on the machine you are recovering to.</li>
+    <li>If this sheet shows words: run <code>rad-backup restore --words</code> and type them in.
+        It will rebuild the key and ask you for a new passphrase.</li>
+    <li>If this sheet shows a key file: scan or retype it into
+        <code>$RAD_HOME/keys/radicle</code>, then run <code>chmod 600</code> on it, and derive
+        the public half with
+        <code>ssh-keygen -y -f $RAD_HOME/keys/radicle &gt; $RAD_HOME/keys/radicle.pub</code>.</li>
+    <li>Check that you got the right one: <code>ssh-keygen -l -f $RAD_HOME/keys/radicle.pub</code>
+        should print the fingerprint above.</li>
+    <li>Start the node with <code>rad node start</code>. Your public repositories come back from
+        the network with <code>rad clone</code>. Private ones do not: only your own archives
+        have those.</li>
+  </ol>
+  <p>
+    Never run two nodes with this key at the same time. They will sign conflicting histories
+    and other people's nodes will see your identity fork.
+  </p>
+</div>
+
+<footer>
+  <span>rad-backup {{TOOL}}</span>
+  <span>radicle.tools</span>
+</footer>
+
+</body>
+</html>
