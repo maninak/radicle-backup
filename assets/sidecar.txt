@@ -13,13 +13,14 @@ how to open it, without needing rad-backup to tell them.
 Open it with rad-backup:
 
     rad-backup verify  {{FILE}}     # prove it is complete and readable
-    rad-backup list    {{FILE}}     # see what is inside
+    rad-backup show    {{FILE}}     # see what is inside
     rad-backup restore {{FILE}}     # put it back
 
 Open it without rad-backup:
 
     {{MANUAL}}
 
-Then read RESTORE.md inside, which restores the whole home with git and cp alone.
+Then read RESTORE.md inside: the full restore procedure, needing only git and a POSIX
+shell (jq optional).
 
 The archive holds the private key of the identity above. Treat it like the key itself.

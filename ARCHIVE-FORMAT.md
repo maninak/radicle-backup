@@ -1,6 +1,6 @@
 # The archive format, version 1
 
-This document is the specification. It exists so that another program, or a person with a shell, can read an archive without this one. That is a promise the project makes rather than a side effect: an archive readable only by the program that wrote it is a bet on that program still existing when you need it.
+This document is the specification: enough for another program, or a person with a shell, to read an archive without this one.
 
 ## Layers
 
@@ -11,7 +11,7 @@ This document is the specification. It exists so that another program, or a pers
 
 - **age**: [age](https://age-encryption.org) v1, either an `scrypt` recipient (a passphrase) or one or more `X25519`/`ssh` recipients (`--recipient`). The file begins with the ASCII bytes `age-encryption.org/`, which is how a reader decides whether to decrypt rather than trusting the file name.
 - **zstd**: a standard zstd stream, level 10.
-- **tar**: a GNU tar stream. Entries are regular files only; no directories, symlinks, hardlinks or device nodes are ever written, and a reader must not create any. Every header carries `uid=0`, `gid=0` and `mtime=0` so that two archives of an unchanged home are byte-identical, which is what lets restic and borg deduplicate them.
+- **tar**: a GNU tar stream. Entries are regular files only; no directories, symlinks, hardlinks or device nodes are ever written, and a reader must not create any. Every header carries `uid=0`, `gid=0` and `mtime=0`, so an entry's bytes do not depend on who wrote it or when. The archive as a whole still differs between runs: `manifest.json` carries the creation time, and encryption adds a fresh salt.
 
 Nothing in the format depends on a `rad` version. An archive written next to Radicle 1.10 restores next to Radicle 2.x, because it carries the files and the git objects rather than a serialisation of anyone's internal types.
 
@@ -35,7 +35,7 @@ Nothing in the format depends on a `rad` version. An archive written next to Rad
 
 `<rid>` is the repository identifier without its `rad:` prefix.
 
-The manifest is written after every other entry, so the digests in it describe what was actually written rather than what was intended. A reader that streams the archive therefore learns what it should have seen only at the end, which is the correct order for verification: read everything, hash as you go, compare at the close.
+The manifest is written after every other entry, so the digests in it describe what was actually written rather than what was intended. A streaming reader learns the expected digests only at the end: hash as you go, compare at the close.
 
 ## `manifest.json`
 
@@ -49,16 +49,16 @@ Keys are camelCase. Unknown keys must be ignored, and unknown values of `tier` a
   "tier": "state",
   "repoSelection": "private",
   "identity": {
-    "did": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
-    "nodeId": "z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
-    "alias": "maninak",
+    "did": "did:key:z6Mk<nid>",
+    "nodeId": "z6Mk<nid>",
+    "alias": "alice",
     "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... radicle",
-    "fingerprint": "SHA256:tAXFyTXI8xtDaujAEcwJslAYc9/6FKcUkd2Lw0xDhPo",
+    "fingerprint": "SHA256:<fingerprint>",
     "keyEncrypted": true
   },
   "source": {
-    "host": "hades",
-    "radHome": "/home/maninak/.radicle",
+    "host": "workstation",
+    "radHome": "/home/alice/.radicle",
     "radVersion": "rad 1.10.1 (71f39fb195068d598d75f7cd606d41a4f8ad4b10)",
     "gitVersion": "git version 2.43.0",
     "os": "linux"
@@ -69,19 +69,19 @@ Keys are camelCase. Unknown keys must be ignored, and unknown values of `tier` a
   ],
   "repos": [
     {
-      "rid": "rad:z2NrpBPWc7T9yStKMbCfEr4Wt5PYN",
+      "rid": "rad:z<rid>",
       "name": "notes",
       "visibility": "private",
-      "allowed": ["did:key:z6MkjDYUKMUeY58Vtr8..."],
+      "allowed": ["did:key:z6Mk<peer>"],
       "delegate": true,
-      "delegates": ["did:key:z6MkiTBz1ymu..."],
+      "delegates": ["did:key:z6Mk<nid>"],
       "scope": "all",
       "policy": "allow",
-      "head": "refs/namespaces/z6MkiTBz1ymu.../refs/heads/master",
+      "head": "refs/namespaces/z6Mk<nid>/refs/heads/master",
       "refs": 2,
-      "sigrefs": { "z6MkiTBz1ymu...": "e1ad198be4cede66d76015a0291e13288871464d" },
+      "sigrefs": { "z6Mk<nid>": "e1ad198b..." },
       "otherSeeds": 4,
-      "bundle": { "path": "repos/z2Nrp....bundle", "bytes": 726, "sha256": "ba4048a8..." }
+      "bundle": { "path": "repos/z<rid>.bundle", "bytes": 726, "sha256": "ba4048a8..." }
     }
   ],
   "policies": { "seeded": 16, "blockedRepos": 0, "followed": 3, "blockedPeers": 0 },
@@ -92,7 +92,7 @@ Keys are camelCase. Unknown keys must be ignored, and unknown values of `tier` a
 Fields that carry weight:
 
 - **`entries[].sha256`** is over the entry's bytes as stored, uncompressed and unencrypted. It is the whole of verification: an entry listed but absent, an entry present but unlisted, a length that disagrees or a digest that disagrees are all errors.
-- **`repos[].sigrefs`** maps a peer's node id to the object its `refs/rad/sigrefs` pointed at when the archive was taken. This is what makes a restore safe rather than merely complete: comparing it with what the network holds is how divergence is detected before anyone pushes on top of it.
+- **`repos[].sigrefs`** maps a peer's node id to the object its `refs/rad/sigrefs` pointed at when the archive was taken. Comparing it with what the network holds is how a restore detects divergence before anyone pushes on top of it.
 - **`repos[].bundle`** is absent when the repository was described but not carried, which is how a `state` archive keeps an inventory without the data.
 - **`repos[].visibility`** is `public` or `private`, from the repository's identity document; a document with no `visibility` is public, as heartwood reads it. `private` means the open network does not carry it, and `repos[].allowed` lists the peers its owner allowed to hold a copy. That list being empty is what makes a repository unrecoverable without this archive.
 - **`identity.keyEncrypted`** says whether the archived key has a passphrase of its own. When it is `false`, the archive's own encryption is the only thing protecting the identity.
@@ -110,20 +110,20 @@ install -m 644 keys/radicle.pub ~/.radicle/keys/radicle.pub
 install -m 644 config.json ~/.radicle/config.json
 install -m 600 node/policies.db ~/.radicle/node/policies.db
 
-rid=z2NrpBPWc7T9yStKMbCfEr4Wt5PYN
+rid=z<rid>
 git init --bare ~/.radicle/storage/$rid
 git --git-dir ~/.radicle/storage/$rid fetch --force repos/$rid.bundle 'refs/*:refs/*'
 git --git-dir ~/.radicle/storage/$rid symbolic-ref HEAD "$(jq -r '.repos[]|select(.rid|endswith("'$rid'")).head' manifest.json)"
 ```
 
-`restore.sh` inside the archive does exactly this, for every repository, and checks the digests first. Drop `age -d` for a plaintext archive.
+`restore.sh` inside the archive runs this loop for every repository. It does not check digests: compare `sha256sum` output against the manifest by hand, or use `rad-backup verify`. Drop `age -d` for a plaintext archive.
 
 ## Compatibility rules
 
-- **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words rather than failing obscurely halfway through.
+- **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words.
 - **New entries may be added** in a future version 1 archive. A reader must ignore an entry it does not recognise rather than treating it as corruption; the manifest is what decides whether the archive is complete.
 - **Entry paths never change meaning.** If what belongs at `node/policies.db` ever stops being a policy database, it gets a new path and the format version goes up.
-- **The plaintext recovery path never goes away.** Any change that would make an archive unreadable without this tool is out of scope for the project, not merely a breaking change.
+- **The plaintext recovery path never goes away.** Any change that would make an archive unreadable without this tool is out of scope.
 
 ## Version history
 

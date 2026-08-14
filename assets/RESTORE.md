@@ -3,7 +3,7 @@
 This archive was written by `rad-backup` on {{CREATED}}, from `{{RAD_HOME}}` on `{{HOST}}`.
 It holds the identity `{{ALIAS}}` (`{{DID}}`).
 
-You do not need `rad-backup` to restore it. Everything below uses `tar`, `git` and `sqlite3`, and the archive is a plain tar of plain files. That is deliberate: a backup you can only open with one particular program is a backup with a single point of failure.
+You do not need `rad-backup` to restore it. The archive is a plain tar of plain files, and everything below uses `git` and a POSIX shell. `jq` is used to read `manifest.json` and `policies.json`; where it appears, you can read those files by eye instead.
 
 ## 1. Put the identity back
 
@@ -11,9 +11,9 @@ You do not need `rad-backup` to restore it. Everything below uses `tar`, `git` a
 export RAD_HOME="${RAD_HOME:-$HOME/.radicle}"
 mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node"
 
-cp keys/radicle     "$RAD_HOME/keys/radicle"
+# The umask, rather than a chmod afterwards, so the key is never briefly world-readable.
+(umask 077 && cp keys/radicle "$RAD_HOME/keys/radicle")
 cp keys/radicle.pub "$RAD_HOME/keys/radicle.pub"
-chmod 600 "$RAD_HOME/keys/radicle"
 chmod 644 "$RAD_HOME/keys/radicle.pub"
 
 cp config.json "$RAD_HOME/config.json"
@@ -34,6 +34,7 @@ ssh-keygen -l -f "$RAD_HOME/keys/radicle.pub"
 
 ```sh
 cp node/policies.db "$RAD_HOME/node/policies.db"
+cp node/notifications.db "$RAD_HOME/node/notifications.db"    # inbox read state, if present
 ```
 
 If that database refuses to open because Radicle has moved on to a newer schema, use `policies.json` instead, which is the same content as text. Every line of it maps to one command:
@@ -66,7 +67,7 @@ for bundle in repos/*.bundle; do
 done
 ```
 
-`restore.sh`, next to this file, is exactly the above with error handling.
+`restore.sh`, next to this file, is the same procedure with error handling.
 
 ## 4. Before you write anything to a restored repository
 
@@ -80,7 +81,7 @@ So, for every repository you restored and intend to write to:
 rad sync <rid> --fetch     # get what the network has
 ```
 
-If the fetch brings in newer refs of your own, keep those and not the archived ones. `rad-backup restore` does this comparison for you and refuses to continue when the two histories have genuinely diverged.
+If the fetch brings in newer refs of your own, keep those and not the archived ones. `rad-backup restore` does this comparison for you and refuses to continue when the two histories have diverged.
 
 ## 5. One node, one key
 

@@ -86,8 +86,8 @@ own peer history.
 Installed on PATH as rad-backup, it is also reachable as `rad backup`.
 
 An archive is tar inside zstd inside optional age, and carries its own recovery instructions \
-and a shell script that needs only tar, git, sqlite3 and jq. It never needs this program, or \
-a particular version of Radicle, to be read."""
+and a shell script that needs only git and a POSIX shell. It never needs this program, or a \
+particular version of Radicle, to be read."""
 depends = "$auto, git"
 recommends = "age"
 suggests = "radicle-node"

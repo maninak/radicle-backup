@@ -1,8 +1,8 @@
 # Contributing
 
-Patches are welcome either way: `rad patch` against the Radicle repository, or a GitHub pull request. Whichever is in front of you.
+Patches are welcome either way: `rad patch` against the Radicle repository, or a GitHub pull request.
 
-**Issues live on Radicle only.** `rad issue open` in a clone of this repository; GitHub issues are turned off rather than left to rot as a second place people file things and nobody reads. If Radicle is not an option for you, the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com) reaches the same person.
+**Issues live on Radicle only.** `rad issue open` in a clone of this repository; GitHub issues are turned off. If Radicle is not an option for you, the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com) reaches the same person.
 
 ## Before you start
 
@@ -11,14 +11,12 @@ Open an issue for anything that changes behaviour, adds a flag or touches the ar
 ## The bar
 
 ```sh
-cargo clippy --all-targets    # must be silent; the lints are denials, not suggestions
-cargo test                    # unit tests, plus the end-to-end suite in tests/
-cargo fmt
+just check    # cargo fmt --check, then the lints, then the tests: what CI runs, in that order
 ```
 
-CI runs the same three on Linux, macOS and Windows, plus a build of every release target, a two-pass reproducibility check and `nix flake check`. A pull request is ready when they are green and the change carries a test that would have failed without it.
+CI runs those three on Linux, macOS and Windows, plus an MSRV check, a two-pass reproducibility check, `nix build --rebuild`, a Debian package built and linted, and the advisory, action-pin and dependency-age gates. Builds of the cross-compiled release targets run on a tag, not on a pull request. A pull request is ready when CI is green and the change carries a test that would have failed without it.
 
-**Every bug fix gets a test that would have caught the bug.** Prove it is not vacuous: flip what it asserts, watch it go red, put it back. A test that cannot fail reports a safety it is not providing.
+**Every bug fix gets a test that would have caught the bug.** Prove it is not vacuous: flip what it asserts, watch it go red, put it back.
 
 ## Code
 

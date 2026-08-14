@@ -9,9 +9,7 @@
 
 **Back up, restore and move a [Radicle](https://radicle.xyz) identity, node state and repositories. `rad backup`.**
 
-Your Radicle identity is 444 bytes in `~/.radicle/keys/radicle`. Lose them and you do not lose a password you can reset; you lose the ability to sign as yourself, to push to your own repositories, and to govern any repository you are the only delegate of. Nobody can give them back to you, because nobody else has them.
-
-This tool takes those bytes, plus everything around them that the network cannot give back either, and writes one encrypted file you can store somewhere as your backup.
+A Radicle key cannot be reissued: lose it and nothing on the network can give back the ability to sign as yourself, push to your own repositories, or govern a repository you are the only delegate of. This tool writes that key, and everything around it that the network cannot restore, into one encrypted file.
 
 ```sh
 rad backup                      # one encrypted archive of everything the network cannot replace
@@ -19,12 +17,12 @@ rad backup doctor               # what would you lose right now, and what fixes 
 rad backup restore <archive>    # put it all back, on this machine or another one
 ```
 
-It goes further than copying files:
+Beyond copying files:
 
-- **It knows what the network already has.** A public repository is on other nodes. A private one is only wherever its owner allowed a peer to hold it, which by default is nobody. The default archive carries what the network will not hand back and skips what it will, so it stays small enough to take often.
-- **It refuses to fork your identity.** Restoring stale signed refs and then pushing on top of them splits your own peer history in a way nothing on the network resolves. Every restored repository is compared with what the network holds before you get control back.
-- **It is readable without itself.** An archive is `tar` inside `zstd` inside optional `age`, with recovery instructions and a plain shell script inside it. In ten years, with this tool long gone, `tar`, `git` and `sqlite3` are enough.
-- **It tells you where you stand.** `doctor` grades your actual exposure and names the command that fixes each failing line.
+- The default archive carries what the network will not hand back and skips what it will: a public repository is on other nodes, a private one is by default nowhere else at all.
+- `restore` compares every restored repository with the network before handing control back, because pushing on top of stale signed refs forks your own peer history.
+- An archive is `tar` inside `zstd` inside optional `age`, with recovery instructions and a shell script inside it, so `tar`, `git` and a POSIX shell can restore it without this tool.
+- `doctor` reports what would be lost right now and names the command that fixes each failing line.
 
 ## Install
 
@@ -42,7 +40,7 @@ Updates arrive through `apt upgrade` like anything else, and through `unattended
 
 ```sh
 curl -fsSL https://github.com/maninak/radicle-backup/releases/latest/download/rad-backup-x86_64-unknown-linux-musl.tar.gz | tar -xz
-sudo install -m 755 rad-backup /usr/local/bin/
+sudo install -m 755 rad-backup-x86_64-unknown-linux-musl/rad-backup /usr/local/bin/
 ```
 
 The Linux builds are statically linked against musl, so they run on any distribution and inside `scratch` containers. There are aarch64 builds for Linux and macOS as well as x86_64, a Windows `.zip`, and an x86_64 FreeBSD build that is cross-compiled and **untested**, because there is no FreeBSD runner to test it on; a report either way is welcome. Every release ships `sha256sums.txt` and a signature beside it, and `verify.sh` in the same release checks both.
@@ -57,7 +55,7 @@ Needs Rust 1.88 or newer. `git` on `PATH` is required at runtime; `rad` is optio
 
 ### As a `rad` subcommand
 
-Any executable called `rad-<name>` on `PATH` becomes `rad <name>`. Installing this as `rad-backup` is what makes `rad backup` work, and every example below can be written either way. The package also installs a `rad-restore` symlink to the same binary, so `rad restore <archive>` works for someone who is already having a bad day and does not want to remember which command it lives under.
+Any executable called `rad-<name>` on `PATH` becomes `rad <name>`. Installing this as `rad-backup` is what makes `rad backup` work, and every example below can be written either way. The package also installs a `rad-restore` symlink to the same binary, so `rad restore <archive>` works too.
 
 ### Tab completion
 
@@ -69,7 +67,7 @@ rad-backup completions zsh  > ~/.zfunc/_rad-backup        # with ~/.zfunc on $fp
 rad-backup completions fish > ~/.config/fish/completions/rad-backup.fish
 ```
 
-Completion fires on `rad-backup <TAB>`, not on `rad backup <TAB>`: `rad` ships no completions of its own, so a shell has nothing to hand the subcommand off to. Nothing here can fix that from the outside.
+Completion fires on `rad-backup <TAB>`, not on `rad backup <TAB>`: `rad` ships no completions of its own, so a shell has nothing to hand the subcommand off to.
 
 ## Usage
 
@@ -78,11 +76,11 @@ rad backup                              # the default: a state-tier archive in t
 rad backup --output ~/backups           # into a directory, named for the identity and the moment
 rad backup --tier full                  # ...and every repository that is yours
 rad backup --repos all --stop-node      # everything in storage, with the node stopped for it
-rad backup --stdout | ssh box 'cat > radicle.tar.zst.age'   # straight to somewhere else
+rad backup --stdout | ssh backup-host 'cat > radicle.tar.zst.age'   # straight to somewhere else
 rad backup --keep 7                     # delete this identity's older archives, keep the newest 7
 
 rad backup --dry-run                    # what it would carry, and roughly how big, writing nothing
-rad backup schedule --output ~/backups  # and never think about it again
+rad backup schedule --output ~/backups  # take one automatically on a systemd user timer
 
 rad backup doctor                       # what you would lose right now
 rad backup diff                         # has anything changed since the last archive?
@@ -112,14 +110,14 @@ Taking the default archive of a home with four repositories, two of them private
 · archiving policies, aliases and inbox state
 · bundling 2 repositories
 
-✓ wrote ~/backups/maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age
-  maninak (did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp), 12 entries, 30.7 KiB of content
+✓ wrote ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
+  alice (did:key:z6Mk<nid>), 12 entries, 30.7 KiB of content
   tier state, repositories private (2 carried), policies 16 seeded / 3 followed
 
-  check it: rad-backup verify ~/backups/maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age
+  check it: rad-backup verify ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ```
 
-Two were carried and two were not, and that is the point: the public ones are on other nodes, the private ones are on no machine but this one.
+The two private repositories were carried; the two public ones are on other nodes and were not.
 
 ### Exit codes
 
@@ -140,7 +138,7 @@ Three tiers, each a superset of the one above it. The default is `state`.
 | Tier | Carries | Size | For |
 |---|---|---|---|
 | `identity` | Keys and `config.json` | ~1 KiB | The absolute minimum. Everything else can be rebuilt from the network, slowly. |
-| `state` *(default)* | ...plus seeding and following policies, aliases, inbox state, an inventory of every repository, and the data of any repository the network does not have | KiBs to MiBs | Daily use. Small enough to take often, complete enough that a restore feels like nothing happened. |
+| `state` *(default)* | ...plus seeding and following policies, aliases, inbox state, an inventory of every repository, and the data of any repository the network does not have | KiBs to MiBs | Daily use. |
 | `full` | ...plus every repository that is yours | MiBs to GiBs | Leaving a machine, or being the only copy. |
 
 `--repos` overrides what the tier implies: `none`, `private`, `mine`, `seeded`, `all`.
@@ -149,7 +147,7 @@ The archive itself is `tar` inside `zstd` inside optional `age`, and holds:
 
 ```
 manifest.json                 what is in here, with a sha256 of every entry
-keys/radicle                  the private key, exactly as it was on disk
+keys/radicle                  the private key, byte for byte as it was on disk
 keys/radicle.pub              the public key
 config.json                   the node config
 policies.json                 seeding and following policies, as readable JSON
@@ -159,10 +157,10 @@ node/notifications.db         inbox read state
 repos/<rid>.bundle            a git bundle holding every ref of a repository
 repos/<rid>.config            that repository's git config
 RESTORE.md                    how to get all of this back without this tool
-restore.sh                    a script that does it, needing only tar, git, sqlite3 and jq
+restore.sh                    a script that does it, needing only git and a POSIX shell
 ```
 
-The manifest is written last, after every entry, so its digests describe what was actually written rather than what was intended. `verify` reads them both directions: an entry that is listed but missing, and an entry that is present but unlisted, are both reported.
+The manifest is written last, after every entry. `verify` reads it both directions: an entry that is listed but missing, and an entry that is present but unlisted, are both reported.
 
 `node.db` (the routing table and address book) is excluded by default because a node rebuilds it from gossip within minutes; `--with-node-db` includes it. The COB cache is never archived, because it is rebuilt from the repositories that are.
 
@@ -173,7 +171,7 @@ An archive holds your private key, so by default it is encrypted with a passphra
 ```sh
 rad backup                                   # asks, twice, and never echoes
 RAD_BACKUP_PASSPHRASE=... rad backup         # for cron
-rad backup --passphrase-file ~/.secret       # from a file, first line, without a trailing newline
+rad backup --passphrase-file ~/.secret       # the file's contents, minus any trailing newline
 ```
 
 Or to a key rather than a passphrase, which is what you want when a machine takes its own backups and must not hold anything that can read them:
@@ -191,17 +189,17 @@ The private key inside keeps whatever protection it already had. If it had no pa
 ## Restoring
 
 ```sh
-rad backup restore ~/backups/maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age
+rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ```
 
 ```
-· unpacking ~/backups/maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age
-✓ the archive restores maninak (did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp)
+· unpacking ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
+✓ the archive restores alice (did:key:z6Mk<nid>)
 ✓ installed the identity into ~/.radicle
 · restoring 2 repositories
 · comparing 2 repositories with the network
 
-✓ restored maninak into ~/.radicle
+✓ restored alice into ~/.radicle
   2 repositories, 16 seeding and 3 following policies
 
   start the node with `rad node start`
@@ -211,9 +209,7 @@ Everything is unpacked into a staging directory first and every digest is checke
 
 ### The fork hazard, and what this does about it
 
-This is the part a `tar -xzf` cannot do for you.
-
-Radicle signs a set of refs per peer. If you restore an archive taken before your last push, your storage now holds signed refs that are *behind* what the network already accepted. Push on top of them and you sign a second, conflicting history for your own peer id. Other nodes do not resolve that: they see your identity fork, and the way out is manual and unpleasant.
+Radicle signs a set of refs per peer. If you restore an archive taken before your last push, your storage now holds signed refs that are *behind* what the network already accepted. Push on top of them and you sign a second, conflicting history for your own peer id. Other nodes do not resolve that: they see your identity fork.
 
 So after restoring, and before handing control back, every restored repository is fetched and compared:
 
@@ -224,24 +220,24 @@ So after restoring, and before handing control back, every restored repository i
 | holds work the network has not seen | The archive is ahead, as after a crash | Kept; push when ready |
 | diverged | Neither is an ancestor of the other | **Named, and the restore exits `3`** |
 
-A diverged repository is reported by name, and the command exits `3` rather than pretending it worked. `--no-reconcile` skips all of this, for restoring on a machine with no network; the warning it prints is not decoration.
+`--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push.
 
 ### Restoring without this tool
 
-Every archive carries its own way out. If this program does not exist any more, or does not run on whatever you are holding in 2036:
+If this program is gone, or does not run where you are:
 
 ```sh
-age -d maninak-....tar.zst.age | zstd -dc | tar -x     # or: zstd -dc ... | tar -x, if plaintext
-cat RESTORE.md                                          # the whole procedure, in prose
-sh restore.sh ~/.radicle                                # or just run it
+age -d alice-....tar.zst.age | zstd -dc | tar -x     # or: zstd -dc ... | tar -x, if plaintext
+cat RESTORE.md                                       # the whole procedure, in prose
+sh restore.sh ~/.radicle                             # or just run it
 ```
 
-`restore.sh` needs `tar`, `git`, `sqlite3` and `jq`, and nothing else. This is a guarantee of the format, not a convenience: an archive that can only be read by one program is a bet on that program.
+`restore.sh` needs `git` and a POSIX shell. It uses `jq` when it is installed, to set each restored repository's `HEAD`, and skips that step when it is not. It takes the target home as its argument, falling back to `$RAD_HOME` and then to `$HOME/.radicle`, and refuses to run against a home that already holds an identity.
 
 ## `doctor`
 
 ```
-recovery posture of /home/maninak/.radicle
+recovery posture of /home/alice/.radicle
 
 ✓ key passphrase: the key is encrypted with aes256-ctr (bcrypt)
 ✗ backup: no archive has ever been taken for this identity
@@ -250,7 +246,7 @@ recovery posture of /home/maninak/.radicle
 ? archive location: no archive path was recorded, so this could not be judged
 ! private repositories: 3 of 3 are in no archive, though every one of those is allowed to a peer that could hold a copy
   --> rad backup --repos private
-! delegate quorum: 10 repositories have you as their only delegate: maninak-eslint-config, radicle-tools-web, radicle-vscode-extension, ts-xor, taiga-grove, radicle-seed-prune, ...
+! delegate quorum: 10 repositories have you as their only delegate: example-app, example-tool, example-config, example-docs, example-site, example-lib, ...
   --> a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
 ✓ seeding elsewhere: every public repository is announced by at least one other node
 
@@ -304,7 +300,7 @@ rad backup paper --output sheet.html      # then open it in a browser and print 
 rad backup paper --words --output sheet.html
 ```
 
-A one-page sheet with your DID, your key's fingerprint, a QR code, and either the key file itself or the 24 words that rebuild it. Paper outlives disks, formats and this program.
+A one-page sheet with your DID, your key's fingerprint, a QR code, and either the key file itself or the 24 words that rebuild it.
 
 `--words` renders the key as a BIP-39 mnemonic, which survives a bad photocopy and can be typed back by a person who has nothing but the sheet:
 
@@ -316,7 +312,7 @@ The sheet with `--words` on it *is* the key: it is not protected by anything, an
 
 ## Running it on a schedule
 
-The backup people lose their identity without is the one they meant to take last month. One command sets up a systemd user timer, writes the environment it needs, and turns it on:
+One command sets up a systemd user timer, writes the environment it needs, and turns it on:
 
 ```sh
 rad backup schedule --output /mnt/backups/radicle --keep 14 \
@@ -361,7 +357,7 @@ Unattended-Upgrade::Allowed-Origins {
 | `RAD_BACKUP_PASSPHRASE_FILE` | The same, read from a file, which keeps it out of the process table. |
 | `RAD_BACKUP_TIER` | The default tier: `identity`, `state` or `full`. |
 | `RAD_BACKUP_KEEP` | Keep this many of this identity's archives in the output directory, deleting older ones. |
-| `RAD_PASSPHRASE` | The *key's* passphrase, needed only by `paper --words`, which has to decrypt it. |
+| `RAD_PASSPHRASE` | The *key's* passphrase. `paper --words` reads it to decrypt the key; `restore --words` reads it as the restored key's new passphrase. |
 | `RAD` | The `rad` binary to call. |
 | `GIT` | The `git` binary to call. |
 | `NO_COLOR` | Any value turns off colour, as does `--no-color` and a pipe. |
@@ -378,24 +374,22 @@ Unattended-Upgrade::Allowed-Origins {
 ## Development
 
 ```sh
-cargo clippy --all-targets    # the lints are denials, not suggestions
-cargo test                    # unit tests, plus an end-to-end suite that runs the real binary
-cargo fmt
+just check    # cargo fmt --check, then the lints, then the tests: what CI runs, in that order
 ```
 
 The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, takes real archives of it, restores them into a second home and compares the two byte for byte. It needs `git` and nothing else, so it runs anywhere the tool does.
 
 Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.md` has the details, `ARCHIVE-FORMAT.md` specifies the format if you want to write another reader, and `SECURITY.md` says what to do about a vulnerability.
 
-This program holds a key that cannot be rotated, so it expects to be read in suspicion. [How to audit this](SECURITY.md#how-to-audit-this) names the five small files that touch a secret and what each one has to convince you of, so the reading is an afternoon rather than a project.
+[How to audit this](SECURITY.md#how-to-audit-this) names the five files that touch a secret and what each one has to convince a reviewer of.
 
 ## Support
 
-Issues live on Radicle: `rad issue open` in a clone of this repository, or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com). Patches are welcome either as `rad patch` or as a GitHub pull request.
+Issues live on Radicle: `rad issue open` in a clone of this repository, or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com).
 
-If this ever hands your identity back, or just lets you sleep at night knowing it could:
+If this tool is useful to you:
 
-- 💛 Chip in on [Liberapay](https://liberapay.com/maninak/donate) with a micro-donation, if you can comfortably spare it.
+- 💛 Chip in on [Liberapay](https://liberapay.com/maninak/donate).
 - 🌱 Seed this repo on Radicle and ⭐ star it on [GitHub](https://github.com/maninak/radicle-backup).
 - 🗣️ Tell someone who keeps only one copy of their Radicle home, or backs it up by hand. Or open an issue with any edge case you hit.
 

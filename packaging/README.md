@@ -1,6 +1,6 @@
 # Packaging
 
-What ships, how it is built, and what is not wired up yet. Every channel here is either working or honestly labelled as not.
+What ships, how it is built, and what is not wired up yet.
 
 | Channel | State | Built by |
 |---|---|---|
@@ -18,11 +18,11 @@ What ships, how it is built, and what is not wired up yet. Every channel here is
 
 ## The generated files
 
-`packaging/generated/` holds the man page, the shell completions and the Debian changelog. They are built by `just generated`, never committed: the binary that ships is the one that describes itself, so a stale completion file is not a state this repository can get into.
+`packaging/generated/` holds the man page, the shell completions and the Debian changelog. They are built by `just generated` and never committed, so a completion file cannot go stale against the binary.
 
 ## The apt repository
 
-A static tree in a Cloudflare R2 bucket, served at <https://apt.radicle.tools>, signed with a key held in the `APT_GPG_PRIVATE_KEY` secret. R2 charges nothing for egress, so a popular release costs the same as an ignored one; the free tier covers 10 GB of storage and ten million reads a month, which a handful of `.deb` files and their indexes will not approach. `Origin` and `Label` are both `radicle-tools`, which is what lets `unattended-upgrades` target it without also targeting everything else a machine has configured.
+A static tree in a Cloudflare R2 bucket, served at <https://apt.radicle.tools>, signed with a key held in the `APT_GPG_PRIVATE_KEY` secret. R2 charges nothing for egress, and the free tier covers 10 GB of storage and ten million reads a month. `Origin` and `Label` are both `radicle-tools`, which is what lets `unattended-upgrades` target it without also targeting everything else a machine has configured.
 
 `publish.sh` rebuilds every index from the whole pool on every run rather than appending, because an index that has drifted from the pool gives apt clients a hash mismatch and no way to work out why. It pulls the existing pool down first for the same reason, and uploads the pool before the indexes that name it, so no client ever reads an index pointing at a package that is not there yet.
 
@@ -37,7 +37,7 @@ If apt verifies `InRelease` and fetches `Packages`, the repository is correct. N
 
 ## Release signatures
 
-Every release ships `sha256sums.txt` and `sha256sums.txt.sig`, an ssh signature made by the key in `packaging/release/allowed_signers` under the namespace `radicle.tools`. ssh rather than GPG because every Radicle user already has an ssh key and already trusts exactly one: their own.
+Every release ships `sha256sums.txt` and `sha256sums.txt.sig`, an ssh signature made by the key in `packaging/release/allowed_signers` under the namespace `radicle.tools`. ssh rather than GPG, because every Radicle user already has an ssh key.
 
 ```sh
 ./packaging/release/sign.sh   <directory holding sha256sums.txt>   # RELEASE_SIGNING_KEY, or the agent
