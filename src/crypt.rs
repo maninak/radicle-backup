@@ -187,7 +187,8 @@ pub fn passphrase(
     interactive: bool,
 ) -> Result<Zeroizing<String>> {
     if let Some(path) = file {
-        let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+        // Zeroizing before the trim, not after: the untrimmed copy holds the passphrase too.
+        let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
         return Ok(Zeroizing::new(
             text.trim_end_matches(['\n', '\r']).to_string(),
         ));
@@ -245,7 +246,9 @@ fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {
 fn read_identity_files(paths: &[std::path::PathBuf]) -> Result<Vec<Box<dyn age::Identity>>> {
     let mut identities: Vec<Box<dyn age::Identity>> = Vec::new();
     for path in paths {
-        let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
+        // A private key, so the buffer it is read into is wiped when this loop ends rather
+        // than left in whatever heap page it happened to land on.
+        let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
         if let Ok(identity) = age::x25519::Identity::from_str(text.trim()) {
             identities.push(Box::new(identity));
             continue;

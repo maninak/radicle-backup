@@ -108,8 +108,18 @@ pub struct Scratch {
 impl Scratch {
     pub fn create(parent: &Path) -> Result<Self> {
         let path = parent.join(format!(".rad-backup-{}", std::process::id()));
-        std::fs::create_dir_all(&path).map_err(|e| Error::io(&path, e))?;
-        set_owner_only(&path)?;
+        // Owner-only from the moment it exists, and never a directory that was already
+        // there: the name has a process id in it, which is guessable, and a working directory
+        // somebody else made first would hold a private repository's contents under their
+        // permissions. A leftover from a crashed run with this pid lands here too, which is
+        // why the error names the path to remove.
+        crate::perms::create_private_dir(&path).map_err(|e| match e {
+            Error::Io { .. } if path.exists() => Error::refused(
+                format!("{} is already there", path.display()),
+                "remove it if it is left over from a run that crashed, then try again",
+            ),
+            other => other,
+        })?;
         Ok(Self { path })
     }
 
@@ -144,7 +154,7 @@ pub fn copy_owner_only(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
     }
-    let bytes = std::fs::read(from).map_err(|e| Error::io(from, e))?;
+    let bytes = zeroize::Zeroizing::new(std::fs::read(from).map_err(|e| Error::io(from, e))?);
     write_owner_only(to, &bytes)
 }
 
@@ -261,5 +271,45 @@ mod tests {
     fn placeholders_are_replaced_and_unknown_ones_are_left_alone() {
         let filled = fill("hello {{NAME}}, {{MISSING}}", &[("NAME", "world")]);
         assert_eq!(filled, "hello world, {{MISSING}}");
+    }
+
+    #[test]
+    fn a_working_directory_is_owner_only_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent =
+            std::env::temp_dir().join(format!("rad-backup-scratch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).expect("the parent is creatable");
+
+        let scratch = Scratch::create(&parent).expect("a working directory is creatable");
+        let mode = std::fs::metadata(&scratch.path)
+            .expect("it is there")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, crate::perms::DIR_MODE);
+
+        let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn a_working_directory_somebody_else_made_first_is_refused_and_not_reused() {
+        let parent = std::env::temp_dir().join(format!("rad-backup-squat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).expect("the parent is creatable");
+
+        // What an attacker who guessed the pid would leave behind: the directory already
+        // there, with permissions of their choosing.
+        let squatted = parent.join(format!(".rad-backup-{}", std::process::id()));
+        std::fs::create_dir_all(&squatted).expect("the squatted directory is creatable");
+        crate::perms::set_mode(&squatted, 0o777).expect("its mode is settable");
+
+        let refused = Scratch::create(&parent);
+        assert!(
+            matches!(refused, Err(Error::Refused { .. })),
+            "a directory that was already there was reused"
+        );
+
+        let _ = std::fs::remove_dir_all(&parent);
     }
 }

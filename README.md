@@ -416,6 +416,8 @@ The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, t
 
 Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.md` has the details, `ARCHIVE-FORMAT.md` specifies the format if you want to write another reader, and `SECURITY.md` says what to do about a vulnerability.
 
+This program holds a key that cannot be rotated, so it expects to be read in suspicion. [How to audit this](SECURITY.md#how-to-audit-this) names the five small files that touch a secret and what each one has to convince you of, so the reading is an afternoon rather than a project.
+
 ## Support
 
 Issues live on Radicle: `rad issue open` in a clone of this repository, or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com). Patches are welcome either as `rad patch` or as a GitHub pull request.

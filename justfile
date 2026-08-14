@@ -96,7 +96,9 @@ install-local: generated
     install -Dm644 packaging/generated/rad-backup.1 ~/.local/share/man/man1/rad-backup.1
     install -Dm644 packaging/generated/rad-backup.bash ~/.local/share/bash-completion/completions/rad-backup
     install -Dm644 packaging/generated/_rad-backup ~/.local/share/zsh/site-functions/_rad-backup
-    @echo "installed; `rad backup` works once ~/.local/bin is on PATH"
+    # No backticks in this message: just evaluates them as a command, and the one that reads
+    # naturally here would have run a real backup of the caller's home.
+    @echo "installed; 'rad backup' works once ~/.local/bin is on PATH"
 
 clean:
     cargo clean

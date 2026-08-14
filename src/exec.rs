@@ -12,10 +12,26 @@ use std::process::{Command, Output, Stdio};
 
 use crate::error::{Error, Result};
 
+/// What a child process is allowed to inherit of the two passphrases this tool may hold.
+///
+/// A child inherits the whole environment unless something takes things out of it, and an
+/// environment is readable by anything that process goes on to run: a git hook, a credential
+/// helper, a pager. So each spawn says out loud which secrets it needs, and everything else
+/// is removed rather than left there because nobody thought about it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Secrets {
+    /// Nothing. What `git` and every other helper gets.
+    None,
+    /// The Radicle key passphrase, and only that. `rad node start`, `rad seed` and `rad
+    /// follow` sign with the key, so `rad` is the one program that has a use for it.
+    KeyPassphrase,
+}
+
 /// A program we shell out to, with the environment it needs to see.
 pub struct Tool {
     program: String,
     home: Option<String>,
+    secrets: Secrets,
 }
 
 impl Tool {
@@ -25,6 +41,7 @@ impl Tool {
         Self {
             program: std::env::var("RAD").unwrap_or_else(|_| "rad".to_string()),
             home: Some(home.to_string_lossy().into_owned()),
+            secrets: Secrets::KeyPassphrase,
         }
     }
 
@@ -33,6 +50,7 @@ impl Tool {
         Self {
             program: program.to_string(),
             home: None,
+            secrets: Secrets::None,
         }
     }
 
@@ -41,6 +59,7 @@ impl Tool {
         Self {
             program: std::env::var("GIT").unwrap_or_else(|_| "git".to_string()),
             home: None,
+            secrets: Secrets::None,
         }
     }
 
@@ -104,6 +123,13 @@ impl Tool {
         cmd.env("GIT_PAGER", "cat");
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.env("GIT_TERMINAL_PROMPT", "0");
+        // The archive passphrase is never any child's business, and the key passphrase is
+        // only `rad`'s. Removed here, in the one place every spawn goes through, rather than
+        // at each call site where the next one added would forget.
+        cmd.env_remove(crate::crypt::PASSPHRASE_ENV);
+        if self.secrets == Secrets::None {
+            cmd.env_remove(crate::crypt::KEY_PASSPHRASE_ENV);
+        }
         cmd
     }
 
@@ -135,5 +161,44 @@ impl Tool {
             line.push_str(&arg.as_ref().to_string_lossy());
         }
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Command::get_envs` reports a removal as a key with no value, which is how the
+    /// scrubbing can be checked without a spawn and without touching this process's own
+    /// environment.
+    fn removed_by(tool: &Tool) -> Vec<String> {
+        tool.command(&["--version"])
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn no_child_inherits_the_archive_passphrase() {
+        for tool in [
+            Tool::git(),
+            Tool::on_path("systemctl"),
+            Tool::rad(Path::new("/nowhere")),
+        ] {
+            assert!(
+                removed_by(&tool).contains(&crate::crypt::PASSPHRASE_ENV.to_string()),
+                "{} would have inherited the archive passphrase",
+                tool.program
+            );
+        }
+    }
+
+    #[test]
+    fn only_rad_inherits_the_key_passphrase_because_only_rad_signs_with_the_key() {
+        let key = crate::crypt::KEY_PASSPHRASE_ENV.to_string();
+        assert!(removed_by(&Tool::git()).contains(&key));
+        assert!(removed_by(&Tool::on_path("systemctl")).contains(&key));
+        assert!(!removed_by(&Tool::rad(Path::new("/nowhere"))).contains(&key));
     }
 }

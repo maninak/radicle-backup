@@ -173,7 +173,9 @@ pub fn write(record: &Record) -> Result<PathBuf> {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }
     let json = serde_json::to_vec_pretty(record)?;
-    std::fs::write(&path, json).map_err(|e| Error::io(&path, e))?;
+    // Owner-only: no key material in here, but it does name every repository this identity
+    // holds, private ones included, and where the archives of them are kept.
+    crate::perms::write_owner_only(&path, &json)?;
     Ok(path)
 }
 

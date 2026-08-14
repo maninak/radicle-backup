@@ -18,11 +18,32 @@ Everything here exists because this tool touches an ed25519 private key that can
 
 **Untrusted archives.** An archive is data from wherever it was stored, which may not be where it was written. Reading one never trusts it: entry paths that are absolute or contain `..` are refused before anything is written; entries are unpacked as regular files only, so a symlink or hardlink entry cannot be created and cannot be written through; every entry is digested and compared with the manifest, in both directions, before a restore installs anything; and an archive claiming a newer format version is refused rather than read partially. Restores stage into a temporary directory and are checked there, so a bad archive cannot leave a half-built home.
 
-**Subprocesses.** `rad` and `git` are invoked with argument vectors, never through a shell, with `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0` and `GIT_PAGER=cat`, so a repository or a system config cannot change what a run does.
+**Subprocesses.** `rad` and `git` are invoked with argument vectors, never through a shell, with `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0` and `GIT_PAGER=cat`, so a repository or a system config cannot change what a run does. A child inherits the environment it is given, and an environment is readable by everything that process goes on to run, so every spawn states which secrets it may see: `RAD_BACKUP_PASSPHRASE` is removed from all of them, and `RAD_PASSPHRASE` from all but `rad`, which is the only one that signs with the key. That is one place in `src/exec.rs`, not one decision per call site, and two tests hold it there.
 
 **Network.** This program opens no sockets of its own. The only thing that touches the network is `rad sync`, invoked during a restore to compare restored repositories with what the network holds. There is no telemetry, no update check, and no upload of anything, ever.
 
 **Unsafe code** is forbidden at the crate level (`unsafe_code = "forbid"`), and `unwrap` is a denied lint.
+
+## How to audit this
+
+You should not have to read eight thousand lines to decide whether a program that holds your key is honest. Everything that touches a secret lives in five files, and they are small:
+
+| Read this | To satisfy yourself that |
+|---|---|
+| `src/key.rs` | The key is parsed, decrypted and re-encrypted in memory only, and every buffer holding seed or passphrase bytes is a `Zeroizing` one. |
+| `src/crypt.rs` | Archives are age, the passphrase comes from exactly three places, an empty one is refused, and a wrong one is told apart from a damaged file. |
+| `src/perms.rs` | "Owner only" is defined once, applied at creation rather than after it, and admits out loud when a platform cannot promise it. |
+| `src/exec.rs` | Nothing is run through a shell, and no child inherits a passphrase it has no use for. |
+| `src/archive.rs` | An archive from anywhere is treated as hostile input: no absolute paths, no `..`, regular files only, digests checked both directions. |
+
+Two more things worth doing rather than believing:
+
+```sh
+just repro                              # build it twice, get one binary
+./packaging/release/verify.sh <dir>     # the release you downloaded is the one that was signed
+```
+
+Then read `ARCHIVE-FORMAT.md` and open an archive with nothing but `age`, `zstd` and `tar`. A format you can read without this program is a program you do not have to trust.
 
 ## What it deliberately does not protect against
 

@@ -31,6 +31,15 @@ mod platform {
             .map_err(|e| Error::io(path, e))
     }
 
+    pub fn create_private_dir(path: &Path) -> Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+
+        std::fs::DirBuilder::new()
+            .mode(super::DIR_MODE)
+            .create(path)
+            .map_err(|e| Error::io(path, e))
+    }
+
     pub fn set_mode(path: &Path, mode: u32) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -82,6 +91,11 @@ mod platform {
             .map_err(|e| Error::io(path, e))
     }
 
+    pub fn create_private_dir(path: &Path) -> Result<()> {
+        announce(path);
+        std::fs::create_dir(path).map_err(|e| Error::io(path, e))
+    }
+
     pub fn set_mode(path: &Path, mode: u32) -> Result<()> {
         if mode == super::SECRET_MODE || mode == super::DIR_MODE {
             announce(path);
@@ -110,6 +124,15 @@ mod platform {
 }
 
 pub use platform::{create_private, same_device, set_mode};
+
+/// Create a directory only its owner can enter, with that mode from the moment it exists.
+///
+/// Two things a `create_dir_all` followed by a `chmod` does not give: between those two calls
+/// anything on the machine can read what lands inside, and `create_dir_all` succeeds on a
+/// directory that is already there. A working directory whose name someone else guessed and
+/// created first, with permissions of their choosing, is exactly the one this must refuse, so
+/// an existing path is an error here rather than a reuse. The parent must exist already.
+pub use platform::create_private_dir;
 
 /// Write a file only its owner can read, creating it with those permissions rather than
 /// fixing them afterwards: a private key that is briefly world-readable has been read.
