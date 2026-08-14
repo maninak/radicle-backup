@@ -51,8 +51,44 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
-      # A claimed MSRV that nothing checks is a claim, not a fact.
+      # A claimed MSRV that nothing checks is a claim, not a fact. RUSTUP_TOOLCHAIN overrides
+      # rust-toolchain.toml, which otherwise pins every job to the release toolchain and would
+      # quietly turn this job into a second copy of the one above it.
       - run: cargo check --all-targets
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+
+  reproducible:
+    name: reproducible build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      # No cache: a build that only reproduces because it reused the last one proves nothing.
+      - name: Build it twice and compare
+        run: just repro
+
+  nix:
+    name: nix build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      # The nix build is the reference: it is the one anyone can repeat on a machine that
+      # shares nothing with this one. Building it twice here catches a flake that is
+      # reproducible only by accident of caching.
+      - name: Build
+        run: nix build --print-build-logs
+      - name: Build again and compare
+        run: |
+          first=$(readlink -f result)
+          rm -f result
+          nix build --rebuild --print-build-logs
+          second=$(readlink -f result)
+          echo "$first"
+          echo "$second"
+          [ "$first" = "$second" ]
 
   package:
     name: debian package

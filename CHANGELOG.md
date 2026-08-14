@@ -22,3 +22,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - Encryption to a passphrase or to age and ssh recipients, with `--plaintext` for archives going straight into a store that encrypts them.
 - A recovery path that needs nothing but `tar`, `git`, `sqlite3` and `jq`: `RESTORE.md` and `restore.sh` ride inside every archive.
 - Shell completions (`completions`) and a man page (`man`).
+- Reproducible builds: a pinned toolchain, one codegen unit, `SOURCE_DATE_EPOCH` taken from the commit and remapped paths, checked twice over by CI and by the Nix flake.
+- Signed releases: `sha256sums.txt` carries an ssh signature that `packaging/release/verify.sh` checks against `packaging/release/allowed_signers`.
+- Packages: `.deb` for amd64 and arm64 from a signed apt repository at <https://apt.radicle.tools>, tarballs for Linux and macOS, a `.zip` for Windows, a crate, and a Nix flake.

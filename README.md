@@ -30,8 +30,8 @@ It goes further than copying files:
 ### Debian, Ubuntu and derivatives
 
 ```sh
-curl -fsSL https://maninak.github.io/radicle-backup/apt/pubkey.asc | sudo tee /etc/apt/keyrings/radicle-backup.asc > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/radicle-backup.asc] https://maninak.github.io/radicle-backup/apt stable main" | sudo tee /etc/apt/sources.list.d/radicle-backup.list
+curl -fsSL https://apt.radicle.tools/pubkey.asc | sudo tee /etc/apt/keyrings/radicle-tools.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/radicle-tools.asc] https://apt.radicle.tools stable main" | sudo tee /etc/apt/sources.list.d/radicle-tools.list
 sudo apt update && sudo apt install rad-backup
 ```
 
@@ -57,6 +57,18 @@ Needs Rust 1.88 or newer. `git` on `PATH` is required at runtime; `rad` is optio
 ### As a `rad` subcommand
 
 Any executable called `rad-<name>` on `PATH` becomes `rad <name>`. Installing this as `rad-backup` is what makes `rad backup` work, and every example below can be written either way.
+
+### Tab completion
+
+The Debian package and the Nix flake install completions for bash, fish and zsh already. Everywhere else, ask the binary for them:
+
+```sh
+rad-backup completions bash | sudo tee /etc/bash_completion.d/rad-backup > /dev/null
+rad-backup completions zsh  > ~/.zfunc/_rad-backup        # with ~/.zfunc on $fpath
+rad-backup completions fish > ~/.config/fish/completions/rad-backup.fish
+```
+
+Completion fires on `rad-backup <TAB>`, not on `rad backup <TAB>`: `rad` ships no completions of its own, so a shell has nothing to hand the subcommand off to. Nothing here can fix that from the outside.
 
 ## Usage
 
@@ -127,7 +139,7 @@ Two repositories were carried and two were not, and that is the point: the two p
 
 Codes `3` and `4` are the ones worth scripting against: `rad backup diff || rad backup` takes an archive only when something changed.
 
-## What is in an archive
+## What gets backed up
 
 Three tiers, each a superset of the one above it. The default is `state`.
 
@@ -408,7 +420,11 @@ Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.
 
 Issues live on Radicle: `rad issue open` in a clone of this repository, or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com). Patches are welcome either as `rad patch` or as a GitHub pull request.
 
-If this tool ever saves your identity, or just lets you sleep at night knowing it could, [that is what the donate button is for](https://liberapay.com/maninak/donate).
+If this ever hands your identity back, or just lets you sleep at night knowing it could:
+
+- 💛 Chip in on [Liberapay](https://liberapay.com/maninak/donate) with a micro-donation, if you can comfortably spare it.
+- 🌱 Seed this repo on Radicle and ⭐ star it on [GitHub](https://github.com/maninak/radicle-backup).
+- 🗣️ Tell someone who has one copy of their Radicle home, or open an issue with the edge case you hit.
 
 ## License
 
