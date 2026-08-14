@@ -20,7 +20,7 @@ rad backup restore <archive>    # put it all back, on this machine or another on
 
 It goes further than copying files:
 
-- **It knows what the network already has.** Public repositories live on other nodes; private ones live nowhere else. The default archive carries the second kind and skips the first, so it stays small enough to take often.
+- **It knows what the network already has.** A public repository is on other nodes. A private one is only wherever its owner allowed a peer to hold it, which by default is nobody. The default archive carries what the network will not hand back and skips what it will, so it stays small enough to take often.
 - **It refuses to fork your identity.** Restoring stale signed refs and then pushing on top of them splits your own peer history in a way nothing on the network resolves. Every restored repository is compared with what the network holds before you get control back.
 - **It is readable without itself.** An archive is `tar` inside `zstd` inside optional `age`, with recovery instructions and a plain shell script inside it. In ten years, with this tool long gone, `tar`, `git` and `sqlite3` are enough.
 - **It tells you where you stand.** `doctor` grades your actual exposure and names the command that fixes each failing line.
@@ -106,7 +106,7 @@ Taking the default archive of a home with four repositories, two of them private
   check it: rad-backup verify ~/backups/maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age
 ```
 
-Two repositories were carried and two were not, and that is the point: the two public ones are on other nodes, and the two private ones are not on any machine but this one.
+Two repositories were carried and two were not, and that is the point: the two public ones are on other nodes, and the two private ones are on no machine but this one, because their identities allow nobody else to hold them.
 
 ### Exit codes
 
@@ -235,7 +235,7 @@ recovery posture of /home/maninak/.radicle
   rad backup
 · the backup is encrypted: there is no backup to judge
 · the backup is off this disk: no archive path was recorded, so this cannot be judged
-✗ private repositories are backed up: 3 of them exist nowhere but this disk
+! private repositories are backed up: 3 are in no archive, though every one of them is allowed to a peer that could hold a copy
   rad backup --repos private
 ! no repository depends on this key alone: 10 repositories have you as their only delegate: maninak-eslint-config, radicle-tools-web, radicle-vscode-extension, ts-xor, taiga-grove, radicle-seed-prune, ...
   a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
@@ -253,7 +253,7 @@ Seven checks, each with the command that fixes it:
 | a backup exists | This tool has never written one, or the newest is over 30 days old (a warning) |
 | the backup is encrypted | The newest archive holds the private key in the clear |
 | the backup is off this disk | The archive is on the same filesystem as the home it protects |
-| private repositories are backed up | A private repository exists on this disk and in no archive, which means nowhere else on earth |
+| private repositories are backed up | A private repository is in no archive. It fails when no other node has it, and warns when its identity allows a peer that could |
 | no repository depends on this key alone | You are the only delegate of a repository, so losing the key ends its governance (a warning, not a failure) |
 | your public repositories are seeded elsewhere | No other node is known to hold a copy of a repository of yours |
 

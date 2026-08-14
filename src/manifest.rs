@@ -52,7 +52,7 @@ impl Tier {
 pub enum RepoSelection {
     /// No repositories at all.
     None,
-    /// Only repositories that exist nowhere else: the private ones.
+    /// Only the repositories the open network does not carry: the private ones.
     Private,
     /// Private repositories, the ones you delegate, and any whose namespace holds your refs.
     Mine,
@@ -187,8 +187,15 @@ pub struct RepoRecord {
     pub rid: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// `public` or `private`. Absent when no `rad` was available to ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
+    /// The peers a private repository is shared with, from its identity document. Empty for a
+    /// public repository, and empty for a private one that was never allowed to anybody: a
+    /// private repository is not automatically alone in the world, it is alone until its owner
+    /// says otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
     /// Whether the archived identity is one of this repository's delegates. A sole delegate
     /// who loses this key loses the repository's governance for good.
     pub delegate: bool,
@@ -221,7 +228,13 @@ impl RepoRecord {
     }
 
     pub fn is_private(&self) -> bool {
-        matches!(self.visibility.as_deref(), Some("private" | "local"))
+        matches!(self.visibility.as_deref(), Some("private"))
+    }
+
+    /// Whether anything but this machine could hand this repository back: another node has
+    /// announced it, or its owner allowed a peer to hold it.
+    pub fn has_another_holder(&self) -> bool {
+        self.other_seeds.is_some_and(|seeds| seeds > 0) || !self.allowed.is_empty()
     }
 }
 
@@ -250,11 +263,12 @@ mod tests {
     }
 
     #[test]
-    fn local_repositories_count_as_private_because_the_network_has_never_seen_them() {
-        let record = RepoRecord {
+    fn a_private_repository_allowed_to_a_peer_still_has_somewhere_else_to_come_from() {
+        let mut record = RepoRecord {
             rid: "rad:zAAA".to_string(),
             name: None,
-            visibility: Some("local".to_string()),
+            visibility: Some("private".to_string()),
+            allowed: Vec::new(),
             delegate: true,
             delegates: Vec::new(),
             scope: None,
@@ -266,5 +280,15 @@ mod tests {
             bundle: None,
         };
         assert!(record.is_private());
+        assert!(
+            !record.has_another_holder(),
+            "a private repository allowed to nobody is on this disk alone"
+        );
+
+        record.allowed = vec!["did:key:z6MkjDYUKMUeY58Vtr8dGJrHRvnTfjKWVGCBYJDVTHXsXzm5".into()];
+        assert!(
+            record.has_another_holder(),
+            "a private repository allowed to a seed can be fetched back from it"
+        );
     }
 }

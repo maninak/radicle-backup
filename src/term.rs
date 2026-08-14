@@ -137,7 +137,6 @@ pub fn bytes(n: u64) -> String {
     }
 }
 
-/// Render a duration in whole days, for "this backup is 40 days old" style reporting.
 /// A count with the right noun beside it. One place, so no line ever reads "1 repositories".
 pub fn count(n: usize, singular: &str, plural: &str) -> String {
     if n == 1 {
@@ -147,6 +146,7 @@ pub fn count(n: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+/// Render a duration in whole days, for "this backup is 40 days old" style reporting.
 pub fn days_ago(days: i64) -> String {
     match days {
         0 => "today".to_string(),

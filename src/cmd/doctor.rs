@@ -265,41 +265,54 @@ fn backup_locality(ctx: &Ctx, record: Option<&state::Record>) -> Check {
 }
 
 fn private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Check {
-    let private: Vec<&str> = inventory.private().map(|repo| repo.rid.as_str()).collect();
+    const CHECK: &str = "private repositories are backed up";
+    let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
     if private.is_empty() {
-        return Check::new(
-            "private repositories are backed up",
-            Verdict::Pass,
-            "there are none",
-        );
+        return Check::new(CHECK, Verdict::Pass, "there are none");
     }
-    let Some(record) = record else {
-        return Check::new(
-            "private repositories are backed up",
-            Verdict::Fail,
-            format!("{} of them exist nowhere but this disk", private.len()),
-        )
-        .with_remedy("rad backup --repos private");
-    };
-    let missing: Vec<&&str> = private.iter().filter(|rid| !record.carries(rid)).collect();
+
+    // A private repository is not automatically the only copy. Its owner can allow peers to
+    // hold it, and the routing table knows when one announces it. Those are different degrees
+    // of safety and this check says which is which rather than crying wolf about all three.
+    let missing: Vec<&&crate::manifest::RepoRecord> = private
+        .iter()
+        .filter(|repo| !record.is_some_and(|record| record.carries(&repo.rid)))
+        .collect();
     if missing.is_empty() {
-        Check::new(
-            "private repositories are backed up",
+        return Check::new(
+            CHECK,
             Verdict::Pass,
             format!("all {} of them are in the newest archive", private.len()),
+        );
+    }
+    let alone = missing
+        .iter()
+        .filter(|repo| !repo.has_another_holder())
+        .count();
+    let detail = if alone == 0 {
+        format!(
+            "{} in no archive, though every one of them is allowed to a peer that could hold a \
+             copy",
+            term::count(missing.len(), "is", "are"),
+        )
+    } else if alone == missing.len() {
+        format!(
+            "{} in no archive and on no other node",
+            term::count(alone, "is", "are")
         )
     } else {
-        Check::new(
-            "private repositories are backed up",
-            Verdict::Fail,
-            format!(
-                "{} of {} are not in any archive, and the network has never had them",
-                missing.len(),
-                private.len()
-            ),
+        format!(
+            "{} of {} in no archive, and {alone} of those on no other node",
+            term::count(missing.len(), "is", "are"),
+            private.len(),
         )
-        .with_remedy("rad backup --repos private")
-    }
+    };
+    let verdict = if alone == 0 {
+        Verdict::Warn
+    } else {
+        Verdict::Fail
+    };
+    Check::new(CHECK, verdict, detail).with_remedy("rad backup --repos private")
 }
 
 fn delegate_quorum(inventory: &Inventory) -> Check {

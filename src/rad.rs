@@ -48,22 +48,18 @@ impl Rad {
         self.tool.passthrough(&["node", "start"])
     }
 
-    /// The identity document: name, description, delegates and threshold.
-    pub fn identity_document(&self, rid: &str) -> Result<Option<serde_json::Value>> {
+    /// What a repository's identity document says about it.
+    ///
+    /// One `rad inspect` per repository rather than one per question: on a seed being asked
+    /// about every repository it holds, each extra subprocess is another fork and exec.
+    pub fn describe_repo(&self, rid: &str) -> Result<Option<RepoIdentity>> {
         let Some(json) = self.tool.raw_output(&["inspect", rid, "--identity"])? else {
             return Ok(None);
         };
-        Ok(serde_json::from_str(&json).ok())
-    }
-
-    /// `public`, `private` or `local`. A repository that is not public exists only where its
-    /// owner put it, which is why the default backup carries those and nothing else.
-    pub fn visibility(&self, rid: &str) -> Result<Option<String>> {
-        Ok(self
-            .tool
-            .raw_output(&["inspect", rid, "--visibility"])?
-            .map(|out| out.trim().to_string())
-            .filter(|out| !out.is_empty()))
+        let Ok(document) = serde_json::from_str::<serde_json::Value>(&json) else {
+            return Ok(None);
+        };
+        Ok(Some(RepoIdentity::from_document(&document)))
     }
 
     /// Repository identifiers from a `rad ls` listing.
@@ -104,6 +100,62 @@ impl Rad {
     pub fn block_peer(&self, nid: &str) -> Result<bool> {
         self.tool.passthrough(&["block", nid])
     }
+}
+
+/// The parts of an identity document this tool has an opinion about.
+///
+/// Parsed leniently: a document that has grown fields, or lost the ones we look for, yields
+/// what could be read rather than an error. Nothing here is worth failing a backup over.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub name: Option<String>,
+    pub delegates: Vec<String>,
+    /// `public` or `private`. A document with no `visibility` is public, which is heartwood's
+    /// own default.
+    pub visibility: String,
+    /// The peers a private repository is shared with. Always empty for a public one.
+    pub allowed: Vec<String>,
+}
+
+impl RepoIdentity {
+    fn from_document(document: &serde_json::Value) -> Self {
+        let name = document
+            .get("payload")
+            .and_then(|payload| payload.get("xyz.radicle.project"))
+            .and_then(|project| project.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let delegates = strings_at(document.get("delegates"));
+        let visibility = document
+            .get("visibility")
+            .and_then(|visibility| visibility.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("public")
+            .to_string();
+        let allowed = match visibility.as_str() {
+            "public" => Vec::new(),
+            _ => strings_at(document.get("visibility").and_then(|v| v.get("allow"))),
+        };
+        Self {
+            name,
+            delegates,
+            visibility,
+            allowed,
+        }
+    }
+}
+
+fn strings_at(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Pull repository identifiers out of any `rad` output.

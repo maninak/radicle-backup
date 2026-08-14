@@ -140,31 +140,18 @@ fn describe(
     let head = git.head_target(&path)?;
 
     let policy = seeding.get(rid);
-    let (name, delegates) = match rad.map(|rad| rad.identity_document(rid)).transpose()? {
-        Some(Some(document)) => (
-            document
-                .get("payload")
-                .and_then(|payload| payload.get("xyz.radicle.project"))
-                .and_then(|project| project.get("name"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string),
-            document
-                .get("delegates")
-                .and_then(serde_json::Value::as_array)
-                .map(|delegates| {
-                    delegates
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        ),
-        _ => (None, Vec::new()),
-    };
-    let visibility = match rad {
-        Some(rad) => rad.visibility(rid)?,
+    let identity = match rad {
+        Some(rad) => rad.describe_repo(rid)?,
         None => None,
+    };
+    let (name, delegates, visibility, allowed) = match identity {
+        Some(identity) => (
+            identity.name,
+            identity.delegates,
+            Some(identity.visibility),
+            identity.allowed,
+        ),
+        None => (None, Vec::new(), None, Vec::new()),
     };
 
     let did = format!("did:key:{node_id}");
@@ -172,6 +159,7 @@ fn describe(
         rid: rid.to_string(),
         name,
         visibility,
+        allowed,
         delegate: delegates.contains(&did),
         delegates,
         scope: policy.map(|policy| policy.scope.clone()),

@@ -603,18 +603,21 @@ fn report(
     if !manifest.identity.key_encrypted {
         term.warn("the archived key has no passphrase of its own");
     }
-    let unarchived_private = inventory
+    // A private repository left out of the archive is only lost if nobody else has it: the
+    // owner may have allowed a peer to hold it, and a peer that holds it can hand it back.
+    let stranded = inventory
         .private()
         .filter(|record| record.bundle.is_none() && !inventory.selected.contains(&record.rid))
+        .filter(|record| !record.has_another_holder())
         .count();
-    if unarchived_private > 0 {
+    if stranded > 0 {
         term.warn(&format!(
-            "{unarchived_private} private repositor{} not in this archive and exist nowhere else",
-            if unarchived_private == 1 {
-                "y is"
-            } else {
-                "ies are"
-            }
+            "{} not in this archive and on no other node",
+            term::count(
+                stranded,
+                "private repository is",
+                "private repositories are"
+            )
         ));
         term.hint("include them with --repos private");
     }
