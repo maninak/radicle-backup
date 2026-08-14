@@ -8,9 +8,9 @@
 
 **Back up, restore and move a [Radicle](https://radicle.xyz) identity, node state and repositories. `rad backup`.**
 
-Your Radicle identity is 444 bytes in `~/.radicle/keys/radicle`. Lose them and you do not lose a password you can reset: you lose the ability to sign as yourself, to push to your own repositories, and to govern any repository you are the only delegate of. Nobody can give them back to you, because nobody else has them.
+Your Radicle identity is 444 bytes in `~/.radicle/keys/radicle`. Lose them and you do not lose a password you can reset; you lose the ability to sign as yourself, to push to your own repositories, and to govern any repository you are the only delegate of. Nobody can give them back to you, because nobody else has them.
 
-This tool takes those bytes, plus everything around them that the network cannot give back either, and writes one encrypted file you can put somewhere else.
+This tool takes those bytes, plus everything around them that the network cannot give back either, and writes one encrypted file you can store somewhere as your backup.
 
 ```sh
 rad backup                      # one encrypted archive of everything the network cannot replace
@@ -113,9 +113,9 @@ Two repositories were carried and two were not, and that is the point: the two p
 | Code | Meaning |
 |---|---|
 | `0` | It worked, and nothing needs your attention. |
-| `1` | It failed: a file could not be read, a passphrase was wrong, an archive is damaged. |
+| `1` | It failed: a file could not be read, a passphrase was wrong, an archive did not decrypt. |
 | `2` | The arguments were wrong. Clap's own code. |
-| `3` | Checks failed. `verify` found a problem, `doctor` has a failing line, `diff` found drift. |
+| `3` | Checks failed: `verify` found the archive incomplete, `doctor` has a failing line, `diff` found drift. |
 | `4` | Refused. Everything is intact and nothing was written, because doing it would have been unsafe. |
 
 Codes `3` and `4` are the ones worth scripting against: `rad backup diff || rad backup` takes an archive only when something changed.

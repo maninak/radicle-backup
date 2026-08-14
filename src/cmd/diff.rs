@@ -22,11 +22,18 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     let identity = Identity::read(ctx.home.public_key())?;
     let node_id = identity.node_id();
 
-    let Some(record) = state::read(&identity.did())? else {
-        return Err(Error::refused(
-            "there is no archive of this identity to compare against",
-            "take one with `rad backup`",
-        ));
+    let stored = state::read(&identity.did())?;
+    if let Some(complaint) = stored.complaint() {
+        ctx.term.warn(&complaint);
+    }
+    let Some(record) = stored.record() else {
+        let why = match stored {
+            state::Stored::Unreadable { .. } => "the record of the last archive is unreadable",
+            state::Stored::Absent | state::Stored::Record(_) => {
+                "there is no archive of this identity to compare against"
+            }
+        };
+        return Err(Error::refused(why, "take one with `rad backup`"));
     };
 
     let git = Git::new();

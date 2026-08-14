@@ -49,6 +49,16 @@ pub struct Policies {
 }
 
 impl Policies {
+    /// The seeding policies indexed by repository, for a caller that looks up one per
+    /// repository: a seed has as many policies as repositories, and a scan inside that loop is
+    /// quadratic in the number of repositories it is asked about.
+    pub fn seeding_by_rid(&self) -> BTreeMap<&str, &SeedingPolicy> {
+        self.seeding
+            .iter()
+            .map(|policy| (policy.rid.as_str(), policy))
+            .collect()
+    }
+
     pub fn seeded(&self) -> impl Iterator<Item = &SeedingPolicy> {
         self.seeding.iter().filter(|p| p.policy == "allow")
     }

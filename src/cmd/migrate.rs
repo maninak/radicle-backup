@@ -131,8 +131,19 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
 }
 
 /// Where a retired key goes. Kept as a function so the note and the rename cannot disagree.
+///
+/// A second move never writes over the first one's key: the same file name twice would mean a
+/// key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
+/// prevent.
 fn retired_path(keys_dir: &Path) -> PathBuf {
-    keys_dir.join(RETIRED_KEY)
+    let first = keys_dir.join(RETIRED_KEY);
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|n| keys_dir.join(format!("{RETIRED_KEY}.{n}")))
+        .find(|path| !path.exists())
+        .unwrap_or(first)
 }
 
 #[cfg(test)]
@@ -147,5 +158,21 @@ mod tests {
             PathBuf::from("/home/me/.radicle/keys/radicle.retired")
         );
         assert_ne!(path.file_name(), Some(std::ffi::OsStr::new("radicle")));
+    }
+
+    #[test]
+    fn a_second_move_retires_beside_the_first_rather_than_over_it() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-retire-{}", std::process::id()));
+        // Whatever a previous run left behind would change the answer this asks about.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+        let first = retired_path(&dir);
+        std::fs::write(&first, b"the first retired key").expect("the first key is writable");
+
+        let second = retired_path(&dir);
+        assert_ne!(second, first);
+        assert_eq!(second, dir.join("radicle.retired.2"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

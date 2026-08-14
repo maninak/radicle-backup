@@ -119,6 +119,9 @@ pub struct Global {
     pub scratch_dir: Option<PathBuf>,
 
     /// Read the archive passphrase from a file instead of asking for it.
+    ///
+    /// A file is checked first, then RAD_BACKUP_PASSPHRASE, then a hidden prompt. Prefer the
+    /// file: an environment variable is readable by anything that can see the process.
     #[arg(
         long,
         global = true,

@@ -131,14 +131,18 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         &policies,
         &routing,
     )?;
-    let record = state::read(&identity.did())?;
+    let stored = state::read(&identity.did())?;
+    if let Some(complaint) = stored.complaint() {
+        ctx.term.warn(&complaint);
+    }
+    let record = stored.record();
     let now = jiff::Timestamp::now();
 
     let mut checks = vec![key_protection(&secret)];
-    checks.push(backup_freshness(record.as_ref(), now, args));
-    checks.push(backup_encryption(record.as_ref()));
-    checks.push(backup_locality(ctx, record.as_ref()));
-    checks.push(private_coverage(&inventory, record.as_ref()));
+    checks.push(backup_freshness(&stored, now, args));
+    checks.push(backup_encryption(record));
+    checks.push(backup_locality(ctx, record));
+    checks.push(private_coverage(&inventory, record));
     checks.push(delegate_quorum(&inventory));
     checks.push(replication(&inventory, &routing));
     Ok(checks)
@@ -160,8 +164,16 @@ fn key_protection(secret: &SecretKey) -> Check {
     }
 }
 
-fn backup_freshness(record: Option<&state::Record>, now: jiff::Timestamp, args: &Doctor) -> Check {
-    let Some(record) = record else {
+fn backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor) -> Check {
+    if let state::Stored::Unreadable { .. } = stored {
+        return Check::new(
+            "a backup exists",
+            Verdict::Unknown,
+            "one was recorded, but the record no longer parses",
+        )
+        .with_remedy("take another to replace it: rad backup");
+    }
+    let Some(record) = stored.record() else {
         let where_to = args
             .backup_dir
             .as_ref()
@@ -388,7 +400,7 @@ mod tests {
     #[test]
     fn a_backup_that_has_never_been_taken_fails_rather_than_being_unknown() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let check = backup_freshness(None, now, &Doctor { backup_dir: None });
+        let check = backup_freshness(&state::Stored::Absent, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Fail);
         assert_eq!(check.remedy.as_deref(), Some("rad backup"));
     }
@@ -398,12 +410,26 @@ mod tests {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
         let mut record = record();
         record.created = "2026-05-01T12:00:00Z".to_string();
-        let check = backup_freshness(Some(&record), now, &Doctor { backup_dir: None });
+        let stored = state::Stored::Record(Box::new(record.clone()));
+        let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Warn);
 
         record.created = "2026-08-13T12:00:00Z".to_string();
-        let check = backup_freshness(Some(&record), now, &Doctor { backup_dir: None });
+        let stored = state::Stored::Record(Box::new(record));
+        let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_state_file_that_no_longer_parses_is_unknown_rather_than_never_taken() {
+        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        let stored = state::Stored::Unreadable {
+            path: std::path::PathBuf::from("/nowhere/state.json"),
+            reason: "expected value at line 1 column 1".to_string(),
+        };
+        let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
+        assert_eq!(check.verdict, Verdict::Unknown);
+        assert!(check.remedy.is_some());
     }
 
     #[test]

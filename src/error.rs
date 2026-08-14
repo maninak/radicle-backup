@@ -33,7 +33,10 @@ pub enum Error {
         stderr: String,
     },
 
-    #[error("{path}: not a Radicle home (no keys/radicle)\npass --home, or set RAD_HOME")]
+    #[error(
+        "{path}: not a Radicle home (no keys/radicle)\npass --home, set RAD_HOME, or create an \
+         identity first with `rad auth`"
+    )]
     NotAHome { path: PathBuf },
 
     #[error("{path}: {reason}")]

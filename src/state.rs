@@ -118,15 +118,53 @@ pub fn path_for(did: &str) -> Result<PathBuf> {
     Ok(path_in(&base, did))
 }
 
-pub fn read(did: &str) -> Result<Option<Record>> {
+/// What this tool remembers about an identity.
+///
+/// A state file that has gone bad is worth nothing and must not stop a run, but it is not the
+/// same answer as never having taken a backup, and reporting it as one would tell somebody
+/// their archive does not exist when it may be sitting right where they left it.
+#[derive(Debug)]
+pub enum Stored {
+    Absent,
+    Unreadable { path: PathBuf, reason: String },
+    Record(Box<Record>),
+}
+
+impl Stored {
+    /// The record, when there is one fit to answer with.
+    pub fn record(&self) -> Option<&Record> {
+        match self {
+            Self::Record(record) => Some(record),
+            Self::Absent | Self::Unreadable { .. } => None,
+        }
+    }
+
+    /// What went wrong reading it, for a caller that should say so out loud.
+    pub fn complaint(&self) -> Option<String> {
+        match self {
+            Self::Unreadable { path, reason } => Some(format!(
+                "{} could not be read ({reason}), so this run cannot tell what the last \
+                 archive held; the next backup rewrites it",
+                path.display()
+            )),
+            Self::Absent | Self::Record(_) => None,
+        }
+    }
+}
+
+pub fn read(did: &str) -> Result<Stored> {
     let path = path_for(did)?;
     if !path.is_file() {
-        return Ok(None);
+        return Ok(Stored::Absent);
     }
     let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-    // A state file that has gone bad is worth nothing and must not stop a backup: the next
-    // successful run rewrites it.
-    Ok(serde_json::from_str(&text).ok())
+    match serde_json::from_str(&text) {
+        Ok(record) => Ok(Stored::Record(Box::new(record))),
+        Err(e) => Ok(Stored::Unreadable {
+            path,
+            reason: e.to_string(),
+        }),
+    }
 }
 
 pub fn write(record: &Record) -> Result<PathBuf> {

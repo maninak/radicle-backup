@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::db::Policies;
+use crate::db::{Policies, SeedingPolicy};
 use crate::error::Result;
 use crate::git::{self, Git};
 use crate::home::Home;
@@ -67,9 +67,10 @@ pub fn collect(
     // Paperwork is gathered for what is yours and for what is being carried, and for nothing
     // else: on a seed, the other twelve thousand repositories are somebody else's paperwork.
     let described: BTreeSet<&String> = mine.iter().chain(selected.iter()).collect();
+    let seeding = policies.seeding_by_rid();
     let mut records = Vec::with_capacity(described.len());
     for rid in described {
-        records.push(describe(home, git, rad, rid, node_id, policies, routing)?);
+        records.push(describe(home, git, rad, rid, node_id, &seeding, routing)?);
     }
     records.sort_by(|a, b| a.rid.cmp(&b.rid));
 
@@ -130,7 +131,7 @@ fn describe(
     rad: Option<&Rad>,
     rid: &str,
     node_id: &str,
-    policies: &Policies,
+    seeding: &BTreeMap<&str, &SeedingPolicy>,
     routing: &BTreeMap<String, u64>,
 ) -> Result<RepoRecord> {
     let path = home.repository_path(rid);
@@ -138,7 +139,7 @@ fn describe(
     let sigrefs = sigrefs_by_peer(&refs);
     let head = git.head_target(&path)?;
 
-    let policy = policies.seeding.iter().find(|policy| policy.rid == rid);
+    let policy = seeding.get(rid);
     let (name, delegates) = match rad.map(|rad| rad.identity_document(rid)).transpose()? {
         Some(Some(document)) => (
             document

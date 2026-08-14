@@ -123,7 +123,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         manifest.identity.did
     ));
 
-    install(ctx, &staging, &manifest)?;
+    install(ctx, &staging)?;
     let restored = restore_repositories(ctx, &staging, &manifest)?;
 
     if args.replay_policies {
@@ -192,7 +192,7 @@ fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
 }
 
 /// Move the identity, the config and the databases into place.
-fn install(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<()> {
+fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     let home = &ctx.home;
     for directory in [home.path().to_path_buf(), home.keys_dir(), home.node_dir()] {
         std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
@@ -213,7 +213,6 @@ fn install(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<()> {
         "installed the identity into {}",
         home.path().display()
     ));
-    let _ = manifest;
     Ok(())
 }
 
