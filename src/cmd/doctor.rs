@@ -283,12 +283,20 @@ fn backup_locality(home: &std::path::Path, record: Option<&state::Record>) -> Ch
         .with_remedy("if you moved it somewhere safe, this is fine; if not, take another");
     }
     match state::same_device(path, home) {
+        // A warning and not a failure, because the same filesystem does not mean the same
+        // fate: a directory synced by MEGA, Dropbox, Drive or Syncthing is already off this
+        // machine, and this tool has no way to know whether one is watching. Failing a posture
+        // it cannot evaluate would make `doctor` exit 3 at somebody who is properly covered.
         Some(true) => Check::new(
             TOPIC,
-            Verdict::Fail,
+            Verdict::Warn,
             "the newest archive is on the same filesystem as the home it protects",
         )
-        .with_remedy("copy it to another disk, another machine, or a service you trust"),
+        .with_remedy(
+            "one dead disk would take both, unless something replicates that directory off this \
+             machine. If a sync client watches it, this line is noise; if not, copy the archive \
+             to another disk, another machine, or a service you trust",
+        ),
         Some(false) => Check::new(
             TOPIC,
             Verdict::Pass,
@@ -561,6 +569,29 @@ mod tests {
         let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Unknown);
         assert!(check.remedy.is_some());
+    }
+
+    /// A same-disk archive may still be replicated: `/mnt/bueno/MEGA/bak` shares a filesystem
+    /// with nothing that syncs it locally, but MEGA carries it off the machine. Only the
+    /// person running this knows, so the check reports the fact and leaves the verdict short
+    /// of a failure. Exiting 3 at somebody who is covered would train them to ignore the 3.
+    #[test]
+    fn an_archive_on_the_same_filesystem_warns_rather_than_fails_because_it_may_still_be_synced() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-locality-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory is creatable");
+        let archive = dir.join("archive.tar.zst.age");
+        std::fs::write(&archive, b"not really an archive").expect("scratch archive is writable");
+
+        let mut record = record();
+        record.archive = Some(archive.to_string_lossy().into_owned());
+        let check = backup_locality(&dir, Some(&record));
+        assert_eq!(check.verdict, Verdict::Warn);
+        assert!(
+            check.remedy.is_some_and(|remedy| remedy.contains("sync")),
+            "the remedy has to name the case where the same disk is still safe"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

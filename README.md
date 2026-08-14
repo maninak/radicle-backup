@@ -337,7 +337,7 @@ Or with cron, if you prefer:
 17 3 * * * RAD_BACKUP_PASSPHRASE_FILE=$HOME/.config/rad-backup/passphrase rad-backup --output /mnt/backups/radicle --keep 14 --yes --quiet
 ```
 
-Both are pointless if the destination is the same disk as the home. `doctor` will keep saying so.
+Point either at a destination that does not die with this disk. A second disk or another machine is the obvious answer, but a directory that a sync client already carries off the machine (MEGA, Dropbox, Drive, Syncthing) counts too, even though it shares a filesystem with your home. `doctor` cannot tell those apart, so it warns when the archive is on the same filesystem and leaves the call to you.
 
 ### Automatic updates
 

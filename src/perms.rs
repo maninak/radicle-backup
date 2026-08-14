@@ -47,8 +47,9 @@ mod platform {
         std::fs::set_permissions(path, permissions).map_err(|e| Error::io(path, e))
     }
 
-    /// Whether two paths sit on the same filesystem, which is what decides whether a backup
-    /// survives the disk that holds the home it protects.
+    /// Whether two paths sit on the same filesystem. A different one is proof that a backup
+    /// outlives the disk holding the home; the same one proves nothing either way, because a
+    /// synced directory is off the machine whatever `dev` says.
     pub fn same_device(left: &Path, right: &Path) -> Option<bool> {
         use std::os::unix::fs::MetadataExt;
 
