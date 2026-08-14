@@ -30,7 +30,7 @@ The code follows a consistent set of habits. Match them rather than your own:
 - Wire formats parse tolerantly. An unknown `tier` in a manifest is `Unknown`, not a failed read.
 - Pure functions are separated from the ones that read the environment: `Home::at(path)` beside `Home::from_env()`, so the logic is testable without a process to configure.
 - Deterministic output. Sorted collections, fixed timestamps in tar headers, no iteration order leaking into a file.
-- Dependencies are added reluctantly and justified in the pull request.
+- Dependencies are added reluctantly and justified in the pull request, and nothing is adopted in its first week. `.github/check-lockfile-age.py` fails CI on a crate version younger than that, and `.github/check-action-pins.sh` does the same for a GitHub Action, which must also be pinned to a commit SHA rather than a tag anybody can move. Dependabot's `cooldown` applies the same week to the updates it raises, though never to a security update, which should not wait.
 - Test names are sentences about behaviour, in snake_case, with no `test_` prefix: `a_damaged_payload_is_reported_as_damage_and_not_as_a_wrong_passphrase`.
 - Comments say *why*. What the code does is already written down, in the code.
 

@@ -135,6 +135,10 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history: the lockfile check below reads Cargo.lock out of the commit this one
+          # is built on, which a shallow clone does not have.
+          fetch-depth: 0
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -145,3 +149,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./.github/check-action-pins.sh
+      # And the third: what the crate links against. Only what this push or pull request ADDS
+      # is checked, because a pin that is already here only gets older, and sweeping all 269
+      # of them against a rate-limited API would take five minutes to learn nothing.
+      - name: Dependency age
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "::notice::no base commit to compare Cargo.lock against, nothing to check"
+            exit 0
+          fi
+          ./.github/check-lockfile-age.py --base "$BASE"
