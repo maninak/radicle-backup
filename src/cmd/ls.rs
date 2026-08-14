@@ -72,7 +72,10 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     for archive in &found {
         let when = archive
             .taken
-            .map(|taken| term::days_ago(i64::from((now - taken).get_hours()) / 24))
+            // Seconds, not `get_hours`: subtracting two timestamps gives a span whose largest
+            // unit is seconds, so the hours COMPONENT of it is always 0 and every archive read
+            // as "today" however old it was.
+            .map(|taken| term::days_ago((now - taken).get_seconds().div_euclid(86_400)))
             .unwrap_or_else(|| "at an unreadable time".to_string());
         let mark = if is_recorded(archive, record) {
             "*"

@@ -223,6 +223,15 @@ fn backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor)
         .with_remedy(format!("rad backup{where_to}"));
     };
     match record.age_in_days(now) {
+        // Ahead of this clock, so the age says nothing. Left as a Pass it pinned the staleness
+        // alarm open forever: one archive taken on a machine whose clock ran fast reported
+        // "taken -300 days ago" and never went stale again.
+        Some(days) if days < 0 => Check::new(
+            TOPIC,
+            Verdict::Unknown,
+            "the newest archive is stamped in the future, so its age cannot be judged",
+        )
+        .with_remedy("check the clock on the machine that took it, then `rad backup`"),
         Some(days) if days <= STALE_AFTER_DAYS => Check::new(
             TOPIC,
             Verdict::Pass,
