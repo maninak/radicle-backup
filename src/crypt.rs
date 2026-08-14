@@ -189,12 +189,14 @@ pub fn passphrase(
     if let Some(path) = file {
         // Zeroizing before the trim, not after: the untrimmed copy holds the passphrase too.
         let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
-        return Ok(Zeroizing::new(
-            text.trim_end_matches(['\n', '\r']).to_string(),
-        ));
+        let trimmed = Zeroizing::new(text.trim_end_matches(['\n', '\r']).to_string());
+        return refuse_if_empty(trimmed, &format!("{} is empty", path.display()));
     }
     if let Ok(value) = std::env::var(variable) {
-        return Ok(Zeroizing::new(value));
+        // `std::env::var` answers Ok("") for a variable set but empty, which is what an
+        // EnvironmentFile line of `RAD_BACKUP_PASSPHRASE=` produces. Unchecked, that
+        // encrypted the identity to the empty passphrase and every report called it protected.
+        return refuse_if_empty(Zeroizing::new(value), &format!("{variable} is empty"));
     }
     if !interactive {
         return Err(Error::refused(
@@ -203,13 +205,10 @@ pub fn passphrase(
         ));
     }
 
-    let first = Zeroizing::new(rpassword::prompt_password(prompt).map_err(Error::Bare)?);
-    if first.is_empty() {
-        return Err(Error::refused(
-            "an empty passphrase protects nothing",
-            "enter a passphrase, or pass --plaintext if you really want no encryption",
-        ));
-    }
+    let first = refuse_if_empty(
+        Zeroizing::new(rpassword::prompt_password(prompt).map_err(Error::Bare)?),
+        "nothing was typed",
+    )?;
     if confirm {
         let again =
             Zeroizing::new(rpassword::prompt_password("Repeat passphrase: ").map_err(Error::Bare)?);
@@ -221,6 +220,20 @@ pub fn passphrase(
         }
     }
     Ok(first)
+}
+
+/// Refuse an empty passphrase whichever of the three sources it came from.
+///
+/// age accepts one and encrypts to it, so an empty passphrase produces a file that says
+/// `.age`, reports as encrypted everywhere, and opens for anyone who presses Enter.
+fn refuse_if_empty(passphrase: Zeroizing<String>, because: &str) -> Result<Zeroizing<String>> {
+    if passphrase.is_empty() {
+        return Err(Error::refused(
+            format!("an empty passphrase protects nothing: {because}"),
+            "give a passphrase, or pass --plaintext if you really want no encryption",
+        ));
+    }
+    Ok(passphrase)
 }
 
 fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {

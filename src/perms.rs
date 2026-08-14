@@ -22,10 +22,19 @@ mod platform {
     pub fn create_private(path: &Path) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
 
+        // Unlink first, then `create_new`, because open(2) applies its mode argument ONLY when
+        // it creates the file. Under `create` the mode was silently ignored whenever the path
+        // already existed, so restoring over a 0644 key left it 0644, and an existing symlink
+        // was followed and the key written to its target instead. `create_new` then fails
+        // rather than races if something recreates the path in between.
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(path, e)),
+        }
         std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(super::SECRET_MODE)
             .open(path)
             .map_err(|e| Error::io(path, e))

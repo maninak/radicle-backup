@@ -191,6 +191,49 @@ fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+/// What the DID of the key at `path` is, when there is a readable one there.
+fn did_at(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    crate::key::Identity::parse(&text).ok().map(|id| id.did())
+}
+
+/// Never destroy the key that is already here.
+///
+/// `--force` used to overwrite a live private key with no comparison and no way back, so
+/// pointing it at the wrong archive ended an identity permanently and said `installed the
+/// identity`. Two things change that: restoring a DIFFERENT identity over an existing one has
+/// to be confirmed by name, and the displaced key is renamed rather than replaced, exactly as
+/// `migrate` does it, so the mistake stays recoverable either way.
+fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
+    let existing = ctx.home.secret_key();
+    if !existing.exists() {
+        return Ok(());
+    }
+
+    let here = did_at(&ctx.home.public_key());
+    let incoming = did_at(&staging.join("keys/radicle.pub"));
+    if let (Some(here), Some(incoming)) = (&here, &incoming)
+        && here != incoming
+    {
+        ctx.term.warn(&format!(
+            "{} holds {here}, and this archive holds {incoming}",
+            ctx.home.path().display()
+        ));
+        if !ctx.term.confirm("Restore a different identity over it?")? {
+            return Err(Error::refused(
+                "the home holds a different identity from the one in this archive",
+                "restore into a different --home, or pass --yes if replacing it is the intent",
+            ));
+        }
+    }
+
+    let to = crate::cmd::migrate::retired_path(&ctx.home.keys_dir());
+    std::fs::rename(&existing, &to).map_err(|e| Error::io(&existing, e))?;
+    ctx.term
+        .step(&format!("kept the displaced key as {}", to.display()));
+    Ok(())
+}
+
 /// Move the identity, the config and the databases into place.
 fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     let home = &ctx.home;
@@ -199,6 +242,7 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     }
     set_owner_only(home.path())?;
 
+    retire_any_displaced_key(ctx, staging)?;
     copy_owner_only(&staging.join("keys/radicle"), &home.secret_key())?;
     copy_plain(&staging.join("keys/radicle.pub"), &home.public_key())?;
     copy_plain(&staging.join("config.json"), &home.config())?;
@@ -288,14 +332,51 @@ fn reconcile(
             .hint("run `rad sync <rid> --fetch` for each repository before you write to it");
         return Ok(standings);
     }
-    if ctx.home.node_state() != NodeState::Running {
+    // The node has to be started here, and this is the only place it can be. Installing over a
+    // live home corrupts both, so restore refuses to begin while the node runs; comparing with
+    // the network needs a node to ask. Held together, those two rules made this check
+    // unreachable: it warned and returned on every single restore, while the README sold the
+    // comparison as the thing that stops you forking your own peer history. So the node is
+    // started once the identity is safely in place, and put back the way it was found.
+    let started_here = if ctx.home.node_state() == NodeState::Running {
+        false
+    } else {
         ctx.term
-            .warn("the node is not running, so nothing was compared with the network");
-        ctx.term
-            .hint("run `rad node start`, then `rad sync <rid> --fetch` before you write");
-        return Ok(standings);
-    }
+            .step("starting the node, to compare what was restored with the network");
+        if !rad.start_node()? {
+            ctx.term
+                .warn("the node would not start, so nothing was compared with the network");
+            ctx.term
+                .hint("run `rad node start`, then `rad sync <rid> --fetch` before you write");
+            return Ok(standings);
+        }
+        true
+    };
 
+    let outcome = compare_with_network(ctx, manifest, restored, &rad, &mut standings);
+
+    // Put back before the outcome is propagated, so a comparison that fails halfway does not
+    // also leave a node running that the user never started.
+    if started_here {
+        ctx.term.step("stopping the node again");
+        if !rad.stop_node()? {
+            ctx.term
+                .warn("the node was started to run this check and would not stop again");
+            ctx.term
+                .hint("stop it with `rad node stop` if you meant it to stay down");
+        }
+    }
+    outcome?;
+    Ok(standings)
+}
+
+fn compare_with_network(
+    ctx: &Ctx,
+    manifest: &Manifest,
+    restored: &[RepoRecord],
+    rad: &Rad,
+    standings: &mut BTreeMap<String, Standing>,
+) -> Result<()> {
     let git = Git::new();
     let node_id = &manifest.identity.node_id;
     let sigrefs = git::sigrefs_ref(node_id);
@@ -331,7 +412,7 @@ fn reconcile(
         };
         standings.insert(repo.rid.clone(), standing);
     }
-    Ok(standings)
+    Ok(())
 }
 
 /// Re-apply seeding and following through `rad`, for a Radicle whose schema has moved on.
@@ -420,7 +501,9 @@ fn from_words(ctx: &Ctx) -> Result<()> {
 
     let passphrase = crypt::passphrase(
         crypt::KEY_PASSPHRASE_ENV,
-        ctx.global.passphrase_file.as_deref(),
+        // No file: `--passphrase-file` holds the ARCHIVE passphrase, and reading it here gave
+        // the restored key the same secret, silently, without ever asking for a new one.
+        None,
         "New passphrase for the restored key: ",
         true,
         ctx.term.is_interactive(),

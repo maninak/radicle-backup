@@ -13,7 +13,7 @@ use crate::home::NodeState;
 
 /// What the retired key is renamed to. It stays on disk rather than being deleted, because a
 /// move that goes wrong halfway needs a way back.
-const RETIRED_KEY: &str = "radicle.retired";
+pub(crate) const RETIRED_KEY: &str = "radicle.retired";
 const RETIRED_NOTE: &str = "RETIRED.txt";
 
 pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
@@ -136,7 +136,7 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
 /// A second move never writes over the first one's key: the same file name twice would mean a
 /// key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
 /// prevent.
-fn retired_path(keys_dir: &Path) -> PathBuf {
+pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
     let first = keys_dir.join(RETIRED_KEY);
     if !first.exists() {
         return first;
