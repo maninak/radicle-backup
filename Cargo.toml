@@ -35,7 +35,7 @@ rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 ssh-key = { version = "0.6.7", features = ["encryption", "ed25519", "getrandom"] }
 tar = "0.4.46"
 thiserror = "2.0.20"
