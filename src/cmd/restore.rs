@@ -23,6 +23,12 @@ use crate::rad::Rad;
 use crate::state;
 use crate::term;
 
+/// How long to wait for a node this command started to answer on its control socket, and how
+/// often to look. The same shape as `backup`'s stop deadline, for the same reason: the command
+/// that starts a daemon does not wait for it.
+const NODE_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const NODE_START_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How a restored repository stands next to what the network holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
@@ -130,13 +136,18 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         replay_policies(ctx, &staging)?;
     }
 
-    let standings = if args.no_reconcile {
+    // The comparison is the LAST thing, and its failure must not cost the record of what was
+    // restored. Written before the `?`, because the identity, the repositories and the
+    // policies are already on disk by now: a `rad node start` that fails here would otherwise
+    // leave a home that has been fully restored and believes it has never seen an archive.
+    let comparison = if args.no_reconcile {
         term.warn("--no-reconcile: nothing was compared with the network");
-        BTreeMap::new()
+        Ok(BTreeMap::new())
     } else {
-        reconcile(ctx, &manifest, &restored)?
+        reconcile(ctx, &manifest, &restored)
     };
     remember(ctx, &manifest, &restored, archive);
+    let standings = comparison?;
 
     report(ctx, &manifest, &restored, &standings)
 }
@@ -201,9 +212,13 @@ fn did_at(path: &Path) -> Option<String> {
 ///
 /// `--force` used to overwrite a live private key with no comparison and no way back, so
 /// pointing it at the wrong archive ended an identity permanently and said `installed the
-/// identity`. Two things change that: restoring a DIFFERENT identity over an existing one has
-/// to be confirmed by name, and the displaced key is renamed rather than replaced, exactly as
-/// `migrate` does it, so the mistake stays recoverable either way.
+/// identity`. Three things change that: replacing an identity that is not the archive's own
+/// has to be confirmed by name, the displaced key is renamed rather than replaced, and a note
+/// is left beside it saying what it is, the way `migrate` does.
+///
+/// Fails CLOSED. A home whose public key is missing or unreadable cannot be shown to hold the
+/// same identity as the archive, so it is treated as a different one and confirmed for. The
+/// alternative reading, "cannot tell, so carry on", is the one that loses a key.
 fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
     let existing = ctx.home.secret_key();
     if !existing.exists() {
@@ -212,26 +227,76 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
 
     let here = did_at(&ctx.home.public_key());
     let incoming = did_at(&staging.join("keys/radicle.pub"));
+    // Same identity, provably: the DID is derived from the public key, so equal DIDs mean the
+    // archive carries the key already here. Nothing is displaced, and retiring anyway filed a
+    // fresh copy of the key on every restore, as radicle.retired, .retired.2, .retired.3.
     if let (Some(here), Some(incoming)) = (&here, &incoming)
-        && here != incoming
+        && here == incoming
     {
-        ctx.term.warn(&format!(
+        return Ok(());
+    }
+
+    match (&here, &incoming) {
+        (Some(here), Some(incoming)) => ctx.term.warn(&format!(
             "{} holds {here}, and this archive holds {incoming}",
             ctx.home.path().display()
+        )),
+        _ => ctx.term.warn(&format!(
+            "{} holds a key whose identity could not be read, so whether this archive would \
+             replace it cannot be told",
+            ctx.home.path().display()
+        )),
+    }
+    if !ctx
+        .term
+        .confirm("Restore over the key that is already there?")?
+    {
+        return Err(Error::refused(
+            "the home holds a key this archive does not account for",
+            "restore into a different --home, or pass --yes if replacing it is the intent",
         ));
-        if !ctx.term.confirm("Restore a different identity over it?")? {
-            return Err(Error::refused(
-                "the home holds a different identity from the one in this archive",
-                "restore into a different --home, or pass --yes if replacing it is the intent",
-            ));
-        }
     }
 
     let to = crate::cmd::migrate::retired_path(&ctx.home.keys_dir());
     std::fs::rename(&existing, &to).map_err(|e| Error::io(&existing, e))?;
+    // The public half goes with it. Without it the retired file is a private key nobody can
+    // identify, and `install` overwrites keys/radicle.pub moments later.
+    let public = ctx.home.public_key();
+    if public.exists() {
+        let public_to = to.with_extension("pub");
+        if let Err(error) = std::fs::rename(&public, &public_to) {
+            ctx.term.warn(&format!(
+                "{}: the public half of the displaced key could not be kept ({error})",
+                public.display()
+            ));
+        }
+    }
+    write_displaced_note(ctx, &to, here.as_deref())?;
     ctx.term
         .step(&format!("kept the displaced key as {}", to.display()));
     Ok(())
+}
+
+/// Say, on disk, what the file beside this note is. Whoever finds it may be doing so years
+/// later, on a machine they have forgotten restoring anything on.
+fn write_displaced_note(ctx: &Ctx, retired: &Path, was: Option<&str>) -> Result<()> {
+    let name = retired
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let note = format!(
+        "A restore on {} put another identity into this home.\n\
+         \n\
+         The key that used to be at keys/radicle is now beside this note as {name}, with its\n\
+         public half as {name}.pub. It was {}.\n\
+         \n\
+         It still works. Put it back only into a home of its own, and never start a node with\n\
+         it while another machine is running one under the same peer id.\n",
+        crate::cmd::iso_stamp(jiff::Timestamp::now()),
+        was.unwrap_or("an identity this tool could not read"),
+    );
+    let path = ctx.home.keys_dir().join("DISPLACED.txt");
+    std::fs::write(&path, note).map_err(|e| Error::io(&path, e))
 }
 
 /// Move the identity, the config and the databases into place.
@@ -275,7 +340,7 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
     if !git.is_available() {
         ctx.term
             .warn("git is not on PATH, so the archived repositories were left unpacked");
-        ctx.term.hint(&format!(
+        ctx.term.detail(&format!(
             "they are plain git bundles; see RESTORE.md in {}",
             staging.display()
         ));
@@ -329,7 +394,7 @@ fn reconcile(
         ctx.term
             .warn("rad is not on PATH, so nothing was compared with the network");
         ctx.term
-            .hint("run `rad sync <rid> --fetch` for each repository before you write to it");
+            .detail("run `rad sync <rid> --fetch` for each repository before you write to it");
         return Ok(standings);
     }
     // The node has to be started here, and this is the only place it can be. Installing over a
@@ -343,11 +408,11 @@ fn reconcile(
     } else {
         ctx.term
             .step("starting the node, to compare what was restored with the network");
-        if !rad.start_node()? {
+        if !rad.start_node()? || !wait_for_node(ctx) {
             ctx.term
                 .warn("the node would not start, so nothing was compared with the network");
             ctx.term
-                .hint("run `rad node start`, then `rad sync <rid> --fetch` before you write");
+                .detail("run `rad node start`, then `rad sync <rid> --fetch` before you write");
             return Ok(standings);
         }
         true
@@ -359,15 +424,34 @@ fn reconcile(
     // also leave a node running that the user never started.
     if started_here {
         ctx.term.step("stopping the node again");
-        if !rad.stop_node()? {
+        // Reported, never propagated: the comparison's own outcome below is the answer this
+        // function owes its caller, and a stop that failed must not stand in front of it.
+        if !matches!(rad.stop_node(), Ok(true)) {
             ctx.term
                 .warn("the node was started to run this check and would not stop again");
             ctx.term
-                .hint("stop it with `rad node stop` if you meant it to stay down");
+                .detail("stop it with `rad node stop` if you meant it to stay down");
         }
     }
     outcome?;
     Ok(standings)
+}
+
+/// Wait for the node to answer on its control socket.
+///
+/// `rad node start` returns as soon as the daemon forks, so every query fired straight after
+/// it fails on a machine where the node takes a moment: the comparison then filled with
+/// `NotChecked` for every repository and the restore reported success having compared nothing.
+/// `backup`'s `quiesce` waits the same way for the same reason.
+fn wait_for_node(ctx: &Ctx) -> bool {
+    let deadline = std::time::Instant::now() + NODE_START_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if ctx.home.node_state() == NodeState::Running {
+            return true;
+        }
+        std::thread::sleep(NODE_START_POLL);
+    }
+    false
 }
 
 fn compare_with_network(
@@ -541,6 +625,13 @@ fn report(
         .filter(|(_, standing)| **standing == Standing::ArchiveIsAhead)
         .map(|(rid, _)| rid)
         .collect();
+    // Counted and said out loud. A repository the network could not be asked about is not a
+    // repository that is in step, and the report used to mention only `Diverged` and
+    // `ArchiveIsAhead`, so a comparison that answered nothing at all read as a clean bill.
+    let unchecked = standings
+        .values()
+        .filter(|standing| **standing == Standing::NotChecked)
+        .count();
 
     if ctx.global.json {
         ctx.term.print_json(&serde_json::json!({
@@ -551,6 +642,7 @@ fn report(
                 .map(|(rid, standing)| serde_json::json!({"rid": rid, "standing": standing.as_str()}))
                 .collect::<Vec<_>>(),
             "diverged": diverged,
+            "notChecked": unchecked,
         }))?;
     } else {
         let term = &ctx.term;
@@ -566,6 +658,14 @@ fn report(
             manifest.policies.seeded,
             manifest.policies.followed
         ));
+        if unchecked > 0 {
+            term.warn(&format!(
+                "{} of {} repositories could not be compared with the network",
+                unchecked,
+                restored.len()
+            ));
+            term.detail("run `rad sync <rid> --fetch` for those before you write to them");
+        }
         if !ahead.is_empty() {
             term.warn(&format!(
                 "{} repositor{} hold work the network has never seen; push them first",
@@ -580,19 +680,19 @@ fn report(
             term.blank();
             term.fail("these repositories have diverged from the network:");
             for rid in &diverged {
-                term.hint(rid);
+                term.detail(rid);
             }
             term.blank();
             term.fail("do not commit or push in them until this is resolved");
-            term.hint("your restored refs and the network's are not ancestors of each other,");
-            term.hint("so writing on top of either one signs a second history for your peer id");
+            term.detail("your restored refs and the network's are not ancestors of each other,");
+            term.detail("so writing on top of either one signs a second history for your peer id");
         }
         term.blank();
         if manifest.node.was_running {
             term.warn("the machine this archive came from had a node running when it was taken");
-            term.hint("never run two nodes with one key: stop the other one first");
+            term.detail("never run two nodes with one key: stop the other one first");
         }
-        term.hint("start the node with `rad node start`");
+        term.detail("start the node with `rad node start`");
     }
 
     Ok(if diverged.is_empty() {
@@ -614,6 +714,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_private_copy_lands_with_owner_only_permissions() {
         use std::os::unix::fs::PermissionsExt;
 

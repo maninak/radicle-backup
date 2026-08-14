@@ -238,6 +238,7 @@ fn git(args: &[&str], cwd: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -732,7 +733,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
+// Unix only: it runs the shipped POSIX script and checks the mode bits it sets, neither
+// of which Windows has.
 #[test]
+#[cfg(unix)]
 fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     let fixture = Fixture::create("script");
     let backups = fixture.path("backups");

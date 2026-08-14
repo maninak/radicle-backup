@@ -186,17 +186,29 @@ pub fn passphrase(
     confirm: bool,
     interactive: bool,
 ) -> Result<Zeroizing<String>> {
+    // `--plaintext` turns off the ARCHIVE's encryption and has nothing to do with the key's
+    // own passphrase, so offering it on the key path sent the user after a flag that would not
+    // have helped and does not exist for that question.
+    let remedy = if variable == KEY_PASSPHRASE_ENV {
+        "give a passphrase: it is the only thing protecting this key on disk"
+    } else {
+        "give a passphrase, or pass --plaintext if you really want no encryption"
+    };
     if let Some(path) = file {
         // Zeroizing before the trim, not after: the untrimmed copy holds the passphrase too.
         let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
         let trimmed = Zeroizing::new(text.trim_end_matches(['\n', '\r']).to_string());
-        return refuse_if_empty(trimmed, &format!("{} is empty", path.display()));
+        return refuse_if_empty(trimmed, &format!("{} is empty", path.display()), remedy);
     }
     if let Ok(value) = std::env::var(variable) {
         // `std::env::var` answers Ok("") for a variable set but empty, which is what an
         // EnvironmentFile line of `RAD_BACKUP_PASSPHRASE=` produces. Unchecked, that
         // encrypted the identity to the empty passphrase and every report called it protected.
-        return refuse_if_empty(Zeroizing::new(value), &format!("{variable} is empty"));
+        return refuse_if_empty(
+            Zeroizing::new(value),
+            &format!("{variable} is empty"),
+            remedy,
+        );
     }
     if !interactive {
         return Err(Error::refused(
@@ -208,6 +220,7 @@ pub fn passphrase(
     let first = refuse_if_empty(
         Zeroizing::new(rpassword::prompt_password(prompt).map_err(Error::Bare)?),
         "nothing was typed",
+        remedy,
     )?;
     if confirm {
         let again =
@@ -226,11 +239,15 @@ pub fn passphrase(
 ///
 /// age accepts one and encrypts to it, so an empty passphrase produces a file that says
 /// `.age`, reports as encrypted everywhere, and opens for anyone who presses Enter.
-fn refuse_if_empty(passphrase: Zeroizing<String>, because: &str) -> Result<Zeroizing<String>> {
+fn refuse_if_empty(
+    passphrase: Zeroizing<String>,
+    because: &str,
+    remedy: &str,
+) -> Result<Zeroizing<String>> {
     if passphrase.is_empty() {
         return Err(Error::refused(
             format!("an empty passphrase protects nothing: {because}"),
-            "give a passphrase, or pass --plaintext if you really want no encryption",
+            remedy,
         ));
     }
     Ok(passphrase)
