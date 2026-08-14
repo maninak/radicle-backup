@@ -17,7 +17,7 @@ exclude = ["/.github", "/packaging", "/tests/fixtures"]
 age = { version = "0.12.1", features = ["ssh"] }
 bip39 = "2.2.2"
 bs58 = "0.5.1"
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.6"
 clap_mangen = "0.2.32"
 hex = "0.4.3"

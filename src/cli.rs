@@ -55,7 +55,12 @@ pub struct Global {
     pub no_color: bool,
 
     /// Read the archive passphrase from a file instead of asking for it.
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        env = "RAD_BACKUP_PASSPHRASE_FILE"
+    )]
     pub passphrase_file: Option<PathBuf>,
 
     /// An age or ssh private key file to decrypt an archive that was encrypted to a key.
@@ -102,11 +107,11 @@ pub struct Create {
     /// Where to write the archive. A path ending in `.tar.zst`, `.age` or `.tar` names the
     /// file; anything else is a directory, created if it is missing, and the archive is named
     /// inside it. Defaults to the working directory, or to RAD_BACKUP_DIR when it is set.
-    #[arg(long, short = 'o', value_name = "PATH")]
+    #[arg(long, short = 'o', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub output: Option<PathBuf>,
 
     /// How much of the home to carry.
-    #[arg(long, value_enum, default_value_t = TierArg::State)]
+    #[arg(long, value_enum, default_value_t = TierArg::State, env = "RAD_BACKUP_TIER")]
     pub tier: TierArg,
 
     /// Which repositories to carry. Defaults to what the tier implies.
@@ -134,7 +139,7 @@ pub struct Create {
     pub with_node_db: bool,
 
     /// Delete older archives of this identity in the output directory, keeping this many.
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: Option<usize>,
 
     /// Where to put working files while building the archive. Defaults to the output
@@ -201,7 +206,7 @@ pub struct Doctor {
 #[derive(Parser, Debug, Clone)]
 pub struct Paper {
     /// Where to write the sheet. Defaults to stdout.
-    #[arg(long, short = 'o', value_name = "PATH")]
+    #[arg(long, short = 'o', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub output: Option<PathBuf>,
 
     /// Print the key as 24 words instead of as its encrypted file.

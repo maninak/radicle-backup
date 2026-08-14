@@ -380,11 +380,7 @@ fn destination(
         &file_stamp(*now),
         encryption.is_encrypted(),
     );
-    let chosen = args
-        .output
-        .clone()
-        .or_else(|| std::env::var_os("RAD_BACKUP_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let chosen = args.output.clone().unwrap_or_else(|| PathBuf::from("."));
 
     let final_path = if names_an_archive(&chosen) {
         if let Some(parent) = chosen.parent().filter(|p| !p.as_os_str().is_empty()) {
