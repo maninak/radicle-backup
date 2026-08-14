@@ -1,0 +1,27 @@
+version: 2
+
+# Nothing here adopts a release on the day it appears. A week is roughly how long it takes for
+# a bad publish to be noticed and yanked, and this repo has no deadline that a week would miss.
+# Cooldown deliberately does not apply to Dependabot's SECURITY updates, so a real advisory
+# still arrives the day it is filed.
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-patch-days: 7
+      semver-minor-days: 7
+      semver-major-days: 14
+    open-pull-requests-limit: 5
+
+  # Actions are pinned to commit SHAs, so this is what keeps them from rotting into a version
+  # nobody has looked at. It rewrites the SHA and the trailing version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
