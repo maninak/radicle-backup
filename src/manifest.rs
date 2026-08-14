@@ -121,7 +121,10 @@ pub struct ToolInfo {
 impl Default for ToolInfo {
     fn default() -> Self {
         Self {
-            name: env!("CARGO_PKG_NAME").to_string(),
+            // The binary, not CARGO_PKG_NAME: this string is a documented field of the
+            // archive format, and deriving it from the package would let a crate rename
+            // silently rewrite what every future archive claims wrote it.
+            name: env!("CARGO_BIN_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -241,6 +244,15 @@ impl RepoRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_manifest_names_the_command_that_wrote_it_and_not_the_crate_it_was_built_from() {
+        // ARCHIVE-FORMAT.md publishes this exact string, and readers of an archive match on
+        // it. Renaming the package to `radicle-backup` once changed it silently, which is why
+        // it is spelled out here rather than derived: this assertion is the format, and it
+        // must fail if the value ever moves again.
+        assert_eq!(ToolInfo::default().name, "rad-backup");
+    }
 
     #[test]
     fn an_unknown_tier_reads_as_unknown_instead_of_failing_the_whole_manifest() {

@@ -29,7 +29,7 @@ generated: build
     # roff include so `man rad-restore` answers rather than saying there is no such page.
     ln -sfn rad-backup packaging/generated/rad-restore
     printf '.so man1/rad-backup.1\n' > packaging/generated/rad-restore.1
-    printf 'rad-backup (%s-1) stable; urgency=medium\n\n  * Upstream release %s. The changelog for it is at\n    https://github.com/maninak/radicle-backup/blob/master/CHANGELOG.md\n\n -- Konstantinos Maninakis <info@radicle.tools>  %s\n' "$(just version)" "$(just version)" "$(just rfc-date)" > packaging/generated/changelog.Debian
+    printf 'radicle-backup (%s-1) stable; urgency=medium\n\n  * Upstream release %s. The changelog for it is at\n    https://github.com/maninak/radicle-backup/blob/master/CHANGELOG.md\n\n -- Konstantinos Maninakis <info@radicle.tools>  %s\n' "$(just version)" "$(just version)" "$(just rfc-date)" > packaging/generated/changelog.Debian
 
 # The version in Cargo.toml, which is the one every artefact is named after.
 version:

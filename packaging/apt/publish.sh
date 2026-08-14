@@ -83,7 +83,7 @@ log "writing dists/$SUITE/Release"
     -o "APT::FTPArchive::Release::Codename=$CODENAME" \
     -o "APT::FTPArchive::Release::Components=$COMPONENT" \
     -o "APT::FTPArchive::Release::Architectures=$ARCHITECTURES" \
-    -o "APT::FTPArchive::Release::Description=rad-backup and other radicle.tools packages" \
+    -o "APT::FTPArchive::Release::Description=radicle-backup and other radicle.tools packages" \
     release "dists/$SUITE" ) > "$ROOT/dists/$SUITE/Release"
 
 gpg_batch=(--batch --yes --pinentry-mode loopback --local-user "$KEY_ID")
@@ -103,7 +103,7 @@ cat > "$ROOT/index.html" <<EOF
 <pre>
 curl -fsSL $SITE/pubkey.asc | sudo tee /etc/apt/keyrings/radicle-tools.asc > /dev/null
 echo "deb [signed-by=/etc/apt/keyrings/radicle-tools.asc] $SITE $SUITE $COMPONENT" | sudo tee /etc/apt/sources.list.d/radicle-tools.list
-sudo apt update && sudo apt install rad-backup
+sudo apt update && sudo apt install radicle-backup
 </pre>
 <p>Origin <code>$ORIGIN</code>, suite <code>$SUITE</code>, component <code>$COMPONENT</code>, architectures <code>$ARCHITECTURES</code>.</p>
 <p><a href="https://radicle.tools">radicle.tools</a> &middot; <a href="https://github.com/maninak/radicle-backup">source</a></p>

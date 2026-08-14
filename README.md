@@ -33,7 +33,7 @@ It goes further than copying files:
 ```sh
 curl -fsSL https://apt.radicle.tools/pubkey.asc | sudo tee /etc/apt/keyrings/radicle-tools.asc > /dev/null
 echo "deb [signed-by=/etc/apt/keyrings/radicle-tools.asc] https://apt.radicle.tools stable main" | sudo tee /etc/apt/sources.list.d/radicle-tools.list
-sudo apt update && sudo apt install rad-backup
+sudo apt update && sudo apt install radicle-backup
 ```
 
 Updates arrive through `apt upgrade` like anything else, and through `unattended-upgrades` if you enable this origin for it (see [Automatic updates](#automatic-updates)).
@@ -50,7 +50,7 @@ The Linux builds are statically linked against musl, so they run on any distribu
 ### From source
 
 ```sh
-cargo install rad-backup
+cargo install radicle-backup
 ```
 
 Needs Rust 1.88 or newer. `git` on `PATH` is required at runtime; `rad` is optional and only makes the archive better informed.
