@@ -52,6 +52,19 @@ fn main() -> ExitCode {
     }
 }
 
+/// Write generated output to stdout, treating a closed pipe as the success it is.
+///
+/// `| head` closes the pipe on purpose, and a tool that reports that as a failure is a tool
+/// nobody can pipe.
+fn emit(bytes: &[u8]) -> Result<ExitCode> {
+    let mut stdout = std::io::stdout();
+    match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+        Ok(()) => Ok(ExitCode::SUCCESS),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(ExitCode::SUCCESS),
+        Err(e) => Err(error::Error::Bare(e)),
+    }
+}
+
 fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
     // Generating completions and the manual page needs no home, and must work on a machine
     // that has never run Radicle: package builds do exactly that.
@@ -59,14 +72,18 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
         Some(Command::Completions(args)) => {
             let mut command = Cli::command();
             let name = command.get_name().to_string();
-            clap_complete::generate(args.shell, &mut command, name, &mut std::io::stdout());
-            return Ok(ExitCode::SUCCESS);
+            // Rendered into memory first: clap_complete panics rather than returning when the
+            // writer fails, and `rad-backup completions bash | head` is a writer that fails.
+            let mut rendered = Vec::new();
+            clap_complete::generate(args.shell, &mut command, name, &mut rendered);
+            return emit(&rendered);
         }
         Some(Command::Man) => {
+            let mut rendered = Vec::new();
             clap_mangen::Man::new(Cli::command())
-                .render(&mut std::io::stdout())
+                .render(&mut rendered)
                 .map_err(error::Error::Bare)?;
-            return Ok(ExitCode::SUCCESS);
+            return emit(&rendered);
         }
         _ => {}
     }

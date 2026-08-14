@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily Radicle backup
+Documentation=man:rad-backup(1)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# Spread the load, and keep every machine in the world from hitting its seed at 03:00:00.
+RandomizedDelaySec=1h
+# A laptop that was asleep at 03:00 backs up when it wakes, rather than skipping a day.
+Persistent=true
+Unit=rad-backup.service
+
+[Install]
+WantedBy=timers.target

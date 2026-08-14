@@ -1,0 +1,194 @@
+name: Release
+
+# Tagging is the whole trigger. `git tag v0.2.0 && git push --tags` builds every artefact,
+# publishes the release, refreshes the apt repository and pushes the crate.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing tag to build
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl, so one Linux binary runs on every distribution and inside scratch images.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: extractions/setup-just@v2
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      # The same recipe a local build uses, so the names in a tarball, a .deb and a Homebrew
+      # formula cannot drift apart. A cross-built binary cannot run here, so this builds a
+      # host one to describe itself; the two are the same source at the same commit.
+      - name: Man page and completions
+        run: just generated
+
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=rad-backup-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/rad-backup "dist/$name/"
+          cp README.md ARCHIVE-FORMAT.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp -r packaging/generated "dist/$name/generated"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          rm -rf "dist/$name"
+          cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  packages:
+    name: deb (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - run: cargo install cargo-deb cross --locked
+      - run: sudo apt-get update && sudo apt-get install -y lintian
+
+      - name: Build
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      # cargo-deb reads these from packaging/generated. `just generated` builds a host binary
+      # for the purpose, because the cross-built one cannot run here.
+      - name: Man page and completions
+        run: just generated
+
+      - name: Package
+        run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
+
+      - name: Lint
+        run: lintian --suppress-tags initial-upload-closes-no-bugs target/${{ matrix.target }}/debian/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/${{ matrix.target }}/debian/*.deb
+
+  release:
+    name: publish the release
+    needs: [binaries, packages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' \) -exec cp {} release/ \;
+          cd release && shasum -a 256 * > sha256sums.txt
+      - name: Notes
+        run: |
+          # The section of CHANGELOG.md for this tag, so the release page and the file agree.
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { printing = 1; next }
+            printing && /^## / { exit }
+            printing { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body_path: notes.md
+          generate_release_notes: true
+
+  apt:
+    name: refresh the apt repository
+    needs: release
+    runs-on: ubuntu-latest
+    # Skipped, harmlessly, on a fork or before the signing key exists.
+    if: ${{ github.repository == 'maninak/radicle-backup' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: incoming
+      - name: Publish
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./packaging/apt/publish.sh incoming
+
+  crate:
+    name: publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'maninak/radicle-backup' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

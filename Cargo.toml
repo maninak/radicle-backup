@@ -51,3 +51,68 @@ unwrap_used = "deny"
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.151"
+
+# Debian packaging. `just deb` builds it; the release workflow builds and signs the apt
+# repository from the same metadata, so what CI ships is what a local build produces.
+[package.metadata.deb]
+maintainer = "Konstantinos Maninakis <info@radicle.tools>"
+copyright = "2026, Konstantinos Maninakis"
+# A DEP-5 file of our own, because a generated one inlines the Apache text where Debian
+# wants a reference to /usr/share/common-licenses/Apache-2.0.
+license-file = ["packaging/debian/copyright", "0"]
+changelog = "packaging/generated/changelog.Debian"
+section = "utils"
+priority = "optional"
+extended-description = """\
+rad-backup writes one encrypted archive holding a Radicle identity, the node state around it \
+(seeding and following policies, aliases, inbox state) and any repository the network does \
+not already have a copy of. It restores the lot on this machine or another one, comparing \
+every restored repository with the network first so that a stale archive cannot fork your \
+own peer history.
+
+Installed on PATH as rad-backup, it is also reachable as `rad backup`.
+
+An archive is tar inside zstd inside optional age, and carries its own recovery instructions \
+and a shell script that needs only tar, git, sqlite3 and jq. It never needs this program, or \
+a particular version of Radicle, to be read."""
+depends = "$auto, git"
+recommends = "age"
+suggests = "radicle-node"
+assets = [
+    ["target/release/rad-backup", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/rad-backup/README.md", "644"],
+    ["ARCHIVE-FORMAT.md", "usr/share/doc/rad-backup/ARCHIVE-FORMAT.md", "644"],
+    ["SECURITY.md", "usr/share/doc/rad-backup/SECURITY.md", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/rad-backup/LICENSE-APACHE", "644"],
+    ["packaging/systemd/env.example", "usr/share/doc/rad-backup/examples/env", "644"],
+    ["packaging/generated/rad-backup.1", "usr/share/man/man1/", "644"],
+    ["packaging/generated/rad-backup.bash", "usr/share/bash-completion/completions/rad-backup", "644"],
+    ["packaging/generated/rad-backup.fish", "usr/share/fish/vendor_completions.d/rad-backup.fish", "644"],
+    ["packaging/generated/_rad-backup", "usr/share/zsh/vendor-completions/", "644"],
+    # User units, installed and left alone. `cargo-deb`'s systemd-units integration is for
+    # system units and would generate maintainer scripts that enable them; a package that
+    # starts copying a private key the moment it lands is a package that surprises people.
+    # The user turns it on with `systemctl --user enable --now rad-backup.timer`.
+    ["packaging/systemd/rad-backup.service", "usr/lib/systemd/user/", "644"],
+    ["packaging/systemd/rad-backup.timer", "usr/lib/systemd/user/", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/rad-backup", dest = "/usr/bin/rad-backup", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/rad-backup/README.md", mode = "644", doc = true },
+    { source = "ARCHIVE-FORMAT.md", dest = "/usr/share/doc/rad-backup/ARCHIVE-FORMAT.md", mode = "644", doc = true },
+    { source = "SECURITY.md", dest = "/usr/share/doc/rad-backup/SECURITY.md", mode = "644", doc = true },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/rad-backup/LICENSE-MIT", mode = "644", doc = true },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/rad-backup/LICENSE-APACHE", mode = "644", doc = true },
+    { source = "packaging/systemd/env.example", dest = "/usr/share/doc/rad-backup/examples/env", mode = "644", doc = true },
+    { source = "packaging/generated/rad-backup.1", dest = "/usr/share/man/man1/rad-backup.1", mode = "644", doc = true },
+    { source = "packaging/generated/rad-backup.bash", dest = "/usr/share/bash-completion/completions/rad-backup", mode = "644" },
+    { source = "packaging/generated/rad-backup.fish", dest = "/usr/share/fish/vendor_completions.d/rad-backup.fish", mode = "644" },
+    { source = "packaging/generated/_rad-backup", dest = "/usr/share/zsh/site-functions/_rad-backup", mode = "644" },
+    { source = "packaging/systemd/rad-backup.service", dest = "/usr/lib/systemd/user/rad-backup.service", mode = "644", config = false },
+    { source = "packaging/systemd/rad-backup.timer", dest = "/usr/lib/systemd/user/rad-backup.timer", mode = "644", config = false },
+]
+
+[package.metadata.generate-rpm.requires]
+git = "*"
