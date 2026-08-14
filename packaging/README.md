@@ -8,6 +8,7 @@ What ships, how it is built, and what is not wired up yet. Every channel here is
 | Signed apt repository | Working | `packaging/apt/publish.sh`, run by the `apt` job |
 | Tarballs (linux musl, macOS, x86_64 and aarch64) | Working | the `binaries` job |
 | Windows `.zip` (x86_64-msvc) | Working, with the caveats in the README | the `binaries` job |
+| FreeBSD tarball (x86_64) | Cross-built, never executed by CI, labelled untested | the `binaries` job |
 | Signed `sha256sums.txt` | Working | `packaging/release/sign.sh`, run by the `binaries` job |
 | Nix flake | Working | `nix build`, checked twice by the `nix` job |
 | crates.io | Working | the `crate` job |

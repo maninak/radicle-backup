@@ -43,6 +43,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cross: false
+          # Cross-built and never executed by CI, because GitHub has no FreeBSD runner. It
+          # ships labelled as untested until somebody who runs FreeBSD reports back.
+          - target: x86_64-unknown-freebsd
+            os: ubuntu-latest
+            cross: true
     steps:
       - uses: actions/checkout@v4
         with:
