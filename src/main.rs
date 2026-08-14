@@ -22,7 +22,7 @@ mod term;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 
 use crate::cli::{Cli, Command};
 use crate::cmd::Ctx;
@@ -31,7 +31,7 @@ use crate::home::Home;
 use crate::term::{Term, Verbosity};
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = cli::parse();
     let term = Term::new(
         if cli.global.quiet {
             Verbosity::Quiet

@@ -37,7 +37,6 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         stop_node: false,
         with_node_db: true,
         keep: None,
-        scratch_dir: None,
     };
     let archive = backup::run(ctx, &create)?.ok_or_else(|| {
         Error::refused(

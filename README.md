@@ -352,6 +352,7 @@ Unattended-Upgrade::Allowed-Origins {
 | `RAD` | The `rad` binary to call. |
 | `GIT` | The `git` binary to call. |
 | `NO_COLOR` | Any value turns off colour, as does `--no-color` and a pipe. |
+| `RAD_BACKUP_SCRATCH_DIR` | Where working files go: database snapshots, fresh bundles, and the staging copy a restore is checked in. Defaults to beside whatever the command is producing. |
 | `XDG_STATE_HOME` | Where this tool remembers what it last wrote. Holds no secrets. |
 
 ## What this does not do

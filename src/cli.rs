@@ -6,7 +6,8 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{ArgAction, ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 use crate::manifest::{RepoSelection, Tier};
 
@@ -17,7 +18,6 @@ use crate::manifest::{RepoSelection, Tier};
     about = "Back up, restore and migrate a Radicle identity",
     long_about = "Back up, restore and migrate a Radicle identity, node state and repositories.\n\n\
                   Installed on PATH, this is also `rad backup`.",
-    args_conflicts_with_subcommands = true,
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -30,6 +30,55 @@ pub struct Cli {
 
     #[command(flatten)]
     pub global: Global,
+}
+
+/// The flags that shape an archive, and so mean nothing to any other verb.
+const CREATE_ONLY: [&str; 9] = [
+    "output",
+    "tier",
+    "repos",
+    "stdout",
+    "plaintext",
+    "recipient",
+    "stop_node",
+    "with_node_db",
+    "keep",
+];
+
+/// Parse the command line, then enforce the one rule clap cannot state here.
+///
+/// `args_conflicts_with_subcommands` would reject `--tier full doctor`, which is right, but
+/// it also rejects `--home /srv/radicle doctor`, which is how every other tool in this
+/// ecosystem is used. So the global flags stay usable in either position and the
+/// archive-shaping ones are checked by hand.
+pub fn parse() -> Cli {
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
+    if let Some(problem) = misplaced_create_flag(&matches) {
+        Cli::command()
+            .error(clap::error::ErrorKind::ArgumentConflict, problem)
+            .exit();
+    }
+    cli
+}
+
+/// The complaint to make when an archive-shaping flag was passed to a verb that makes no
+/// archive, or `None` when there is nothing to complain about.
+///
+/// Only flags given on the command line count. A `RAD_BACKUP_TIER` in the environment is
+/// there for every run, and failing `doctor` because of it would be absurd.
+fn misplaced_create_flag(matches: &ArgMatches) -> Option<String> {
+    let verb = matches.subcommand_name()?;
+    let id = CREATE_ONLY
+        .iter()
+        .find(|id| matches.value_source(id) == Some(ValueSource::CommandLine))?;
+    Some(format!(
+        "`--{}` shapes an archive, and `{verb}` does not create one",
+        id.replace('_', "-")
+    ))
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -53,6 +102,21 @@ pub struct Global {
     /// Never colour the output. NO_COLOR is honoured too.
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Where to put working files: database snapshots, freshly built bundles, and the
+    /// staging copy a restore is checked in.
+    ///
+    /// The default is beside whatever the command is producing, which is a filesystem the
+    /// user already chose and which has room for the result. Point this elsewhere when that
+    /// filesystem is small, read-only, or somewhere a private repository should not appear
+    /// even briefly.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        env = "RAD_BACKUP_SCRATCH_DIR"
+    )]
+    pub scratch_dir: Option<PathBuf>,
 
     /// Read the archive passphrase from a file instead of asking for it.
     #[arg(
@@ -141,11 +205,6 @@ pub struct Create {
     /// Delete older archives of this identity in the output directory, keeping this many.
     #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: Option<usize>,
-
-    /// Where to put working files while building the archive. Defaults to the output
-    /// directory, so that nothing lands on a filesystem you did not choose.
-    #[arg(long, value_name = "PATH")]
-    pub scratch_dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -313,6 +372,45 @@ mod tests {
         assert_eq!(TierArg::Identity.default_repos(), RepoSelection::None);
         assert_eq!(TierArg::State.default_repos(), RepoSelection::Private);
         assert_eq!(TierArg::Full.default_repos(), RepoSelection::Mine);
+    }
+
+    #[test]
+    fn a_global_flag_may_come_before_a_subcommand_the_way_every_other_tool_allows() {
+        for argv in [
+            ["rad-backup", "--home", "/srv/radicle", "doctor"],
+            ["rad-backup", "doctor", "--home", "/srv/radicle"],
+        ] {
+            let matches = Cli::command()
+                .try_get_matches_from(argv)
+                .expect("a global flag is allowed in either position");
+            assert_eq!(misplaced_create_flag(&matches), None);
+            let cli = Cli::from_arg_matches(&matches).expect("it parses into the struct");
+            assert_eq!(cli.global.home, Some(PathBuf::from("/srv/radicle")));
+        }
+    }
+
+    #[test]
+    fn a_flag_that_shapes_an_archive_is_refused_by_a_verb_that_makes_none() {
+        let matches = Cli::command()
+            .try_get_matches_from(["rad-backup", "--tier", "full", "doctor"])
+            .expect("clap itself allows it; the rule is ours");
+        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        assert!(complaint.contains("--tier"), "{complaint}");
+        assert!(complaint.contains("doctor"), "{complaint}");
+    }
+
+    #[test]
+    fn a_shaping_flag_from_the_environment_never_refuses_another_verb() {
+        // RAD_BACKUP_TIER is set for every run in a shell that exports it; failing `doctor`
+        // because of it would make the variable unusable.
+        let matches = Cli::command()
+            .try_get_matches_from(["rad-backup", "doctor"])
+            .expect("it parses");
+        assert_eq!(
+            matches.value_source("tier"),
+            Some(ValueSource::DefaultValue)
+        );
+        assert_eq!(misplaced_create_flag(&matches), None);
     }
 
     #[test]

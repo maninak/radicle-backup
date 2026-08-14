@@ -103,8 +103,12 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
 
     let reader = Reader::open(archive, passphrase.as_ref(), ctx.identity_files())?;
     let scan = if args.deep {
-        let parent = archive.parent().unwrap_or_else(|| Path::new("."));
-        let scratch = Scratch::create(parent)?;
+        let parent = ctx
+            .global
+            .scratch_dir
+            .clone()
+            .unwrap_or_else(|| archive.parent().unwrap_or(Path::new(".")).to_path_buf());
+        let scratch = Scratch::create(&parent)?;
         let staging = scratch.file("home");
         let scan = reader.unpack(archive, &staging)?;
         deep_checks(&staging, &scan.manifest, &mut checks, &mut problems)?;

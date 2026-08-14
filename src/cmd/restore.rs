@@ -88,11 +88,14 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         None
     };
 
-    let parent = home
-        .path()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Staging sits beside the home by default, so the filesystem that has to hold the
+    // restored data is the one proven to have room for it before anything is installed.
+    let parent = ctx.global.scratch_dir.clone().unwrap_or_else(|| {
+        home.path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
     std::fs::create_dir_all(&parent).map_err(|e| Error::io(&parent, e))?;
     let scratch = Scratch::create(&parent)?;
     let staging = scratch.file("home");

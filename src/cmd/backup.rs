@@ -85,7 +85,8 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
     let now = jiff::Timestamp::now();
     let destination = destination(args, &identity, home.alias()?.as_deref(), &now, &encryption)?;
 
-    let scratch_parent = args
+    let scratch_parent = ctx
+        .global
         .scratch_dir
         .clone()
         .or_else(|| destination.directory())
@@ -713,7 +714,6 @@ mod tests {
             stop_node: false,
             with_node_db: false,
             keep: None,
-            scratch_dir: None,
         }
     }
 }
