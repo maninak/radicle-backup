@@ -9,10 +9,20 @@ set -euo pipefail
 MIN_AGE_DAYS=${MIN_AGE_DAYS:-7}
 now=$(date -u +%s)
 status=0
+seen=0
 
 # `actions/*` is GitHub's own namespace, published from the same place the runner comes from.
 # Everything else is a third party and gets no exemption.
 while read -r file line spec; do
+  seen=$((seen + 1))
+  # A `uses:` with no `@` at all resolves the action's default branch at run time, which is the
+  # worst pin there is. Matched separately from the pattern below, because a value with no `@`
+  # cannot be split into repo and ref.
+  if [[ $spec != *@* ]]; then
+    echo "$file:$line  $spec names no ref at all, so it tracks a branch" >&2
+    status=1
+    continue
+  fi
   repo="${spec%@*}"
   ref="${spec##*@}"
   if [[ ! $ref =~ ^[0-9a-f]{40}$ ]]; then
@@ -30,7 +40,24 @@ while read -r file line spec; do
     echo "$file:$line  $repo is pinned to a ${age}-day-old commit, minimum is $MIN_AGE_DAYS" >&2
     status=1
   fi
-done < <(grep -Hno 'uses: [^ ]*@[^ ]*' .github/workflows/*.yml | sed 's/:uses: / /' | awk '{print $1, $2, $3}' FS='[: ]' OFS=' ')
+done < <(
+  # Both spellings of the extension, and composite actions too, because a workflow this
+  # misses is a workflow that goes unchecked. `uses:` is matched with one-or-more spaces
+  # and an optional quote, and WITHOUT requiring an `@`, so a completely unpinned action
+  # reaches the loop above instead of failing to match and vanishing.
+  find .github -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
+    | xargs -0 -r grep -Hno "uses:[[:space:]]\+[\"']\?[^ \"']*" \
+    | sed "s/:uses:[[:space:]]*[\"']\?/ /" \
+    | awk '{print $1, $2, $3}' FS='[: ]' OFS=' '
+)
 
-[ "$status" -eq 0 ] && echo "every action pin is a commit SHA at least $MIN_AGE_DAYS days old"
+# A gate that examined nothing must not report success. Without this the script printed its
+# green line and exited 0 when the glob matched no file at all, which is what it did for every
+# workflow named `.yaml` and for any move of the directory.
+if [ "$seen" -eq 0 ]; then
+  echo "no \`uses:\` found under .github, so this check verified nothing" >&2
+  exit 1
+fi
+
+[ "$status" -eq 0 ] && echo "checked $seen action pins: every one is a commit SHA at least $MIN_AGE_DAYS days old"
 exit "$status"

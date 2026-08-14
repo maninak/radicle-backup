@@ -220,6 +220,7 @@ dependencies = [
  "bitcoin_hashes",
  "serde",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -1688,7 +1689,6 @@ dependencies = [
  "qrcode",
  "rpassword",
  "rusqlite",
- "secrecy",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -12,11 +12,13 @@ fmt:
 fmt-check:
     cargo fmt --check
 
+# `--locked` on both, matching CI: a Cargo.toml requirement widened without updating
+# Cargo.lock is an error here rather than a silent re-resolve that only CI notices.
 lint:
-    cargo clippy --all-targets
+    cargo clippy --all-targets --locked
 
 test:
-    cargo test
+    cargo test --locked
 
 # Generate the man page, shell completions and the Debian changelog.
 generated: build

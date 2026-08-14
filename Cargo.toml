@@ -22,7 +22,9 @@ path = "src/main.rs"
 
 [dependencies]
 age = { version = "0.12.1", features = ["ssh"] }
-bip39 = "2.2.2"
+# `zeroize`, so the mnemonic wipes itself: those 24 words ARE the key, and without the feature
+# bip39's own buffers are dropped intact.
+bip39 = { version = "2.2.2", features = ["zeroize"] }
 bs58 = "0.5.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.6"
@@ -32,7 +34,6 @@ jiff = "0.2.35"
 qrcode = "0.14.1"
 rpassword = "7.5.4"
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
-secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10.9"

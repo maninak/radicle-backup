@@ -190,7 +190,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
-      - run: cargo install cargo-deb --locked
+      - run: cargo install cargo-deb --version 3.7.0 --locked
       - run: cargo install cross --version 0.2.5 --locked
       - run: sudo apt-get update && sudo apt-get install -y lintian
 
@@ -225,6 +225,11 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+    # Job level, not step level, because a step's own `env:` is not in scope for that step's
+    # own `if:`. Declared on the step, the signing condition compares '' against '' and skips
+    # on every run, so releases went out unsigned while the workflow stayed green.
+    env:
+      RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -254,14 +259,18 @@ jobs:
       # every file it names, and it is the file a downloader has to trust anyway.
       - name: Sign the checksums
         if: ${{ env.RELEASE_SIGNING_KEY != '' }}
-        env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: ./packaging/release/sign.sh release
+
+      # `sign.sh` self-checks with `-Y check-novalidate`, which proves the signature is
+      # well-formed and says nothing about who made it. This runs the verifier a downloader
+      # runs, against `allowed_signers`, so a rotated key or a namespace typo fails the
+      # release rather than a restore.
+      - name: Verify the release the way a downloader does
+        if: ${{ env.RELEASE_SIGNING_KEY != '' }}
+        run: ./packaging/release/verify.sh release
 
       - name: Say so when a release goes out unsigned
         if: ${{ env.RELEASE_SIGNING_KEY == '' }}
-        env:
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           echo "::warning::RELEASE_SIGNING_KEY is not set, so this release carries no signature"
 
