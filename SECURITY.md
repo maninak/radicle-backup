@@ -37,7 +37,7 @@ Then read `ARCHIVE-FORMAT.md` and open an archive with nothing but `age`, `zstd`
 ## What it deliberately does not protect against
 
 - **A machine that is already compromised.** If something can read `~/.radicle/keys/radicle`, it does not need this tool.
-- **A passphrase you lose.** No recovery, no escrow, no backdoor. `rad backup paper` exists precisely because this is unrecoverable.
+- **A passphrase you lose.** No recovery, no escrow, no backdoor. Print a sheet with `rad backup paper`.
 - **A paper sheet with `--words` on it.** Those 24 words are the key, in the clear, by design. Anyone holding that sheet is you.
 - **Where you put the archive.** An encrypted archive on a hostile server is fine; a `--plaintext` one is not, and `doctor` keeps saying so.
 

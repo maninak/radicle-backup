@@ -396,11 +396,11 @@ If this ever hands your identity back, or just lets you sleep at night knowing i
 
 - 💛 Chip in on [Liberapay](https://liberapay.com/maninak/donate) with a micro-donation, if you can comfortably spare it.
 - 🌱 Seed this repo on Radicle and ⭐ star it on [GitHub](https://github.com/maninak/radicle-backup).
-- 🗣️ Tell someone who has one copy of their Radicle home, or open an issue with the edge case you hit.
+- 🗣️ Tell someone who keeps only one copy of their Radicle home, or backs it up by hand. Or open an issue with any edge case you hit.
 
 ## License
 
-MIT OR Apache-2.0, at your option. Permissive on purpose: a backup tool that people cannot bundle, fork, repackage or vendor into a distribution is a backup tool that fewer people have when they need it.
+MIT OR Apache-2.0, at your option. Bundle it, fork it, repackage it, vendor it into a distribution.
 
 ---
 
