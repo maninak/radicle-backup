@@ -621,3 +621,102 @@ fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
         "a dry run must leave the output directory empty"
     );
 }
+
+/// Every file under a directory, so a test can look at what a run left behind rather than at
+/// what it meant to leave behind.
+fn files_under(directory: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return found;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[test]
+fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_without_the_passphrase()
+{
+    // What a copy of an openssh private key looks like from the outside. Searching for this
+    // rather than for the key bytes keeps the test honest about what it is looking for.
+    const ARMOUR: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----";
+    const AGE_MAGIC: &[u8] = b"age-encryption.org/";
+
+    let fixture = Fixture::create("hygiene");
+    let backups = fixture.path("backups");
+    let scratch = fixture.path("scratch");
+    std::fs::create_dir_all(&scratch).expect("the scratch parent is creatable");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--scratch-dir",
+            &scratch.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a full backup");
+
+    assert_eq!(
+        files_under(&scratch),
+        Vec::<PathBuf>::new(),
+        "the working directory outlived the run that made it"
+    );
+    for path in files_under(&backups) {
+        let bytes = std::fs::read(&path).expect("what was written is readable");
+        assert!(
+            !contains(&bytes, ARMOUR),
+            "{} holds a private key in the clear",
+            path.display()
+        );
+    }
+
+    // Nothing found above would also be true of a merely compressed archive, so this is the
+    // half that says why: the payload is age, and age does not open without the passphrase.
+    let archive = std::fs::read(only_archive(&backups)).expect("the archive is readable");
+    assert!(archive.starts_with(AGE_MAGIC), "the archive is not age");
+    let mut opened = Vec::new();
+    assert!(
+        zstd::stream::copy_decode(archive.as_slice(), &mut opened).is_err(),
+        "the archive decompressed without a passphrase"
+    );
+
+    // And the search itself, against an archive that really does carry the key. Without this
+    // the assertions above would pass just as happily if they were looking for nothing.
+    let plain = fixture.path("plaintext");
+    let out = fixture.run(
+        &[
+            "--tier",
+            "identity",
+            "--plaintext",
+            "--output",
+            &plain.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a plaintext archive");
+    let archive = std::fs::read(only_archive(&plain)).expect("the archive is readable");
+    let mut tar = Vec::new();
+    zstd::stream::copy_decode(archive.as_slice(), &mut tar).expect("the archive decompresses");
+    assert!(
+        contains(&tar, ARMOUR),
+        "the search cannot find a key that is definitely there, so it proves nothing"
+    );
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
