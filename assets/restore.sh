@@ -51,7 +51,10 @@ for bundle in repos/*.bundle; do
 	target="$RAD_HOME/storage/$rid"
 
 	git init --bare --quiet "$target"
-	git --git-dir "$target" fetch --quiet --force "$(pwd)/$bundle" 'refs/*:refs/*'
+	# fsckObjects, matching what `rad-backup restore` does: a bundle is the one part of
+	# an archive nothing else validates, and one can carry a tree entry named `.git`.
+	git --git-dir "$target" -c fetch.fsckObjects=true \
+		fetch --quiet --force "$(pwd)/$bundle" 'refs/*:refs/*'
 	[ -f "repos/$rid.config" ] && cp "repos/$rid.config" "$target/config"
 
 	if command -v jq >/dev/null 2>&1; then
