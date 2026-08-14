@@ -1,5 +1,5 @@
 [package]
-name = "rad-backup"
+name = "radicle-backup"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
@@ -12,6 +12,13 @@ readme = "README.md"
 keywords = ["radicle", "backup", "restore", "git", "identity"]
 categories = ["command-line-utilities"]
 exclude = ["/.github", "/packaging", "/tests/fixtures"]
+
+# The crate is `radicle-backup`, matching the repository and the rest of the Radicle crates,
+# but the binary must be `rad-backup`: `rad backup` works by exec'ing NAME-SUBCOMMAND, so the
+# file on PATH has to be spelled that way for the subcommand to exist at all.
+[[bin]]
+name = "rad-backup"
+path = "src/main.rs"
 
 [dependencies]
 age = { version = "0.12.1", features = ["ssh"] }
@@ -87,11 +94,11 @@ assets = [
     ["target/release/rad-backup", "usr/bin/", "755"],
     # A symlink, so `rad restore` is the same 6 MB binary rather than a second copy of it.
     ["packaging/generated/rad-restore", "usr/bin/rad-restore", "777"],
-    ["README.md", "usr/share/doc/rad-backup/README.md", "644"],
-    ["ARCHIVE-FORMAT.md", "usr/share/doc/rad-backup/ARCHIVE-FORMAT.md", "644"],
-    ["SECURITY.md", "usr/share/doc/rad-backup/SECURITY.md", "644"],
-    ["LICENSE-APACHE", "usr/share/doc/rad-backup/LICENSE-APACHE", "644"],
-    ["packaging/systemd/env.example", "usr/share/doc/rad-backup/examples/env", "644"],
+    ["README.md", "usr/share/doc/radicle-backup/README.md", "644"],
+    ["ARCHIVE-FORMAT.md", "usr/share/doc/radicle-backup/ARCHIVE-FORMAT.md", "644"],
+    ["SECURITY.md", "usr/share/doc/radicle-backup/SECURITY.md", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/radicle-backup/LICENSE-APACHE", "644"],
+    ["packaging/systemd/env.example", "usr/share/doc/radicle-backup/examples/env", "644"],
     ["packaging/generated/rad-backup.1", "usr/share/man/man1/", "644"],
     ["packaging/generated/rad-restore.1", "usr/share/man/man1/", "644"],
     ["packaging/generated/rad-backup.bash", "usr/share/bash-completion/completions/rad-backup", "644"],
@@ -108,12 +115,12 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/rad-backup", dest = "/usr/bin/rad-backup", mode = "755" },
-    { source = "README.md", dest = "/usr/share/doc/rad-backup/README.md", mode = "644", doc = true },
-    { source = "ARCHIVE-FORMAT.md", dest = "/usr/share/doc/rad-backup/ARCHIVE-FORMAT.md", mode = "644", doc = true },
-    { source = "SECURITY.md", dest = "/usr/share/doc/rad-backup/SECURITY.md", mode = "644", doc = true },
-    { source = "LICENSE-MIT", dest = "/usr/share/licenses/rad-backup/LICENSE-MIT", mode = "644", doc = true },
-    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/rad-backup/LICENSE-APACHE", mode = "644", doc = true },
-    { source = "packaging/systemd/env.example", dest = "/usr/share/doc/rad-backup/examples/env", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/radicle-backup/README.md", mode = "644", doc = true },
+    { source = "ARCHIVE-FORMAT.md", dest = "/usr/share/doc/radicle-backup/ARCHIVE-FORMAT.md", mode = "644", doc = true },
+    { source = "SECURITY.md", dest = "/usr/share/doc/radicle-backup/SECURITY.md", mode = "644", doc = true },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/radicle-backup/LICENSE-MIT", mode = "644", doc = true },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/radicle-backup/LICENSE-APACHE", mode = "644", doc = true },
+    { source = "packaging/systemd/env.example", dest = "/usr/share/doc/radicle-backup/examples/env", mode = "644", doc = true },
     { source = "packaging/generated/rad-backup.1", dest = "/usr/share/man/man1/rad-backup.1", mode = "644", doc = true },
     { source = "packaging/generated/rad-backup.bash", dest = "/usr/share/bash-completion/completions/rad-backup", mode = "644" },
     { source = "packaging/generated/rad-backup.fish", dest = "/usr/share/fish/vendor_completions.d/rad-backup.fish", mode = "644" },
