@@ -238,6 +238,15 @@ fn git(args: &[&str], cwd: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::metadata(path)
+        .expect("the file is there")
+        .permissions()
+        .mode()
+}
+
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -721,4 +730,117 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+#[test]
+fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
+    let fixture = Fixture::create("script");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a plaintext archive");
+
+    let extracted = fixture.path("extracted");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let archive = std::fs::read(only_archive(&backups)).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
+    let tar_path = extracted.join("archive.tar");
+    std::fs::write(&tar_path, &tarball).expect("the tarball is writable");
+    let out = Command::new("tar")
+        .args(["-xf", "archive.tar"])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&out, "extracting the archive");
+
+    // Run it the way someone in trouble would: a shell, the extracted directory, and no
+    // rad-backup anywhere. The target is given as the argument the README documents, with
+    // HOME and RAD_HOME both pointed elsewhere: HOME so a bug in the script cannot reach
+    // the real home of whoever is running the tests, RAD_HOME so that the argument being
+    // ignored, which is what it used to be, shows up as a failure rather than as a pass.
+    let target = fixture.path("by-script");
+    let decoy = fixture.path("decoy-home");
+    let out = Command::new("sh")
+        .args(["restore.sh", &target.to_string_lossy()])
+        .current_dir(&extracted)
+        .env("HOME", fixture.path("fake-home"))
+        .env("RAD_HOME", &decoy)
+        .output()
+        .expect("the restore script runs");
+    assert_success(&out, "restoring with the shipped script");
+    assert!(
+        !decoy.exists(),
+        "the script ignored its argument and restored into RAD_HOME instead"
+    );
+
+    let before = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
+    let after = std::fs::read(target.join("keys/radicle")).expect("the restored key is readable");
+    assert_eq!(before, after, "the script did not restore the archived key");
+    assert_eq!(
+        mode(&target.join("keys/radicle")) & 0o777,
+        0o600,
+        "the script left the private key readable by others"
+    );
+
+    let storage = target.join("storage").join(RID);
+    let refs = git(
+        &["--git-dir", &storage.to_string_lossy(), "for-each-ref"],
+        &target,
+    );
+    assert!(refs.contains("/refs/rad/sigrefs"), "{refs}");
+    assert!(refs.contains("/refs/heads/master"), "{refs}");
+    if Command::new("sh")
+        .args(["-c", "command -v jq"])
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        let head = git(
+            &[
+                "--git-dir",
+                &storage.to_string_lossy(),
+                "symbolic-ref",
+                "HEAD",
+            ],
+            &target,
+        );
+        assert!(head.contains("refs/namespaces/"), "{head}");
+    }
+
+    let db = rusqlite::Connection::open(target.join("node/policies.db"))
+        .expect("the restored policy database opens");
+    let seeded: i64 = db
+        .query_row("select count(*) from seeding", [], |row| row.get(0))
+        .expect("the seeding table survives");
+    assert_eq!(seeded, 2);
+
+    // And a second run over the home it just built, addressed the other way, refuses
+    // instead of overwriting the key.
+    let out = Command::new("sh")
+        .arg("restore.sh")
+        .current_dir(&extracted)
+        .env("HOME", fixture.path("fake-home"))
+        .env("RAD_HOME", &target)
+        .output()
+        .expect("the restore script runs");
+    assert!(
+        !out.status.success(),
+        "the script overwrote an occupied home: {}",
+        stderr(&out)
+    );
+    assert!(
+        stderr(&out).contains("already holds an identity"),
+        "{}",
+        stderr(&out)
+    );
 }

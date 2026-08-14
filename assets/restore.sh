@@ -2,8 +2,12 @@
 #
 # Restore a Radicle home from the extracted contents of a rad-backup archive.
 #
-# Run it from the directory this file is in, after extracting the archive. It needs only
-# `git`, `cp` and a POSIX shell; `jq` is used when present and skipped when not.
+# Run it from the directory this file is in, after extracting the archive:
+#
+#     sh restore.sh [target-home]
+#
+# The target home defaults to $RAD_HOME, then to $HOME/.radicle. It needs `git` and a POSIX
+# shell; `jq` is used when present and skipped when not.
 #
 # This script exists so that an archive can be restored by someone who does not have
 # rad-backup, or cannot run it. `rad-backup restore` does the same and additionally checks
@@ -11,7 +15,7 @@
 
 set -eu
 
-RAD_HOME="${RAD_HOME:-$HOME/.radicle}"
+RAD_HOME="${1:-${RAD_HOME:-$HOME/.radicle}}"
 
 if [ ! -f manifest.json ]; then
 	echo "run this from the directory the archive was extracted into" >&2
@@ -31,7 +35,10 @@ mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node" "$RAD_HOME/storage"
 (umask 077 && cp keys/radicle "$RAD_HOME/keys/radicle")
 cp keys/radicle.pub "$RAD_HOME/keys/radicle.pub"
 chmod 644 "$RAD_HOME/keys/radicle.pub"
-cp config.json "$RAD_HOME/config.json"
+# Guarded like the databases below: an identity-tier archive, or a home that never had a
+# config, legitimately has no config.json, and under `set -e` a bare cp aborted the restore
+# after the key had landed and before any repository did.
+[ -f config.json ] && cp config.json "$RAD_HOME/config.json"
 
 [ -f node/policies.db ] && cp node/policies.db "$RAD_HOME/node/policies.db"
 [ -f node/notifications.db ] && cp node/notifications.db "$RAD_HOME/node/notifications.db"
