@@ -104,14 +104,20 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
                 Verdict::Fail => term.fail(&line),
                 Verdict::Unknown => term.unknown(&line),
             }
+            // `detail` for the remedy under a check that is not a Pass, so `--quiet` cannot
+            // print "you would lose this" and withhold the one line that fixes it.
             if let Some(remedy) = &check.remedy {
-                term.hint(&format!("--> {remedy}"));
+                let line = format!("--> {remedy}");
+                match check.verdict {
+                    Verdict::Pass => term.hint(&line),
+                    _ => term.detail(&line),
+                }
             }
         }
         term.blank();
         term.headline(&summary(passed, warned, failed, unknown));
         if failed > 0 {
-            term.hint("every ✗ is a way to lose this identity; the line under it is the fix");
+            term.detail("every ✗ is a way to lose this identity; the line under it is the fix");
         }
     }
 

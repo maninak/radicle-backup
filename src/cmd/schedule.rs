@@ -35,7 +35,14 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         return status(ctx, &systemctl);
     }
     if args.off {
-        systemctl.passthrough(&["--user", "disable", "--now", TIMER])?;
+        // Checked, like `enable` below: told the timer was off while systemd kept running it
+        // nightly, a user has been given the opposite of the truth about their own machine.
+        if !systemctl.passthrough(&["--user", "disable", "--now", TIMER])? {
+            return Err(Error::refused(
+                format!("systemd would not disable {TIMER}, so the timer may still be armed"),
+                "run `systemctl --user disable --now rad-backup.timer` to see what it objects to",
+            ));
+        }
         ctx.term
             .ok("the timer is off; the unit files are still there");
         ctx.term.hint("turn it back on with `rad backup schedule`");
@@ -113,13 +120,13 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
         ));
     } else {
         ctx.term.warn("no backup is scheduled on this machine");
-        ctx.term.hint("turn one on with `rad backup schedule`");
+        ctx.term.detail("turn one on with `rad backup schedule`");
     }
     if let Some(failure) = last {
         ctx.term
             .fail(&format!("the last scheduled run ended as: {failure}"));
         ctx.term
-            .hint("read it with `journalctl --user -u rad-backup.service`");
+            .detail("read it with `journalctl --user -u rad-backup.service`");
     }
     Ok(())
 }
@@ -137,7 +144,7 @@ fn without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
         .unwrap_or_else(|_| "rad-backup".to_string());
     ctx.term
         .warn("there is no systemd here, so nothing was installed");
-    ctx.term.hint("this crontab line does the same job:");
+    ctx.term.detail("this crontab line does the same job:");
     ctx.term.blank();
     ctx.term.print(&format!(
         "  0 3 * * *  {binary} --output {} --keep {keep} --yes --quiet",
