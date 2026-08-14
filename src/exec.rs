@@ -7,6 +7,7 @@
 //! `radicle` safe across versions.
 
 use std::ffi::OsStr;
+use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -89,11 +90,16 @@ impl Tool {
         Ok(self.raw(args)?.status.success())
     }
 
-    /// Run with stdout and stderr inherited, for commands whose own output is the point.
+    /// Run the child with its output visible, and its stdout redirected to our stderr.
+    ///
+    /// Onto stderr, not stdout: with `--stdout` this process's stdout IS the archive, and a
+    /// line of `rad node stop` chatter written into it produces a file that decrypts, fails to
+    /// decompress, and is discovered at restore time. Everything a child says here is
+    /// narration, which is where narration goes anyway.
     pub fn passthrough<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<bool> {
         let status = self
             .command(args)
-            .stdout(Stdio::inherit())
+            .stdout(Stdio::from(io::stderr()))
             .stderr(Stdio::inherit())
             .status()
             .map_err(|source| Error::Spawn {
@@ -104,8 +110,11 @@ impl Tool {
     }
 
     pub fn is_available(&self) -> bool {
-        Command::new(&self.program)
-            .arg("--version")
+        // Through `command`, not `Command::new`, so the probe drops the passphrases like every
+        // other spawn. Built by hand it inherited the whole environment, and a shimmed `git`
+        // read the archive passphrase out of its own environ.
+        self.command(&["--version"])
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
