@@ -390,6 +390,7 @@ Unattended-Upgrade::Allowed-Origins {
 - **It is not a node backup for a public seed.** `--repos all` will happily archive twelve thousand repositories, and you will be happier with `btrfs send`, ZFS snapshots, or [radicle-seed-prune](https://app.radicle.at/nodes/seed.radicle.at/rad:zxvTkxzouwrYFwycnsctrMT3iM2E) and a filesystem-level tool.
 - **It does not rotate keys.** Radicle has no key rotation to drive. A compromised key needs a new identity and a delegate change.
 - **It does not talk to any service.** No telemetry, no upload, no phone home. Where the archive goes is entirely your business.
+- **It does not make Windows a Radicle machine.** There is a Windows build, and it reads, checks and lists archives properly. What it cannot do is promise that a file it writes is readable only by you, because Windows has no mode bits and this tool carries no Windows API dependency to set an ACL; it says so the first time it writes such a file. Radicle itself is a unix program, so the home a backup describes lives on the Linux or macOS side, WSL included.
 
 ## Development
 

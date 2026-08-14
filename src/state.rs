@@ -177,17 +177,7 @@ pub fn write(record: &Record) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Whether two paths sit on the same filesystem.
-///
-/// A backup on the same device as the home it protects survives a mistake but not a disk, and
-/// that is the failure people actually have.
-pub fn same_device(left: &Path, right: &Path) -> Option<bool> {
-    use std::os::unix::fs::MetadataExt;
-
-    let left = std::fs::metadata(left).ok()?;
-    let right = std::fs::metadata(right).ok()?;
-    Some(left.dev() == right.dev())
-}
+pub use crate::perms::same_device;
 
 #[cfg(test)]
 mod tests {

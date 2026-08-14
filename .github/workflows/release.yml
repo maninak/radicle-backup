@@ -38,6 +38,11 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             cross: false
+          # Radicle itself does not run on Windows, so this binary is for reading and checking
+          # archives there, not for backing up a home that cannot exist.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,12 +79,22 @@ jobs:
           set -euo pipefail
           name=rad-backup-${{ matrix.target }}
           mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/rad-backup "dist/$name/"
+          binary=target/${{ matrix.target }}/release/rad-backup
+          [ -f "$binary" ] || binary="$binary.exe"
+          cp "$binary" "dist/$name/"
           cp README.md ARCHIVE-FORMAT.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
           cp -r packaging/generated "dist/$name/generated"
-          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          # Windows gets a .zip, because a .tar.gz there needs a tool the machine may not have.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            (cd dist && 7z a -bso0 "$name.zip" "$name" > /dev/null)
+            artefact="$name.zip"
+          else
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            artefact="$name.tar.gz"
+          fi
           rm -rf "dist/$name"
-          cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          cd dist && sha256sum "$artefact" > "$artefact.sha256" 2>/dev/null \
+            || shasum -a 256 "$artefact" > "$artefact.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -142,7 +157,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' \) -exec cp {} release/ \;
           cd release && shasum -a 256 * > sha256sums.txt
       - name: Notes
         run: |

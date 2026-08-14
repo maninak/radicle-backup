@@ -16,7 +16,10 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     if let Some(archive) = &args.mistaken {
         return Err(crate::error::Error::refused(
             "`ls` lists the archives of this identity; it does not open one",
-            format!("to see inside that one: rad backup show {}", archive.display()),
+            format!(
+                "to see inside that one: rad backup show {}",
+                archive.display()
+            ),
         ));
     }
     ctx.home.require()?;

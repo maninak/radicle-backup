@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::archive::{DOC_MODE, SECRET_MODE, Writer, create_private};
+use crate::archive::{DOC_MODE, SECRET_MODE, Writer};
 use crate::cli::Create;
 use crate::cmd::{Ctx, Scratch, archive_name, file_stamp, fill, iso_stamp, sidecar_path};
 use crate::crypt::{self, Encryption};
@@ -22,6 +22,7 @@ use crate::manifest::{
     self, IdentityInfo, Manifest, NodeInfo, PolicySummary, RepoSelection, SourceInfo, Tier,
     ToolInfo,
 };
+use crate::perms::create_private;
 use crate::rad::Rad;
 use crate::state;
 use crate::term;

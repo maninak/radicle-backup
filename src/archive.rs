@@ -23,10 +23,7 @@ use crate::manifest::{Entry, MANIFEST_ENTRY, Manifest};
 /// archive on the text-heavy contents of a Radicle home. Levels above ~15 stop paying.
 const COMPRESSION_LEVEL: i32 = 10;
 
-/// Permissions for anything that could hold key material: owner read and write, nothing else.
-pub const SECRET_MODE: u32 = 0o600;
-/// Permissions for documentation entries a user is meant to read after extracting.
-pub const DOC_MODE: u32 = 0o644;
+pub use crate::perms::{DOC_MODE, SECRET_MODE};
 
 pub struct Writer<'a> {
     tar: tar::Builder<zstd::Encoder<'static, Sink<'a>>>,
@@ -187,7 +184,7 @@ impl<'a> Reader<'a> {
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
             }
-            let mut file = create_private(&destination)?;
+            let mut file = crate::perms::create_private(&destination)?;
             io::copy(reader, &mut file).map_err(Error::Bare)?;
             file.flush().map_err(Error::Bare)?;
             Ok(())
@@ -235,22 +232,6 @@ impl<'a> Reader<'a> {
         }
         Ok(Scan { manifest, observed })
     }
-}
-
-/// Create a file only the owner can read, before any bytes go into it.
-///
-/// Setting the mode after writing would leave a window in which a private key is
-/// world-readable, and on a shared machine that window is all an attacker needs.
-pub fn create_private(path: &Path) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(SECRET_MODE)
-        .open(path)
-        .map_err(|e| Error::io(path, e))
 }
 
 fn header(size: u64, mode: u32) -> tar::Header {

@@ -133,21 +133,10 @@ impl Drop for Scratch {
 
 /// Make a directory readable only by its owner, before anything is written into it.
 pub fn set_owner_only(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let permissions = std::fs::Permissions::from_mode(0o700);
-    std::fs::set_permissions(path, permissions).map_err(|e| Error::io(path, e))
+    crate::perms::set_mode(path, crate::perms::DIR_MODE)
 }
 
-/// Write a file only its owner can read, creating it with those permissions rather than
-/// fixing them afterwards: a private key that is briefly world-readable has been read.
-pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write as _;
-
-    let mut file = crate::archive::create_private(path)?;
-    file.write_all(bytes).map_err(Error::Bare)?;
-    file.flush().map_err(Error::Bare)
-}
+pub use crate::perms::write_owner_only;
 
 /// Copy a file that may hold key material, landing it owner-only. Missing sources are not an
 /// error: an archive of one tier simply does not carry what another tier would.
@@ -163,14 +152,11 @@ pub fn copy_owner_only(from: &Path, to: &Path) -> Result<()> {
 /// would have. The staging copy is owner-only because it sat beside a private key, and
 /// carrying that mode through would leave a restored home subtly unlike a native one.
 pub fn copy_plain(from: &Path, to: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     if !from.is_file() {
         return Ok(());
     }
     std::fs::copy(from, to).map_err(|e| Error::io(to, e))?;
-    let permissions = std::fs::Permissions::from_mode(crate::archive::DOC_MODE);
-    std::fs::set_permissions(to, permissions).map_err(|e| Error::io(to, e))
+    crate::perms::set_mode(to, crate::perms::DOC_MODE)
 }
 
 /// Fill `{{PLACEHOLDER}}` markers in one of the shipped documents.

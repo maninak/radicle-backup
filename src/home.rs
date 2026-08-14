@@ -3,7 +3,6 @@
 //! Paths are named after what `rad self` calls them, so that a reader can hold this file and
 //! `rad self` output side by side.
 
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -110,11 +109,19 @@ impl Home {
         })
     }
 
+    #[cfg(unix)]
     pub fn node_state(&self) -> NodeState {
-        match UnixStream::connect(self.control_socket()) {
+        match std::os::unix::net::UnixStream::connect(self.control_socket()) {
             Ok(_) => NodeState::Running,
             Err(_) => NodeState::Stopped,
         }
+    }
+
+    /// A Radicle node is a unix program: there is no control socket to connect to here, and so
+    /// nothing that could be writing to storage while an archive is read.
+    #[cfg(not(unix))]
+    pub fn node_state(&self) -> NodeState {
+        NodeState::Stopped
     }
 
     /// The alias the node announces, read from `config.json` rather than from `rad self`, so

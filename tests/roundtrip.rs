@@ -528,7 +528,8 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
     let newest = archives[1].to_string_lossy().into_owned();
 
     // RAD_BACKUP_DIR is how a command with no argument knows where to look.
-    let out = fixture.command(&["show", "--json"], &fixture.home())
+    let out = fixture
+        .command(&["show", "--json"], &fixture.home())
         .env("RAD_BACKUP_DIR", &dir)
         .output()
         .expect("rad-backup runs");
@@ -542,11 +543,14 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
         serde_json::from_str(&stdout(&out)).expect("--json prints json");
     let shown = manifest["created"].as_str().expect("a created stamp");
 
-    let out = fixture.command(&["show", "--json", &archives[0].to_string_lossy()], &fixture.home())
+    let out = fixture
+        .command(
+            &["show", "--json", &archives[0].to_string_lossy()],
+            &fixture.home(),
+        )
         .output()
         .expect("rad-backup runs");
-    let older: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("--json prints json");
+    let older: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("--json prints json");
     assert!(
         shown > older["created"].as_str().expect("a created stamp"),
         "the newest archive is the one that should have been chosen"
@@ -570,7 +574,10 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
     std::fs::write(&bystander, b"not an archive").expect("the fixture file is writable");
     std::fs::write(&other, b"another identity").expect("the fixture file is writable");
 
-    let out = fixture.run(&["prune", "--keep", "1", "--dir", &dir, "--yes"], &fixture.home());
+    let out = fixture.run(
+        &["prune", "--keep", "1", "--dir", &dir, "--yes"],
+        &fixture.home(),
+    );
     assert_success(&out, "pruning");
 
     let left: Vec<String> = std::fs::read_dir(&backups)
@@ -579,10 +586,15 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| !name.ends_with(".README.txt"))
         .collect();
-    assert!(bystander.exists(), "a file this tool never wrote must survive");
+    assert!(
+        bystander.exists(),
+        "a file this tool never wrote must survive"
+    );
     assert!(other.exists(), "another identity's archive must survive");
     assert_eq!(
-        left.iter().filter(|name| name.starts_with("fixture-")).count(),
+        left.iter()
+            .filter(|name| name.starts_with("fixture-"))
+            .count(),
         1,
         "exactly one archive of this identity should be left: {left:?}"
     );
@@ -594,7 +606,10 @@ fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
     let backups = fixture.path("backups");
     let dir = backups.to_string_lossy().into_owned();
 
-    let out = fixture.run(&["--dry-run", "--tier", "full", "--output", &dir], &fixture.home());
+    let out = fixture.run(
+        &["--dry-run", "--tier", "full", "--output", &dir],
+        &fixture.home(),
+    );
     assert_success(&out, "rehearsing a backup");
     assert!(
         stderr(&out).contains("nothing was written"),

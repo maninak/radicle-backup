@@ -16,6 +16,7 @@ mod home;
 mod inventory;
 mod key;
 mod manifest;
+mod perms;
 mod rad;
 mod state;
 mod term;
