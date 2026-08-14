@@ -29,6 +29,16 @@ impl Inventory {
         self.records.iter().filter(|record| record.is_private())
     }
 
+    /// What to call a repository in a message: its name when the paperwork knows one, and its
+    /// identifier when it does not.
+    pub fn display_name(&self, rid: &str) -> String {
+        self.records
+            .iter()
+            .find(|record| record.rid == rid)
+            .map(|record| record.display_name().to_string())
+            .unwrap_or_else(|| rid.to_string())
+    }
+
     /// Repositories this identity is the only delegate of. Losing the key ends their
     /// governance, which is the one loss a backup cannot undo.
     pub fn sole_delegate(&self) -> impl Iterator<Item = &RepoRecord> {
@@ -77,11 +87,29 @@ pub fn collect(
     // The default selection is decided after the records exist, because "private" is a fact
     // about a repository that only the paperwork knows.
     let selected = match selection {
-        RepoSelection::Private => records
-            .iter()
-            .filter(|record| record.is_private())
-            .map(|record| record.rid.clone())
-            .collect(),
+        RepoSelection::Private => {
+            let private: BTreeSet<String> = records
+                .iter()
+                .filter(|record| record.is_private())
+                .map(|record| record.rid.clone())
+                .collect();
+            // Visibility lives in the identity document, which only `rad` reads. Without it
+            // every repository looks public, so this selection resolves to nothing, silently
+            // and with no repository named. That is the STATE tier's default, which is what
+            // the shipped systemd timer runs nightly: the failure mode was a year of green
+            // runs over archives carrying none of the repositories they were taken for. Not
+            // a refusal, because a home with no private repositories legitimately selects
+            // nothing and restoring on a machine without `rad` is real, but this exact
+            // combination is never what the person running it believes is happening.
+            if rad.is_none() && private.is_empty() && !stored.is_empty() {
+                warnings.push(format!(
+                    "this archive carries NO repositories: {} are in storage, and without \
+                     `rad` there is no way to tell which of them are private",
+                    stored.len()
+                ));
+            }
+            private
+        }
         _ => selected,
     };
 

@@ -6,7 +6,7 @@
 
 use crate::archives::{self, Archive};
 use crate::cli::Prune;
-use crate::cmd::{Ctx, archive_dir, sidecar_path};
+use crate::cmd::{Ctx, archive_dir, refuse_keep_zero, sidecar_path};
 use crate::error::{Error, Result};
 use crate::key::Identity;
 use crate::state;
@@ -14,12 +14,7 @@ use crate::term;
 
 pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     ctx.home.require()?;
-    if args.keep == 0 {
-        return Err(Error::refused(
-            "--keep 0 would delete every archive of this identity",
-            "keep at least one, or delete the files yourself if that is really what you mean",
-        ));
-    }
+    refuse_keep_zero(args.keep)?;
     let identity = Identity::read(ctx.home.public_key())?;
     let record = state::read(&identity.did())?;
     let directory = archive_dir(ctx, args.dir.as_deref(), record.record());

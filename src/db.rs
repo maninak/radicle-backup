@@ -7,7 +7,8 @@
 //! for these files.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -175,8 +176,34 @@ fn open_read_only(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
     match Connection::open_with_flags(path, flags) {
         Ok(db) => Ok(db),
-        Err(read_only_error) => Connection::open(path).map_err(|_| Error::Sqlite(read_only_error)),
+        Err(read_only_error) => {
+            let db = Connection::open(path).map_err(|_| Error::Sqlite(read_only_error))?;
+            record_writable_open(path);
+            Ok(db)
+        }
     }
+}
+
+/// Databases this run had to open writable after promising to read them.
+///
+/// Process-wide rather than threaded back through four return types, because that is the shape
+/// of the fact: somewhere in this run, a file we said we would only read was opened for
+/// writing. The command layer drains this once and says so, which is what the doc comment above
+/// has always claimed happens.
+static OPENED_WRITABLE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn record_writable_open(path: &Path) {
+    if let Ok(mut opened) = OPENED_WRITABLE.lock() {
+        opened.push(path.to_path_buf());
+    }
+}
+
+/// Take the list of such databases, leaving it empty.
+pub fn drain_writable_opens() -> Vec<PathBuf> {
+    OPENED_WRITABLE
+        .lock()
+        .map(|mut opened| std::mem::take(&mut *opened))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

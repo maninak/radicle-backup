@@ -21,6 +21,11 @@ const TIMER: &str = "rad-backup.timer";
 
 pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ctx.home.require()?;
+    // Checked here too: this is the verb that writes the number into a file a timer reads
+    // every night, so a bad one is installed rather than typed once.
+    if let Some(keep) = args.keep {
+        crate::cmd::refuse_keep_zero(keep)?;
+    }
     let systemctl = Tool::on_path("systemctl");
     if !systemctl.is_available() {
         return without_systemd(ctx, args);
@@ -53,10 +58,27 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     let environment = environment_file()?;
     write_environment(ctx, &environment, args, passphrase_file.as_deref())?;
     write_unit(ctx, &dir.join(SERVICE), &service_unit(&environment))?;
-    write_unit(ctx, &dir.join(TIMER), &timer_unit(&calendar(&args.every)))?;
+    write_unit(ctx, &dir.join(TIMER), &timer_unit(&args.every))?;
 
-    systemctl.passthrough(&["--user", "daemon-reload"])?;
-    systemctl.passthrough(&["--user", "enable", "--now", TIMER])?;
+    // The booleans matter: `enable` is where systemd parses OnCalendar=, so a schedule it
+    // rejects fails HERE. Discarding these answers is how a user ends up told a backup will
+    // be taken nightly by a timer systemd never loaded.
+    if !systemctl.passthrough(&["--user", "daemon-reload"])? {
+        return Err(Error::refused(
+            "systemd would not reload its unit files, so the timer was not installed",
+            "run `systemctl --user daemon-reload` to see what it objects to",
+        ));
+    }
+    if !systemctl.passthrough(&["--user", "enable", "--now", TIMER])? {
+        return Err(Error::refused(
+            format!(
+                "systemd would not enable {TIMER}, so no backup is scheduled; `{}` is the \
+                 likeliest thing it rejected",
+                args.every
+            ),
+            "run `systemd-analyze calendar '<expression>'` to check the schedule, then try again",
+        ));
+    }
     ctx.term
         .ok(&format!("a backup will be taken {}", describe(&args.every)));
     status(ctx, &systemctl)
@@ -238,15 +260,6 @@ WantedBy=timers.target
     )
 }
 
-/// The systemd calendar expression for what the user asked for. Anything this does not know
-/// is passed through, because systemd's own vocabulary is richer than three words.
-fn calendar(every: &str) -> String {
-    match every {
-        "daily" | "weekly" | "hourly" | "monthly" => every.to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn describe(every: &str) -> String {
     match every {
         "daily" => "every day".to_string(),
@@ -277,7 +290,8 @@ mod tests {
 
     #[test]
     fn a_schedule_systemd_understands_is_passed_through_unchanged() {
-        assert_eq!(calendar("Mon,Thu 04:00"), "Mon,Thu 04:00");
-        assert_eq!(calendar("daily"), "daily");
+        // `--every` accepts anything systemd's OnCalendar accepts, so nothing here may
+        // reinterpret it: systemd is the only thing that gets to decide what it means.
+        assert!(timer_unit("Mon *-*-* 03:30:00").contains("OnCalendar=Mon *-*-* 03:30:00"));
     }
 }

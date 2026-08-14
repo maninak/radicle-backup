@@ -37,9 +37,16 @@ impl Term {
     /// be piped without the narration mixing in.
     fn say(&self, line: &str) {
         if self.verbosity == Verbosity::Normal {
-            let mut err = io::stderr();
-            let _ = writeln!(err, "{line}");
+            self.always(line);
         }
+    }
+
+    /// For lines `--quiet` must not swallow. A warning is not narration: the shipped systemd
+    /// unit and the crontab in the README both pass `--quiet`, so routing warnings through
+    /// `say` meant an unattended run could narrow what it archived and still look clean.
+    fn always(&self, line: &str) {
+        let mut err = io::stderr();
+        let _ = writeln!(err, "{line}");
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
@@ -71,11 +78,11 @@ impl Term {
     }
 
     pub fn fail(&self, text: &str) {
-        self.say(&format!("{} {text}", self.paint("31", "✗")));
+        self.always(&format!("{} {text}", self.paint("31", "✗")));
     }
 
     pub fn warn(&self, text: &str) {
-        self.say(&format!("{} {text}", self.paint("33", "!")));
+        self.always(&format!("{} {text}", self.paint("33", "!")));
     }
 
     /// For a question that could not be answered. `·` would read as a neutral bullet, and a

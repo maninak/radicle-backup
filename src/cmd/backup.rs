@@ -64,6 +64,12 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
         ));
     }
 
+    // Before anything is stopped or written: a retention that would empty the directory is a
+    // refusal, not something to discover after the archive is on disk.
+    if let Some(keep) = args.keep {
+        crate::cmd::refuse_keep_zero(keep)?;
+    }
+
     let mut warnings = Vec::new();
     let node = quiesce(ctx, args, rad.as_ref(), &mut warnings)?;
 
@@ -84,6 +90,10 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
 
     if args.dry_run {
         rehearse(ctx, &inventory, tier, selection, &warnings);
+        // `quiesce` already ran, so a rehearsal with `--stop-node` really did stop the node.
+        // Put it back before returning, or `--dry-run` leaves the thing it promised not to
+        // touch switched off.
+        restart_node(ctx, &node, rad.as_ref())?;
         return Ok(None);
     }
 
@@ -207,6 +217,19 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
         SCRIPT_MODE,
     )?;
 
+    // Drained here rather than at each read, because a database opened writable is a fact
+    // about the whole run and the archive should carry it: a reader of this manifest deserves
+    // to know that taking it touched a file this tool says it only reads.
+    for path in crate::db::drain_writable_opens() {
+        let warning = format!(
+            "{} could not be opened read-only, so it was opened for writing to recover its \
+             write-ahead log",
+            path.display()
+        );
+        ctx.term.warn(&warning);
+        warnings.push(warning);
+    }
+
     manifest.warnings = warnings;
     writer.finish(&mut manifest)?;
     let path = destination.commit()?;
@@ -214,12 +237,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Option<PathBuf>> {
     if let Some(path) = &path {
         write_sidecar(path, &manifest, &encryption, archived)?;
     }
-    if node.stopped_by_backup {
-        term.step("starting the node again");
-        if let Some(rad) = &rad {
-            rad.start_node()?;
-        }
-    }
+    restart_node(ctx, &node, rad.as_ref())?;
     if let (Some(path), Some(keep)) = (&path, args.keep) {
         prune(ctx, path, &manifest, keep)?;
     }
@@ -376,6 +394,28 @@ fn quiesce(
     ))
 }
 
+/// Put back a node this run stopped, on every path that leaves `run`.
+///
+/// A non-zero `rad node start` is said out loud rather than dropped: leaving a seed down after
+/// a backup is a silent outage, and the exit status was the only sign of it.
+fn restart_node(ctx: &Ctx, node: &NodeHandling, rad: Option<&Rad>) -> Result<()> {
+    if !node.stopped_by_backup {
+        return Ok(());
+    }
+    ctx.term.step("starting the node again");
+    let Some(rad) = rad else {
+        ctx.term
+            .warn("rad is no longer on PATH, so the node this run stopped is still stopped");
+        return Ok(());
+    };
+    if !rad.start_node()? {
+        ctx.term
+            .warn("`rad node start` failed, so the node this run stopped is still stopped");
+        ctx.term.hint("start it with `rad node start`");
+    }
+    Ok(())
+}
+
 fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
     if args.plaintext {
         ctx.term
@@ -429,7 +469,17 @@ impl Destination {
                 final_path,
                 partial,
             } => {
+                // Flushed is not durable: `Write::flush` on a `File` is a no-op, so without
+                // this the rename could land before the bytes and a crash would leave an empty
+                // file under the finished name, which is exactly what `.partial` exists to
+                // stop. The directory is synced too, or the rename itself can be lost.
+                std::fs::File::open(partial)
+                    .and_then(|file| file.sync_all())
+                    .map_err(|e| Error::io(partial, e))?;
                 std::fs::rename(partial, final_path).map_err(|e| Error::io(final_path, e))?;
+                if let Some(directory) = final_path.parent() {
+                    let _ = std::fs::File::open(directory).map(|dir| dir.sync_all());
+                }
                 Ok(Some(final_path.clone()))
             }
         }
@@ -525,10 +575,22 @@ fn archive_repositories(
     ));
 
     let mut archived = 0;
+    let mut failed = Vec::new();
     for rid in &inventory.selected {
         let repo = ctx.home.repository_path(rid);
         let bundle = scratch.file("repository.bundle");
-        git.bundle(&repo, &bundle)?;
+        // One broken repository does not cost the user every other one. A `fatal: bad object`
+        // out of `git bundle create` used to abort the whole run, so a home with a single
+        // damaged repository could not be backed up at all, which is the opposite of what a
+        // backup tool is for. The failure is named, carried into the manifest, and reflected
+        // in the exit code, so it can be neither missed nor mistaken for success.
+        if let Err(error) = git.bundle(&repo, &bundle) {
+            ctx.term
+                .fail(&format!("{}: {error}", inventory.display_name(rid)));
+            failed.push(format!("{rid} could not be bundled: {error}"));
+            let _ = std::fs::remove_file(&bundle);
+            continue;
+        }
 
         let entry = git::bundle_entry(rid);
         let stored = writer.add_file(&entry.to_string_lossy(), &bundle, SECRET_MODE)?;
@@ -543,6 +605,18 @@ fn archive_repositories(
             record.bundle = Some(stored);
         }
         archived += 1;
+    }
+
+    // Left in `record.bundle = None`, which is already how the rest of the tool spells "this
+    // archive does not carry that repository", so `show`, `verify` and `doctor` all read it
+    // without being taught anything new.
+    manifest.warnings.extend(failed.iter().cloned());
+    if !failed.is_empty() {
+        ctx.term.warn(&format!(
+            "{} of {} selected repositories could not be bundled and are NOT in this archive",
+            failed.len(),
+            inventory.selected.len()
+        ));
     }
     Ok(archived)
 }

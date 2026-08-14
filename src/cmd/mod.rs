@@ -178,6 +178,21 @@ pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
     text
 }
 
+/// Refuse a retention of zero, wherever it was spelled.
+///
+/// `prune` refused it and `--keep` did not, so one number meant "refuse" on one verb and
+/// "delete every archive but the one just written" on the other. Both read `RAD_BACKUP_KEEP`
+/// and `schedule` writes that file, so the divergence reached an unattended timer.
+pub fn refuse_keep_zero(keep: usize) -> Result<()> {
+    if keep == 0 {
+        return Err(Error::refused(
+            "--keep 0 would delete every archive of this identity",
+            "keep at least one, or delete the files yourself if that is really what you mean",
+        ));
+    }
+    Ok(())
+}
+
 /// The name an archive gets: identity first, then when it was taken, so that a directory of
 /// them sorts by identity and then chronologically.
 pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: bool) -> String {
