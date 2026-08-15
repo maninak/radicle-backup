@@ -4,7 +4,7 @@
 //! a single file whose object graph git itself checks on the way in and on the way out. A
 //! directory copy would also carry unreachable objects and could be silently truncated.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::Result;
 use crate::exec::Tool;

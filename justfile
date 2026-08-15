@@ -14,11 +14,16 @@ fmt-check:
 
 # `--locked` on both, matching CI: a Cargo.toml requirement widened without updating
 # Cargo.lock is an error here rather than a silent re-resolve that only CI notices.
+#
+# `-D warnings` likewise, because CI sets it for every job and this recipe claims to be what
+# CI runs. Without it an unused import passed here and failed there, which is the worst thing
+# a local gate can do: report a safety it is not providing. Passing it through RUSTFLAGS is
+# safe despite the splitting note in `repro` below, because neither word is a path.
 lint:
-    cargo clippy --all-targets --locked
+    RUSTFLAGS="-D warnings" cargo clippy --all-targets --locked
 
 test:
-    cargo test --locked
+    RUSTFLAGS="-D warnings" cargo test --locked
 
 # Generate the man page, shell completions and the Debian changelog.
 generated: build
