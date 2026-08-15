@@ -1,6 +1,8 @@
 # Contributing
 
-Patches are welcome either way: `rad patch` against the Radicle repository, or a GitHub pull request.
+The Radicle repository is [`rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J`](https://app.radicle.at/nodes/seed.radicle.at/rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J). Clone it with `rad clone rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J`.
+
+Patches are welcome either way: `rad patch` against that clone, or a GitHub pull request.
 
 **Issues live on Radicle only.** `rad issue open` in a clone of this repository; GitHub issues are turned off. If Radicle is not an option for you, the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com) reaches the same person.
 
