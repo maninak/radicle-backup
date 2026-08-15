@@ -46,7 +46,10 @@
 
             postInstall = ''
               ln -s rad-backup $out/bin/rad-restore
-              installManPage <($out/bin/rad-backup man)
+              # A real file, not <(...): installManPage reads the section number off the
+              # filename, and a process substitution is /dev/fd/63, which has none.
+              $out/bin/rad-backup man > "$TMPDIR/rad-backup.1"
+              installManPage "$TMPDIR/rad-backup.1"
               installShellCompletion --cmd rad-backup \
                 --bash <($out/bin/rad-backup completions bash) \
                 --fish <($out/bin/rad-backup completions fish) \
