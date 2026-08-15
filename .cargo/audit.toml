@@ -1,0 +1,17 @@
+# cargo-audit configuration. Read by the `advisories` CI job and by `cargo audit` locally.
+
+[advisories]
+# RUSTSEC-2023-0071, the Marvin attack: a timing sidechannel in the `rsa` crate's private-key
+# operations. It reaches us through `age`'s `ssh` feature, which is what lets a person encrypt
+# an archive to an `ssh-ed25519` or `ssh-rsa` public key; the feature carries `rsa` whether or
+# not an RSA key is ever used. There is no patched release of `rsa`, so the only alternative to
+# ignoring it is dropping ssh-key support altogether.
+#
+# The attack needs an oracle: many chosen ciphertexts decrypted with the victim's key, each one
+# timed. This tool decrypts once, locally, against an archive the operator already holds, and
+# only when they pass `--identity` naming an ssh-RSA private key. Encrypting TO an ssh key is
+# a public-key operation and is not affected at all.
+#
+# Revisit when `rsa` ships a fix (watch https://github.com/RustCrypto/RSA/issues/626), or when
+# `age` gains a way to take ssh keys without it. Either one makes this entry removable.
+ignore = ["RUSTSEC-2023-0071"]
