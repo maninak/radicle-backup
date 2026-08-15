@@ -705,7 +705,6 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::archive::SECRET_MODE;
 
     #[test]
     fn every_standing_says_what_it_means_in_words_a_person_can_act_on() {
@@ -716,6 +715,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_private_copy_lands_with_owner_only_permissions() {
+        use crate::archive::SECRET_MODE;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!("rad-backup-restore-{}", std::process::id()));

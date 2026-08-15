@@ -91,6 +91,8 @@ impl Home {
     }
 
     /// The socket a running node listens on. Its presence is how we know the node is up.
+    /// Only a unix node has one, and only `node_state` below asks for it.
+    #[cfg(unix)]
     pub fn control_socket(&self) -> PathBuf {
         self.node_dir().join("control.sock")
     }
