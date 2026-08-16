@@ -1,6 +1,3 @@
 # Keys that sign radicle.tools releases, in ssh allowed_signers format. `verify.sh` accepts a
-# signature from any of them, and nothing else.
-#
-# maninak's Radicle identity: the same key that signs the repository's patches and commits, so
-# a release and the source it came from point at one person.
-maninak@radicle.tools ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK
+# signature from any key listed here, so this file is the trusted set. Append-only rotation.
+maninak@radicle.tools ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFDk/ytyX5lX423jm5hwBST+TKyVyaf+eF4zc7QbW/0T
