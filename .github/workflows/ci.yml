@@ -107,7 +107,12 @@ jobs:
       # did: the `result` symlink, hence `--no-link`, and `flake.lock`, which `nix build`
       # creates when it is absent. That is why `--rebuild` reported a derivation it had never
       # built instead of comparing two. Writing the lock once up front settles the tree before
-      # either build looks at it. Revisit when flake.lock is committed, which also removes it.
+      # either build looks at it.
+      #
+      # The lock is deliberately not committed. flake.nix pins nixpkgs by revision, so a lock
+      # would add only a narHash and no reproducibility that is not already there, and nothing
+      # that maintains this repository has nix installed to regenerate one when that revision
+      # moves. Revisit if a second input arrives, or if the flake ever tracks a branch.
       - name: Write the lock file before anything hashes the tree
         run: nix flake lock
       - name: Build
