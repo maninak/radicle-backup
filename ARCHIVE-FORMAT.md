@@ -129,4 +129,4 @@ git --git-dir ~/.radicle/storage/$rid symbolic-ref HEAD "$(jq -r '.repos[]|selec
 
 | Version | Released | Changes |
 |---|---|---|
-| 1 | unreleased | The format described here. |
+| 1 | 0.1.0 | The format described here. |
