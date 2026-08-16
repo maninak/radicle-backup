@@ -51,7 +51,7 @@ The Linux builds are statically linked against musl, so they run on any distribu
 cargo install radicle-backup
 ```
 
-Needs Rust 1.88 or newer. `git` on `PATH` is required at runtime; `rad` is optional and only makes the archive better informed.
+`git` on `PATH` is required at runtime; `rad` is optional and only makes the archive better informed. The Rust floor is `rust-version` in `Cargo.toml`, and `cargo` says so if yours is older.
 
 ### As a `rad` subcommand
 
@@ -381,7 +381,7 @@ The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, t
 
 Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.md` has the details, `ARCHIVE-FORMAT.md` specifies the format if you want to write another reader, and `SECURITY.md` says what to do about a vulnerability.
 
-[How to audit this](SECURITY.md#how-to-audit-this) names the five files that touch a secret and what each one has to convince a reviewer of.
+[How to audit this](SECURITY.md#how-to-audit-this) names the files that touch a secret and what each one has to convince a reviewer of.
 
 ## Support
 
