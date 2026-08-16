@@ -51,8 +51,35 @@ if [ -n "${APT_GPG_PRIVATE_KEY:-}" ]; then
   chmod 700 "$GNUPGHOME"
   printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
 fi
-KEY_ID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ { print $5; exit }')"
-[ -n "$KEY_ID" ] || { echo "no secret key to sign the repository with" >&2; exit 1; }
+# Signing key selection. Only one that can sign and is not expired, revoked, disabled or
+# invalid: the fresh GNUPGHOME above exists only when CI supplies the key, so a local run reads
+# whatever the keyring already holds and the first entry there is rarely this repository's.
+# Several candidates refuse rather than pick, because an index signed by the wrong key is
+# rejected by every client holding the right one, with nothing in between to say why.
+# Capability matches in either case: gpg writes it lowercase for the primary and uppercase for
+# the whole key.
+if [ -n "${APT_GPG_KEY_ID:-}" ]; then
+  KEY_ID="$APT_GPG_KEY_ID"
+else
+  mapfile -t usable < <(
+    gpg --list-secret-keys --with-colons |
+      awk -F: '$1 == "sec" && $2 !~ /[erid]/ && $12 ~ /[sS]/ { print $5 }'
+  )
+  case ${#usable[@]} in
+    1) KEY_ID="${usable[0]}" ;;
+    0)
+      echo "no secret key here can sign: every one is expired, revoked, disabled or has no" \
+           "signing capability" >&2
+      gpg --list-secret-keys --keyid-format=long >&2 || true
+      exit 1
+      ;;
+    *)
+      echo "more than one secret key here could sign (${usable[*]}), and picking one would be" \
+           "a guess; name it with APT_GPG_KEY_ID" >&2
+      exit 1
+      ;;
+  esac
+fi
 log "signing with $KEY_ID"
 
 log "fetching the current pool"
