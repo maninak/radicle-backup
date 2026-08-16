@@ -38,11 +38,11 @@ generated: build
     printf '.so man1/rad-backup.1\n' > packaging/generated/rad-restore.1
     printf 'radicle-backup (%s-1) stable; urgency=medium\n\n  * Upstream release %s. The changelog for it is at\n    https://github.com/maninak/radicle-backup/blob/master/CHANGELOG.md\n\n -- Konstantinos Maninakis <info@radicle.tools>  %s\n' "$(just version)" "$(just version)" "$(just rfc-date)" > packaging/generated/changelog.Debian
 
-# The version in Cargo.toml, which is the one every artefact is named after.
+# The version in Cargo.toml, which is the one every artifact is named after.
 version:
     @grep -m1 '^version' Cargo.toml | cut -d'"' -f2
 
-# The one timestamp every generated artefact uses: SOURCE_DATE_EPOCH if the caller set one,
+# The one timestamp every generated artifact uses: SOURCE_DATE_EPOCH if the caller set one,
 # else the commit being built. Reading the clock instead would make two builds of one commit
 # produce two different .deb files.
 epoch:
@@ -115,3 +115,61 @@ install-local: generated
 clean:
     cargo clean
     rm -rf packaging/generated dist
+
+# Everything a release needs before the tag exists, which is the part CI cannot do for itself:
+# the version bump, the changelog section CI quotes, and the tag. Stops there. Pushing the tag
+# is what starts the publish, and crates.io cannot take one back, so that stays a separate act.
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{version}}"
+    printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+        || { echo "not a release version: $v, expected MAJOR.MINOR.PATCH[-prerelease]" >&2; exit 1; }
+    [ "$(git branch --show-current)" = master ] \
+        || { echo "releases are cut from master" >&2; exit 1; }
+    git diff --quiet && git diff --cached --quiet \
+        || { echo "uncommitted changes; the release commit carries only the bump" >&2; exit 1; }
+    ! git rev-parse -q --verify "refs/tags/v$v" > /dev/null \
+        || { echo "v$v already exists as a tag" >&2; exit 1; }
+    # An empty [Unreleased] is a release with nothing in it, and the release page would quote
+    # the blank section rather than say so.
+    awk '/^## \[Unreleased\]/ { p = 1; next } p && /^## / { exit } p && NF { hit = 1 }
+         END { exit !hit }' CHANGELOG.md \
+        || { echo "CHANGELOG.md has no '## [Unreleased]' section with anything in it. Write" \
+                  "what changed there first: a release renames that heading and leaves none" \
+                  "behind, so the next change to land is what opens the next one." >&2; exit 1; }
+
+    # A failure past this point puts the four files back, so the next run starts where this
+    # one did instead of failing its own clean-tree check on the half-release it left behind.
+    trap 'git checkout -- Cargo.toml Cargo.lock CHANGELOG.md ARCHIVE-FORMAT.md' ERR
+
+    # awk rather than `sed -i`, which spells its backup suffix differently on GNU and BSD.
+    awk -v v="$v" '!done && /^version = / { print "version = \"" v "\""; done = 1; next } { print }' \
+        Cargo.toml > Cargo.toml.next && mv Cargo.toml.next Cargo.toml
+    # --offline so a release bump cannot also drag in a dependency update nobody asked for.
+    cargo update --workspace --offline
+    # [Unreleased] becomes the released heading, and nothing takes its place: a shipped
+    # changelog should not open with a heading that has nothing under it. The first change to
+    # land after a release adds it back. `## [<version>]` is the shape release.yml greps for.
+    awk -v v="$v" -v day="$(date -u +%F)" \
+        '!done && /^## \[Unreleased\]/ { print "## [" v "] - " day; done = 1; next } { print }' \
+        CHANGELOG.md > CHANGELOG.md.next && mv CHANGELOG.md.next CHANGELOG.md
+    # Two package versions in ARCHIVE-FORMAT.md derive from nothing: the version-history row
+    # naming the release that first shipped the current format, and the sample manifest, which
+    # shows what this build writes. The format version is a different number and is left alone.
+    awk -v v="$v" '/^\| *[0-9]+ *\| *unreleased *\|/ { sub(/unreleased/, v) } { print }' \
+        ARCHIVE-FORMAT.md > ARCHIVE-FORMAT.md.next && mv ARCHIVE-FORMAT.md.next ARCHIVE-FORMAT.md
+    awk -v v="$v" '/"tool": *\{ *"name": *"rad-backup", *"version":/ {
+            sub(/"version": *"[^"]*"/, "\"version\": \"" v "\"") } { print }' \
+        ARCHIVE-FORMAT.md > ARCHIVE-FORMAT.md.next && mv ARCHIVE-FORMAT.md.next ARCHIVE-FORMAT.md
+
+    just check
+    # The commit is about to take these four, so a failure after it must not put them back.
+    trap - ERR
+    git add Cargo.toml Cargo.lock CHANGELOG.md ARCHIVE-FORMAT.md
+    git commit -m "chore: release $v"
+    git tag -a "v$v" -m "v$v"
+    echo
+    echo "v$v is committed and tagged, and nothing has left this machine. Read it with"
+    echo "'git show v$v', then release with:"
+    echo "    git push origin master && git push origin v$v && git push rad master && git push rad v$v"
