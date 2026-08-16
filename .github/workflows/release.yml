@@ -1,6 +1,6 @@
 name: Release
 
-# Tagging is the whole trigger. `git tag v0.2.0 && git push --tags` builds every artefact,
+# Tagging is the whole trigger. `git tag v0.2.0 && git push --tags` builds every artifact,
 # publishes the release, refreshes the apt repository and pushes the crate.
 on:
   push:
@@ -155,14 +155,14 @@ jobs:
           # Windows gets a .zip, because a .tar.gz there needs a tool the machine may not have.
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd dist && 7z a -bso0 "$name.zip" "$name" > /dev/null)
-            artefact="$name.zip"
+            artifact="$name.zip"
           else
             tar -czf "dist/$name.tar.gz" -C dist "$name"
-            artefact="$name.tar.gz"
+            artifact="$name.tar.gz"
           fi
           rm -rf "dist/$name"
-          cd dist && sha256sum "$artefact" > "$artefact.sha256" 2>/dev/null \
-            || shasum -a 256 "$artefact" > "$artefact.sha256"
+          cd dist && sha256sum "$artifact" > "$artifact.sha256" 2>/dev/null \
+            || shasum -a 256 "$artifact" > "$artifact.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -266,7 +266,7 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Signed here rather than per-artefact: one signature over the checksum file covers
+      # Signed here rather than per-artifact: one signature over the checksum file covers
       # every file it names, and it is the file a downloader has to trust anyway.
       - name: Sign the checksums
         if: ${{ steps.signing.outputs.available == 'true' }}
@@ -328,7 +328,7 @@ jobs:
         if: ${{ env.R2_ENDPOINT != '' && env.APT_GPG_PRIVATE_KEY != '' }}
         run: ./packaging/apt/publish.sh incoming
       # A missing credential is a configuration gap, not a broken release: say which one is
-      # missing rather than failing a job whose other artefacts went out fine.
+      # missing rather than failing a job whose other artifacts went out fine.
       - name: Say so when the apt repository is not refreshed
         if: ${{ env.R2_ENDPOINT == '' || env.APT_GPG_PRIVATE_KEY == '' }}
         run: |
@@ -351,7 +351,7 @@ jobs:
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         run: cargo publish --locked
       # Same rule as the apt job: a credential nobody has set yet is a configuration gap, and
-      # failing the run would say the release broke when every artefact of it went out fine.
+      # failing the run would say the release broke when every artifact of it went out fine.
       - name: Say so when the crate is not published
         if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
         run: |

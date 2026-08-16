@@ -5,7 +5,7 @@
 #   ./packaging/homebrew/render.sh 0.1.0 > rad-backup.rb
 #
 # The checksums come from the release's own sha256sums.txt, so the formula cannot claim a
-# digest that no published artefact has.
+# digest that no published artifact has.
 set -euo pipefail
 
 VERSION="${1:?usage: render.sh <version>}"

@@ -34,7 +34,7 @@ for signer in $(awk '{print $1}' "$SIGNERS" | sort -u); do
 done
 [ "${signed:-0}" = 1 ] || { echo "the signature is not from a key this project names" >&2; exit 1; }
 
-# Only the lines for files that are actually here, so verifying one downloaded artefact does
+# Only the lines for files that are actually here, so verifying one downloaded artifact does
 # not fail over the seven you did not want.
 present=$(mktemp)
 trap 'rm -f "$present"' EXIT
