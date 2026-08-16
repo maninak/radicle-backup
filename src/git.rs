@@ -178,19 +178,19 @@ impl Git {
 
 /// The bundle file name for a repository inside an archive. One place, so the writer and the
 /// reader cannot disagree about it.
-pub fn bundle_entry(rid: &str) -> PathBuf {
-    PathBuf::from("repos").join(format!(
-        "{}.bundle",
-        rid.strip_prefix("rad:").unwrap_or(rid)
-    ))
+///
+/// A `String` holding a literal `/`, not a `PathBuf`: this names a place inside a tar, and tar
+/// separates with `/` on every platform. Built as a path it came back `repos\x.bundle` on
+/// Windows while tar stored `repos/x.bundle`, so the manifest accused the archive of both
+/// losing an entry and carrying an unlisted one. Joining it onto a directory still works, so
+/// only the naming side changes.
+pub fn bundle_entry(rid: &str) -> String {
+    format!("repos/{}.bundle", rid.strip_prefix("rad:").unwrap_or(rid))
 }
 
 /// The config file name for a repository inside an archive.
-pub fn config_entry(rid: &str) -> PathBuf {
-    PathBuf::from("repos").join(format!(
-        "{}.config",
-        rid.strip_prefix("rad:").unwrap_or(rid)
-    ))
+pub fn config_entry(rid: &str) -> String {
+    format!("repos/{}.config", rid.strip_prefix("rad:").unwrap_or(rid))
 }
 
 /// The ref that holds a peer's signed refs, which is what divergence is measured on.
@@ -206,11 +206,11 @@ mod tests {
     fn archive_entry_names_drop_the_rad_prefix_but_keep_the_identifier() {
         assert_eq!(
             bundle_entry("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"),
-            PathBuf::from("repos/z3gqcJUoA1n9HaHKufZs5FCSGazv5.bundle")
+            "repos/z3gqcJUoA1n9HaHKufZs5FCSGazv5.bundle"
         );
         assert_eq!(
             config_entry("z3gqcJUoA1n9HaHKufZs5FCSGazv5"),
-            PathBuf::from("repos/z3gqcJUoA1n9HaHKufZs5FCSGazv5.config")
+            "repos/z3gqcJUoA1n9HaHKufZs5FCSGazv5.config"
         );
     }
 

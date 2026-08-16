@@ -704,12 +704,12 @@ fn archive_repositories(
         }
 
         let entry = git::bundle_entry(rid);
-        let stored = writer.add_file(&entry.to_string_lossy(), &bundle, SECRET_MODE)?;
+        let stored = writer.add_file(&entry, &bundle, SECRET_MODE)?;
         std::fs::remove_file(&bundle).map_err(|e| Error::io(&bundle, e))?;
 
         let config = repo.join("config");
         if config.is_file() {
-            writer.add_file(&git::config_entry(rid).to_string_lossy(), &config, DOC_MODE)?;
+            writer.add_file(&git::config_entry(rid), &config, DOC_MODE)?;
         }
 
         if let Some(record) = manifest.repos.iter_mut().find(|record| &record.rid == rid) {

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -55,6 +55,7 @@ impl<'a> Writer<'a> {
 
     /// Add bytes already in memory: manifests, JSON exports, the restore instructions.
     pub fn add_bytes(&mut self, path: &str, bytes: &[u8], mode: u32) -> Result<()> {
+        reject_unwritable_name(path)?;
         let mut header = header(bytes.len() as u64, mode);
         self.tar
             .append_data(&mut header, path, bytes)
@@ -76,6 +77,7 @@ impl<'a> Writer<'a> {
     /// otherwise be padded or truncated to fit a header that no longer describes it, and the
     /// archive would be reported as written.
     pub fn add_file(&mut self, path: &str, source: &Path, mode: u32) -> Result<Entry> {
+        reject_unwritable_name(path)?;
         let file = std::fs::File::open(source).map_err(|e| Error::io(source, e))?;
         let size = file.metadata().map_err(|e| Error::io(source, e))?.len();
 
@@ -327,24 +329,59 @@ fn header(size: u64, mode: u32) -> tar::Header {
     header
 }
 
+/// Refuse to WRITE an entry under a name the tar cannot carry unchanged.
+///
+/// The manifest records the name it was given, tar records the name it stored, and verify
+/// compares the two. A name built with the platform separator made those disagree on Windows:
+/// the manifest said `repos\x.bundle`, the tar said `repos/x.bundle`, and every archive taken
+/// there failed its own verification. Refusing here rather than at read time puts the error on
+/// the caller that got the name wrong, before an unverifiable archive exists.
+fn reject_unwritable_name(path: &str) -> Result<()> {
+    if !is_portable_entry_name(path) {
+        return Err(Error::Refused {
+            what: format!("`{path}` is not a name an archive entry can carry"),
+            remedy: "archive entry names are relative and separated with `/` on every platform; \
+                     build them as strings, not as paths"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Refuse an entry that would write outside the directory it is being unpacked into.
 ///
 /// Archives are usually one's own, but "usually" is not a security property: a restore runs
 /// with the user's full rights, and an entry called `../../.ssh/authorized_keys` would use
 /// them.
 fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
-    let path = Path::new(entry_path);
-    let escapes = path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir));
-    if escapes {
+    if !is_portable_entry_name(entry_path) {
         return Err(Error::NotAnArchive {
             path: archive.to_path_buf(),
             reason: format!("entry `{entry_path}` points outside the archive"),
         });
     }
     Ok(())
+}
+
+/// Is this a name a tar entry may carry: relative, `/`-separated, staying under its root?
+///
+/// Judged on the name itself, never on what the running platform makes of it. A tar entry name
+/// separates with `/` and nothing else, so a backslash or a `C:` is never a name this tool
+/// wrote, and every one of those shapes makes `Path::join` throw the destination away
+/// somewhere: `/etc/passwd` is not `is_absolute()` on Windows, yet it still lands at the root
+/// of the current drive. A name refused on one platform is refused on all of them, the only
+/// answer a format meant to be read anywhere can give.
+fn is_portable_entry_name(entry_path: &str) -> bool {
+    let bytes = entry_path.as_bytes();
+    let drive_qualified = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    !drive_qualified
+        && !entry_path.contains('\\')
+        && !Path::new(entry_path).components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
 }
 
 /// Refuse a repository id that would not stay a single directory under `storage/`.
@@ -645,5 +682,36 @@ mod tests {
         assert!(reject_traversal("keys/radicle", archive).is_ok());
         assert!(reject_traversal("../../.ssh/authorized_keys", archive).is_err());
         assert!(reject_traversal("/etc/passwd", archive).is_err());
+        // Windows shapes, refused on every platform: the archive is the same file wherever it
+        // is opened, so the verdict on it has to be too. Each of these lands outside the
+        // destination on Windows, and the first two are not `is_absolute()` there.
+        assert!(reject_traversal("C:/Windows/System32/drivers/etc/hosts", archive).is_err());
+        assert!(reject_traversal("C:evil", archive).is_err());
+        assert!(reject_traversal("\\\\server\\share\\evil", archive).is_err());
+        assert!(reject_traversal("keys\\radicle", archive).is_err());
+    }
+
+    #[test]
+    fn an_entry_name_the_tar_would_rewrite_is_refused_at_write_time() {
+        assert!(reject_unwritable_name("repos/z3gq.bundle").is_ok());
+        // What `PathBuf::from("repos").join(..)` produced on Windows. tar stored it with a `/`
+        // while the manifest kept the `\`, so verify reported the entry both missing and
+        // unlisted, and every archive taken on Windows failed its own check.
+        assert!(reject_unwritable_name("repos\\z3gq.bundle").is_err());
+        assert!(reject_unwritable_name("/etc/passwd").is_err());
+        assert!(reject_unwritable_name("../escape").is_err());
+    }
+
+    #[test]
+    fn repository_entry_names_are_the_same_on_every_platform() {
+        for name in [
+            crate::git::bundle_entry("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"),
+            crate::git::config_entry("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"),
+        ] {
+            assert!(
+                reject_unwritable_name(&name).is_ok(),
+                "`{name}` is not a name an archive can carry"
+            );
+        }
     }
 }
