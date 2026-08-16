@@ -14,6 +14,12 @@ seen=0
 # `actions/*` is GitHub's own namespace, published from the same place the runner comes from.
 # Everything else is a third party and gets no exemption.
 while read -r file line spec; do
+  # A local path is not a pin problem: `./.github/workflows/x.yml` is read from the very commit
+  # that is running, which is a tighter guarantee than any SHA could give. Skipped before the
+  # counter so it cannot pad `seen` and prop up the examined-nothing guard below.
+  if [[ $spec == ./* ]]; then
+    continue
+  fi
   seen=$((seen + 1))
   # A `uses:` with no `@` at all resolves the action's default branch at run time, which is the
   # worst pin there is. Matched separately from the pattern below, because a value with no `@`
