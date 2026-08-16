@@ -172,4 +172,4 @@ release version:
     echo
     echo "v$v is committed and tagged, and nothing has left this machine. Read it with"
     echo "'git show v$v', then release with:"
-    echo "    git push origin master && git push origin v$v && git push rad master && git push rad v$v"
+    echo "    git push origin master && git push origin v$v && git push github master && git push github v$v"
