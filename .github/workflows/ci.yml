@@ -137,10 +137,14 @@ jobs:
       - run: cargo install cargo-deb --version 3.7.0 --locked
       - run: sudo apt-get update && sudo apt-get install -y lintian
       - run: just lint-deb
+      # A scratch build to install by hand when a packaging change needs trying on a real
+      # machine. Nothing downstream reads it, so it expires rather than accumulating one per
+      # push and per pull request for a quarter.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rad-backup-deb
           path: target/debian/*.deb
+          retention-days: 14
 
   audit:
     name: advisories

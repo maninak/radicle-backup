@@ -139,10 +139,15 @@ jobs:
           cd dist && sha256sum "$artifact" > "$artifact.sha256" 2>/dev/null \
             || shasum -a 256 "$artifact" > "$artifact.sha256"
 
+      # Transport only, not the durable copy: `publish the release` downloads these in the same
+      # run and re-uploads them to the GitHub Release, which outlives any retention setting.
+      # Fourteen days so a re-run of the apt publish a week or two later still finds its input,
+      # and so master pushes stop filling the artifact list for a quarter each.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
+          retention-days: 14
 
   packages:
     name: deb (${{ matrix.arch }})
@@ -191,3 +196,4 @@ jobs:
         with:
           name: deb-${{ matrix.arch }}
           path: target/${{ matrix.target }}/debian/*.deb
+          retention-days: 14
