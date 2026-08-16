@@ -107,11 +107,11 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
 pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
     let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
     let passphrase = if crypt::needs_passphrase(&archive)? {
-        Some(crypt::passphrase(
+        Some(crypt::read_passphrase(
             crypt::PASSPHRASE_ENV,
             ctx.global.passphrase_file.as_deref(),
             "Passphrase for the archive: ",
-            false,
+            crypt::Purpose::Opening,
             ctx.term.is_interactive(),
         )?)
     } else {

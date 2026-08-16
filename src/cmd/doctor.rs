@@ -178,17 +178,17 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let record = stored.record();
     let now = jiff::Timestamp::now();
 
-    let mut checks = vec![key_protection(&secret)];
-    checks.push(backup_freshness(&stored, now, args));
-    checks.push(backup_encryption(record));
-    checks.push(backup_locality(home.path(), record));
-    checks.push(private_coverage(&inventory, record));
-    checks.push(delegate_quorum(&inventory));
-    checks.push(replication(&inventory, &routing));
+    let mut checks = vec![check_key_protection(&secret)];
+    checks.push(check_backup_freshness(&stored, now, args));
+    checks.push(check_backup_encryption(record));
+    checks.push(check_backup_locality(home.path(), record));
+    checks.push(check_private_coverage(&inventory, record));
+    checks.push(check_delegate_quorum(&inventory));
+    checks.push(check_replication(&inventory, &routing));
     Ok(checks)
 }
 
-fn key_protection(secret: &SecretKey) -> Check {
+fn check_key_protection(secret: &SecretKey) -> Check {
     const TOPIC: &str = "key passphrase";
     match secret.protection() {
         crate::key::Protection::Encrypted { cipher, kdf } => Check::new(
@@ -205,7 +205,7 @@ fn key_protection(secret: &SecretKey) -> Check {
     }
 }
 
-fn backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor) -> Check {
+fn check_backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor) -> Check {
     const TOPIC: &str = "backup";
     if let state::Stored::Unreadable { .. } = stored {
         return Check::new(
@@ -261,7 +261,7 @@ fn backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor)
     }
 }
 
-fn backup_encryption(record: Option<&state::Record>) -> Check {
+fn check_backup_encryption(record: Option<&state::Record>) -> Check {
     const TOPIC: &str = "archive encryption";
     match record {
         Some(record) if record.encrypted => Check::new(
@@ -279,7 +279,7 @@ fn backup_encryption(record: Option<&state::Record>) -> Check {
     }
 }
 
-fn backup_locality(home: &std::path::Path, record: Option<&state::Record>) -> Check {
+fn check_backup_locality(home: &std::path::Path, record: Option<&state::Record>) -> Check {
     const TOPIC: &str = "archive location";
     let Some(archive) = record.and_then(|record| record.archive.as_ref()) else {
         return Check::new(
@@ -325,7 +325,7 @@ fn backup_locality(home: &std::path::Path, record: Option<&state::Record>) -> Ch
     }
 }
 
-fn private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Check {
+fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Check {
     const CHECK: &str = "private repositories";
     let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
     if private.is_empty() {
@@ -376,7 +376,7 @@ fn private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Ch
     Check::new(CHECK, verdict, detail).with_remedy("rad backup --repos private")
 }
 
-fn delegate_quorum(inventory: &Inventory) -> Check {
+fn check_delegate_quorum(inventory: &Inventory) -> Check {
     let sole: Vec<&str> = inventory
         .sole_delegate()
         .map(|repo| repo.display_name())
@@ -422,7 +422,7 @@ fn delegate_quorum(inventory: &Inventory) -> Check {
     )
 }
 
-fn replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check {
+fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check {
     let alone: Vec<&str> = inventory
         .records
         .iter()
@@ -474,12 +474,12 @@ mod tests {
             warnings: Vec::new(),
         };
         vec![
-            backup_freshness(&state::Stored::Absent, now, &args),
-            backup_encryption(None),
-            backup_locality(std::path::Path::new("/nowhere"), None),
-            private_coverage(&empty, None),
-            delegate_quorum(&empty),
-            replication(&empty, &BTreeMap::new()),
+            check_backup_freshness(&state::Stored::Absent, now, &args),
+            check_backup_encryption(None),
+            check_backup_locality(std::path::Path::new("/nowhere"), None),
+            check_private_coverage(&empty, None),
+            check_delegate_quorum(&empty),
+            check_replication(&empty, &BTreeMap::new()),
         ]
         .into_iter()
         .map(|check| check.topic)
@@ -514,9 +514,9 @@ mod tests {
         let mut stale = record();
         stale.created = "2026-05-01T12:00:00Z".to_string();
 
-        let taken = backup_freshness(&state::Stored::Record(Box::new(fresh)), now, &args);
-        let old = backup_freshness(&state::Stored::Record(Box::new(stale)), now, &args);
-        let never = backup_freshness(&state::Stored::Absent, now, &args);
+        let taken = check_backup_freshness(&state::Stored::Record(Box::new(fresh)), now, &args);
+        let old = check_backup_freshness(&state::Stored::Record(Box::new(stale)), now, &args);
+        let never = check_backup_freshness(&state::Stored::Absent, now, &args);
         assert_eq!(taken.verdict, Verdict::Pass);
         assert_eq!(old.verdict, Verdict::Warn);
         assert_eq!(never.verdict, Verdict::Fail);
@@ -544,7 +544,7 @@ mod tests {
         std::fs::write(&path, &*openssh).expect("scratch key is writable");
 
         let secret = SecretKey::read(&path).expect("key is readable");
-        let check = key_protection(&secret);
+        let check = check_key_protection(&secret);
         assert_eq!(check.verdict, Verdict::Fail);
         assert!(check.remedy.is_some());
 
@@ -554,7 +554,8 @@ mod tests {
     #[test]
     fn a_backup_that_has_never_been_taken_fails_rather_than_being_unknown() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let check = backup_freshness(&state::Stored::Absent, now, &Doctor { backup_dir: None });
+        let check =
+            check_backup_freshness(&state::Stored::Absent, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Fail);
         assert_eq!(check.remedy.as_deref(), Some("rad backup"));
     }
@@ -565,12 +566,12 @@ mod tests {
         let mut record = record();
         record.created = "2026-05-01T12:00:00Z".to_string();
         let stored = state::Stored::Record(Box::new(record.clone()));
-        let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
+        let check = check_backup_freshness(&stored, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Warn);
 
         record.created = "2026-08-13T12:00:00Z".to_string();
         let stored = state::Stored::Record(Box::new(record));
-        let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
+        let check = check_backup_freshness(&stored, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Pass);
     }
 
@@ -581,7 +582,7 @@ mod tests {
             path: std::path::PathBuf::from("/nowhere/state.json"),
             reason: "expected value at line 1 column 1".to_string(),
         };
-        let check = backup_freshness(&stored, now, &Doctor { backup_dir: None });
+        let check = check_backup_freshness(&stored, now, &Doctor { backup_dir: None });
         assert_eq!(check.verdict, Verdict::Unknown);
         assert!(check.remedy.is_some());
     }
@@ -599,7 +600,7 @@ mod tests {
 
         let mut record = record();
         record.archive = Some(archive.to_string_lossy().into_owned());
-        let check = backup_locality(&dir, Some(&record));
+        let check = check_backup_locality(&dir, Some(&record));
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(
             check.remedy.is_some_and(|remedy| remedy.contains("sync")),
@@ -613,10 +614,16 @@ mod tests {
     fn a_plaintext_archive_fails_the_encryption_check() {
         let mut record = record();
         record.encrypted = false;
-        assert_eq!(backup_encryption(Some(&record)).verdict, Verdict::Fail);
+        assert_eq!(
+            check_backup_encryption(Some(&record)).verdict,
+            Verdict::Fail
+        );
         record.encrypted = true;
-        assert_eq!(backup_encryption(Some(&record)).verdict, Verdict::Pass);
-        assert_eq!(backup_encryption(None).verdict, Verdict::Unknown);
+        assert_eq!(
+            check_backup_encryption(Some(&record)).verdict,
+            Verdict::Pass
+        );
+        assert_eq!(check_backup_encryption(None).verdict, Verdict::Unknown);
     }
 
     fn record() -> state::Record {

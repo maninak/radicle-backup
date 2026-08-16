@@ -149,7 +149,7 @@ fn own_repository_ids(
     }
 
     for rid in stored {
-        if namespace_present_at(&home.repository_path(rid), node_id) {
+        if has_namespace_at(&home.repository_path(rid), node_id) {
             mine.insert(rid.clone());
         }
     }
@@ -225,7 +225,7 @@ fn sigrefs_by_peer(refs: &[git::Ref]) -> BTreeMap<String, String> {
 ///
 /// Loose refs are a directory; packed refs are one file. Checking both is what keeps this from
 /// spawning a process per repository on a seed.
-pub fn namespace_present_at(repo: &Path, node_id: &str) -> bool {
+pub fn has_namespace_at(repo: &Path, node_id: &str) -> bool {
     let loose = repo.join("refs").join("namespaces").join(node_id);
     if loose.is_dir() {
         return true;
@@ -273,8 +273,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("refs/namespaces/z6MkLoose"))
             .expect("loose ref directory is creatable");
-        assert!(namespace_present_at(&dir, "z6MkLoose"));
-        assert!(!namespace_present_at(&dir, "z6MkPacked"));
+        assert!(has_namespace_at(&dir, "z6MkLoose"));
+        assert!(!has_namespace_at(&dir, "z6MkPacked"));
 
         std::fs::write(
             dir.join("packed-refs"),
@@ -282,8 +282,8 @@ mod tests {
              aaa refs/namespaces/z6MkPacked/refs/rad/sigrefs\n",
         )
         .expect("packed-refs is writable");
-        assert!(namespace_present_at(&dir, "z6MkPacked"));
-        assert!(!namespace_present_at(&dir, "z6MkAbsent"));
+        assert!(has_namespace_at(&dir, "z6MkPacked"));
+        assert!(!has_namespace_at(&dir, "z6MkAbsent"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

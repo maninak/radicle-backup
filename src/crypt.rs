@@ -207,15 +207,26 @@ pub fn needs_passphrase(path: &Path) -> Result<bool> {
     }
 }
 
-/// Read a passphrase from the environment, a file, or the person at the terminal.
+/// What a passphrase is being read for, which is what decides whether it is asked for twice.
 ///
-/// `confirm` asks twice, which is right when creating an archive and wrong when opening one:
-/// a typo while creating locks the only copy of an identity away forever.
-pub fn passphrase(
+/// Taken as this rather than as a `bool`, because the call sites passed a bare `true` or
+/// `false` that said nothing about which way round it went, and getting it round the wrong way
+/// is not a bug that shows up until somebody needs the archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Locking something new. Asked for twice, because a typo here locks the only copy of an
+    /// identity away forever and nothing on earth reopens it.
+    Sealing,
+    /// Opening something that already exists. Asked for once, because a typo just fails.
+    Opening,
+}
+
+/// Read a passphrase from the environment, a file, or the person at the terminal.
+pub fn read_passphrase(
     variable: &str,
     file: Option<&Path>,
     prompt: &str,
-    confirm: bool,
+    purpose: Purpose,
     interactive: bool,
 ) -> Result<Zeroizing<String>> {
     // `--plaintext` turns off the ARCHIVE's encryption and has nothing to do with the key's
@@ -254,7 +265,7 @@ pub fn passphrase(
         "nothing was typed",
         remedy,
     )?;
-    if confirm {
+    if purpose == Purpose::Sealing {
         let again =
             Zeroizing::new(rpassword::prompt_password("Repeat passphrase: ").map_err(Error::Bare)?);
         if *first != *again {

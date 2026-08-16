@@ -90,12 +90,12 @@ impl Tool {
         Ok(self.raw(args)?.status.success())
     }
 
-    /// Run the child with its output visible, and its stdout redirected to our stderr.
+    /// Run the child with its output visible, returning whether it exited successfully.
     ///
-    /// Onto stderr, not stdout: with `--stdout` this process's stdout IS the archive, and a
-    /// line of `rad node stop` chatter written into it produces a file that decrypts, fails to
-    /// decompress, and is discovered at restore time. Everything a child says here is
-    /// narration, which is where narration goes anyway.
+    /// Its stdout goes to our stderr, not to stdout: with `--stdout` this process's stdout IS
+    /// the archive, and a line of `rad node stop` chatter written into it produces a file that
+    /// decrypts, fails to decompress, and is discovered at restore time. Everything a child
+    /// says here is narration, which is where narration goes anyway.
     pub fn passthrough<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<bool> {
         let status = self
             .command(args)

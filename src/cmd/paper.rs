@@ -26,11 +26,11 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
     let (heading, caution, secret_text) = if args.words {
         let passphrase = match secret.protection() {
             Protection::Plaintext => None,
-            Protection::Encrypted { .. } => Some(crypt::passphrase(
+            Protection::Encrypted { .. } => Some(crypt::read_passphrase(
                 crypt::KEY_PASSPHRASE_ENV,
                 None,
                 "Passphrase for the key: ",
-                false,
+                crypt::Purpose::Opening,
                 ctx.term.is_interactive(),
             )?),
         };

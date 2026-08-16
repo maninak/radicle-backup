@@ -84,11 +84,11 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     }
 
     let passphrase = if crypt::needs_passphrase(archive)? {
-        Some(crypt::passphrase(
+        Some(crypt::read_passphrase(
             crypt::PASSPHRASE_ENV,
             ctx.global.passphrase_file.as_deref(),
             "Passphrase for the archive: ",
-            false,
+            crypt::Purpose::Opening,
             term.is_interactive(),
         )?)
     } else {
@@ -437,7 +437,7 @@ fn reconcile(
     Ok(standings)
 }
 
-/// Wait for the node to answer on its control socket.
+/// Whether the node answered on its control socket before `NODE_START_TIMEOUT` elapsed.
 ///
 /// `rad node start` returns as soon as the daemon forks, so every query fired straight after
 /// it fails on a machine where the node takes a moment: the comparison then filled with
@@ -585,13 +585,13 @@ fn from_words(ctx: &Ctx) -> Result<()> {
         ));
     }
 
-    let passphrase = crypt::passphrase(
+    let passphrase = crypt::read_passphrase(
         crypt::KEY_PASSPHRASE_ENV,
         // No file: `--passphrase-file` holds the ARCHIVE passphrase, and reading it here gave
         // the restored key the same secret, silently, without ever asking for a new one.
         None,
         "New passphrase for the restored key: ",
-        true,
+        crypt::Purpose::Sealing,
         ctx.term.is_interactive(),
     )?;
     let openssh = crate::key::openssh_from_seed(&seed, Some(&passphrase))?;

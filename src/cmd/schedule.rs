@@ -28,7 +28,7 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     }
     let systemctl = Tool::on_path("systemctl");
     if !systemctl.is_available() {
-        return without_systemd(ctx, args);
+        return refuse_without_systemd(ctx, args);
     }
 
     if args.status {
@@ -131,9 +131,9 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
     Ok(())
 }
 
-/// What to do on a machine with no systemd. Nothing is installed, and the line that would do
-/// the same job is printed rather than described, so it can be pasted.
-fn without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
+/// Always refuses, on a machine with no systemd. Nothing is installed, and the line that would
+/// do the same job is printed rather than described, so it can be pasted.
+fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     let output = args
         .output
         .clone()

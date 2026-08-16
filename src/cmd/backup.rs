@@ -488,11 +488,11 @@ fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
     if !args.recipient.is_empty() {
         return Ok(Encryption::Recipients(args.recipient.clone()));
     }
-    let passphrase = crypt::passphrase(
+    let passphrase = crypt::read_passphrase(
         crypt::PASSPHRASE_ENV,
         ctx.global.passphrase_file.as_deref(),
         "Passphrase for the archive: ",
-        true,
+        crypt::Purpose::Sealing,
         ctx.term.is_interactive(),
     )?;
     Ok(Encryption::Passphrase(passphrase))
