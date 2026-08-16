@@ -93,9 +93,20 @@ deb: generated
 rpm: generated
     cargo generate-rpm
 
-# Run lintian over the package. The suppressed tag is about uploading to Debian itself.
+# Run lintian over the package this repository builds natively.
 lint-deb: deb
-    lintian --suppress-tags initial-upload-closes-no-bugs target/debian/*.deb
+    just lint-deb-at target/debian
+
+# The suppressed tags, in order: uploading to Debian itself is not what this is; and a static
+# binary is the entire point of a musl build, which lintian grades as an error on a foreign
+# architecture and a warning on the native one, so one release built the same package twice
+# and only the arm64 half failed.
+# Run lintian over a package built anywhere, which is how the release checks a cross-built one.
+lint-deb-at dir:
+    lintian --suppress-tags initial-upload-closes-no-bugs \
+        --suppress-tags statically-linked-binary \
+        --suppress-tags shared-library-lacks-prerequisites \
+        {{dir}}/*.deb
 
 # Build the release tarball for one target, as CI does.
 dist target=`rustc -vV | sed -n 's|host: ||p'`: generated

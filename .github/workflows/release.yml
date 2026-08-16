@@ -226,7 +226,7 @@ jobs:
         run: cargo deb --no-build --no-strip --target ${{ matrix.target }}
 
       - name: Lint
-        run: lintian --suppress-tags initial-upload-closes-no-bugs target/${{ matrix.target }}/debian/*.deb
+        run: just lint-deb-at target/${{ matrix.target }}/debian
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
