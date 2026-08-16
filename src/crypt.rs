@@ -20,7 +20,7 @@ pub const PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
 pub const KEY_PASSPHRASE_ENV: &str = "RAD_PASSPHRASE";
 
 /// How an archive is protected.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Encryption {
     /// A passphrase only a person holds. The default.
     Passphrase(Zeroizing<String>),
@@ -42,6 +42,16 @@ impl Encryption {
             Self::Recipients(_) => "recipients",
             Self::None => "none",
         }
+    }
+}
+
+/// Hand-written, because `Zeroizing` derives `Debug` and hands it straight to the string it
+/// wraps: a derived `Debug` here would print the passphrase into whatever log, panic message
+/// or `dbg!` reached for it, undoing the wiping the rest of this file exists to do. Nothing
+/// formats an `Encryption` today, and this is what keeps that from mattering later.
+impl std::fmt::Debug for Encryption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Encryption::{}", self.label())
     }
 }
 
@@ -416,6 +426,14 @@ mod tests {
         for path in [passphrase, keyed, plain] {
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn a_passphrase_cannot_reach_a_log_through_a_debug_format() {
+        let encryption = Encryption::Passphrase(Zeroizing::new("hunter2".to_string()));
+        let rendered = format!("{encryption:?}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(rendered.contains("passphrase"), "{rendered}");
     }
 
     #[test]
