@@ -1,7 +1,8 @@
 name: Release
 
-# Tagging is the whole trigger. `git tag v0.2.0 && git push --tags` builds every artifact,
-# publishes the release, refreshes the apt repository and pushes the crate.
+# Tagging is the whole trigger. Pushing a `v*` tag builds every artifact, publishes the
+# release, refreshes the apt repository and pushes the crate. `just release <version>` writes
+# that tag; no version is named here, so this comment cannot go stale against the repository.
 on:
   push:
     # `*` matches any character but `/`, so a bare "v*" fires a full release on
