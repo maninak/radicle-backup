@@ -59,13 +59,15 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
     };
 
     let qr = qr_svg(&secret_text)?;
-    let words_html = if args.words {
+    // Zeroizing, both of them: each holds the key or its 24 words in the clear. `render`
+    // returns its buffer by move, so wrapping the result wipes the sheet, not a copy of it.
+    let words_html = Zeroizing::new(if args.words {
         word_grid(&secret_text)
     } else {
         format!("<pre class=\"key\">{}</pre>", escape(&secret_text))
-    };
+    });
 
-    let sheet = render(Sheet {
+    let sheet = Zeroizing::new(render(Sheet {
         alias: ctx.home.alias()?.as_deref().unwrap_or("unnamed"),
         did: &identity.did(),
         fingerprint: &identity.fingerprint(),
@@ -74,7 +76,7 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         caution,
         secret_html: &words_html,
         qr: &qr,
-    });
+    }));
 
     match &args.output {
         Some(path) => {

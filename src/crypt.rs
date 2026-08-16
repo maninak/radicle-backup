@@ -175,6 +175,28 @@ pub fn looks_encrypted(path: &Path) -> Result<bool> {
     }
 }
 
+/// Whether opening this archive will ask for a passphrase, read from the archive's own header.
+///
+/// An archive encrypted to an age or ssh recipient is opened with `--identity`, not a
+/// passphrase, and every age file starts with the same magic, so `looks_encrypted` cannot tell
+/// the two kinds apart. Callers that asked for a passphrase on `looks_encrypted` alone made a
+/// recipient-encrypted archive impossible to restore unattended: the prompt had nobody to
+/// answer it. The header itself says which kind it is, so ask it rather than infer from
+/// whether `--identity` happened to be passed, which would stop prompting for a passphrase
+/// archive that someone opens with `--identity` also on the command line.
+pub fn needs_passphrase(path: &Path) -> Result<bool> {
+    if !looks_encrypted(path)? {
+        return Ok(false);
+    }
+    let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
+    match age::Decryptor::new_buffered(io::BufReader::new(file)) {
+        Ok(decryptor) => Ok(decryptor.is_scrypt()),
+        // A header age cannot parse is not this function's to report: no passphrase would open
+        // it either, and the open that follows says what is wrong in its own wording.
+        Err(_) => Ok(false),
+    }
+}
+
 /// Read a passphrase from the environment, a file, or the person at the terminal.
 ///
 /// `confirm` asks twice, which is right when creating an archive and wrong when opening one:
@@ -358,6 +380,42 @@ mod tests {
             .read_to_end(&mut out)
             .expect_err("a flipped byte cannot authenticate");
         assert!(failure.to_string().contains("damaged"), "{failure}");
+    }
+
+    fn written(name: &str, encryption: &Encryption) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rad-backup-crypt-{name}-{}.age",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("scratch file is creatable");
+        let mut sink = Sink::new(Box::new(file), encryption).expect("sink is buildable");
+        sink.write_all(b"secret").expect("plaintext is writable");
+        sink.finish().expect("sink finishes");
+        path
+    }
+
+    #[test]
+    fn only_a_passphrase_archive_is_the_one_that_asks_for_a_passphrase() {
+        let passphrase = written(
+            "passphrase",
+            &Encryption::Passphrase(Zeroizing::new("open sesame".to_string())),
+        );
+        // The one case that must ask, and the only one.
+        assert!(needs_passphrase(&passphrase).expect("header is readable"));
+
+        // A recipient archive is opened with its private key. Asking for a passphrase here was
+        // the bug: an escrow-key restore on a machine with no terminal had nothing to answer.
+        let recipient = age::x25519::Identity::generate().to_public().to_string();
+        let keyed = written("recipient", &Encryption::Recipients(vec![recipient]));
+        assert!(!needs_passphrase(&keyed).expect("header is readable"));
+
+        // A plaintext archive holds its secret in the clear and has nothing to unlock.
+        let plain = written("plain", &Encryption::None);
+        assert!(!needs_passphrase(&plain).expect("header is readable"));
+
+        for path in [passphrase, keyed, plain] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

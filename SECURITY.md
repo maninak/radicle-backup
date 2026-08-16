@@ -8,7 +8,7 @@ Expect an acknowledgement within 72 hours and an assessment within a week. If a 
 
 ## How to audit this
 
-This program holds an ed25519 key that cannot be rotated, revoked or reissued. Everything that touches a secret lives in five files.
+This program holds an ed25519 key that cannot be rotated, revoked or reissued. Everything that touches a secret lives in the files below: the first five are the core, and the last two are the recovery paths that also hold raw key material and must keep the same `Zeroizing` discipline.
 
 | Read this | To satisfy yourself that |
 |---|---|
@@ -17,6 +17,8 @@ This program holds an ed25519 key that cannot be rotated, revoked or reissued. E
 | `src/perms.rs` | "Owner only" is defined once, applied at creation rather than after it, and admits out loud when a platform cannot promise it. |
 | `src/exec.rs` | Nothing is run through a shell, and no child process inherits a passphrase it has no use for. |
 | `src/archive.rs` | An archive from anywhere is hostile input: no absolute paths, no `..`, regular files only, every entry digested against the manifest in both directions. |
+| `src/cmd/paper.rs` | The recovery sheet is the key in the clear: the mnemonic, the key file, and the HTML that carries them are all `Zeroizing`, and the one untrusted field (the alias) is HTML-escaped. |
+| `src/cmd/restore.rs` (`from_words`) | The 24 words typed to rebuild an identity arrive on a `Zeroizing` line and stay in `Zeroizing` buffers through to the key file, written at `0600`. |
 
 Four invariants those files exist to hold:
 

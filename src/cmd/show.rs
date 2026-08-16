@@ -106,7 +106,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
 /// the entries exist.
 pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
     let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
-    let passphrase = if crypt::looks_encrypted(&archive)? {
+    let passphrase = if crypt::needs_passphrase(&archive)? {
         Some(crypt::passphrase(
             crypt::PASSPHRASE_ENV,
             ctx.global.passphrase_file.as_deref(),

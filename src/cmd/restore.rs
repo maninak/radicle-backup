@@ -83,7 +83,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         ));
     }
 
-    let passphrase = if crypt::looks_encrypted(archive)? {
+    let passphrase = if crypt::needs_passphrase(archive)? {
         Some(crypt::passphrase(
             crypt::PASSPHRASE_ENV,
             ctx.global.passphrase_file.as_deref(),
@@ -552,7 +552,9 @@ fn from_words(ctx: &Ctx) -> Result<()> {
         ctx.term
             .headline("Type the 24 words from your recovery sheet, separated by spaces:");
     }
-    let mut line = String::new();
+    // Zeroizing, like every other buffer that holds key material: these 24 words ARE the key,
+    // so the line they arrive on cannot be left in freed heap for a later allocation to see.
+    let mut line = Zeroizing::new(String::new());
     std::io::stdin()
         .lock()
         .read_line(&mut line)
