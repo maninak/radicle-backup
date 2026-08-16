@@ -3,8 +3,9 @@
 [![Sponsor maninak on Liberapay](https://img.shields.io/badge/Liberapay-Donate-F6C915?logo=liberapay&logoColor=black)](https://liberapay.com/maninak/donate)
 
 [![version](https://img.shields.io/github/v/release/maninak/radicle-backup?sort=semver&label=version&color=44CC11)](https://github.com/maninak/radicle-backup/releases/latest)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-orange.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-000000.svg?logo=rust&logoColor=white)](./Cargo.toml)
+[![rad: - zwuwC3UnuVYy2tvG9dd11QCUbA7J](https://img.shields.io/static/v1?label=rad%3A&message=zwuwC3UnuVYy2tvG9dd11QCUbA7J&color=6666FF&cacheSeconds=64800)](https://app.radicle.at/nodes/seed.radicle.at/rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J)
 [![radicle.tools artifact](https://img.shields.io/badge/radicle.tools-artifact-ff1aff?labelColor=15161c)](https://radicle.tools)
 
 **Back up, restore and move a [Radicle](https://radicle.xyz) identity, node state and repositories. `rad backup`.**
