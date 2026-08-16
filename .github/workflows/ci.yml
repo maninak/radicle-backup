@@ -101,14 +101,23 @@ jobs:
       # The nix build is the reference: it is the one anyone can repeat on a machine that
       # shares nothing with this one. Building it twice here catches a flake that is
       # reproducible only by accident of caching.
+      #
+      # Both builds have to read the SAME tree, and `src = self` means the tree is the source,
+      # so anything either build writes into it changes what the next one hashes. Two things
+      # did: the `result` symlink, hence `--no-link`, and `flake.lock`, which `nix build`
+      # creates when it is absent. That is why `--rebuild` reported a derivation it had never
+      # built instead of comparing two. Writing the lock once up front settles the tree before
+      # either build looks at it. Revisit when flake.lock is committed, which also removes it.
+      - name: Write the lock file before anything hashes the tree
+        run: nix flake lock
       - name: Build
-        run: nix build --print-build-logs
+        run: nix build --no-link --print-build-logs
       # `--rebuild` IS the comparison: it builds the derivation again and fails with "may not
       # be deterministic" when the outputs differ. Comparing the two `result` symlinks would
       # look like a check and never be one, because a store path is derived from the inputs and
       # is identical across a rebuild whatever bytes came out of it.
       - name: Build again and fail if the output differs
-        run: nix build --rebuild --print-build-logs
+        run: nix build --rebuild --no-link --print-build-logs
 
   package:
     name: debian package
