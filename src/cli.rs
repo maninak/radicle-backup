@@ -473,6 +473,38 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// clap_mangen renders these only with its `env` feature, which 0.3 introduced and
+    /// defaults off. Without it the man page loses every `RAD_BACKUP_*` line and says nothing
+    /// about it, so the loss is invisible until somebody reads `man rad-backup` looking for
+    /// the variable. The list is walked off the command rather than written out here, so a
+    /// new `env = ` argument is covered from the moment it is added.
+    #[test]
+    fn every_option_that_reads_an_environment_variable_says_so_in_the_man_page() {
+        let command = Cli::command();
+        let mut rendered = Vec::new();
+        clap_mangen::Man::new(command.clone())
+            .render(&mut rendered)
+            .expect("the man page renders");
+        let man = String::from_utf8(rendered).expect("roff is text");
+
+        let variables: Vec<_> = command
+            .get_arguments()
+            .filter_map(|arg| arg.get_env())
+            .map(|var| var.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !variables.is_empty(),
+            "no argument reads an environment variable, so this test guards nothing"
+        );
+        for var in &variables {
+            assert!(man.contains(var), "the man page never mentions {var}");
+        }
+        assert!(
+            man.matches("environment variable").count() >= variables.len(),
+            "the man page names fewer environment variables than the command reads"
+        );
+    }
+
     #[test]
     fn running_with_no_subcommand_creates_an_archive() {
         let cli = Cli::parse_from(["rad-backup", "--tier", "full"]);

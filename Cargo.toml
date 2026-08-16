@@ -28,7 +28,9 @@ bip39 = { version = "2.2.2", features = ["zeroize"] }
 bs58 = "0.5.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.6"
-clap_mangen = "0.2.32"
+# `env`, because clap_mangen 0.3 moved environment-variable rendering behind a feature.
+# Without it the man page silently loses the `RAD_BACKUP_*` lines every 0.2 release wrote.
+clap_mangen = { version = "0.3.2", features = ["env"] }
 hex = "0.4.3"
 jiff = "0.2.35"
 qrcode = "0.14.1"
@@ -36,7 +38,7 @@ rpassword = "7.5.4"
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 ssh-key = { version = "0.6.7", features = ["encryption", "ed25519", "getrandom"] }
 tar = "0.4.46"
 thiserror = "2.0.20"
