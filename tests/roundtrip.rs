@@ -848,3 +848,22 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         stderr(&out)
     );
 }
+
+// `Command::output()` gives the child a pipe, which is the case this guards: the sheet is
+// the key in the clear, so `paper` refuses a terminal but must keep working when piped.
+// Written as "refuse whenever --output is absent" the guard would take piping away, and
+// this test is what goes red if anyone writes it that way.
+#[test]
+fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
+    let fixture = Fixture::create("paper-pipe");
+
+    let out = fixture.run(&["paper"], &fixture.home());
+    assert_success(&out, "rendering a paper sheet to a pipe");
+
+    let sheet = stdout(&out);
+    assert!(
+        sheet.contains("<html") && sheet.contains("</html>"),
+        "a piped sheet should be the whole HTML document, got {} bytes",
+        sheet.len()
+    );
+}

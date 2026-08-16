@@ -5,7 +5,7 @@
 //! written, so that a run that is going to fail does so before it has touched anything.
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -115,7 +115,14 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
 
     let encryption = encryption_for(ctx, args)?;
     let now = jiff::Timestamp::now();
-    let destination = destination(args, &identity, home.alias()?.as_deref(), &now, &encryption)?;
+    let destination = destination(
+        args,
+        &identity,
+        home.alias()?.as_deref(),
+        &now,
+        &encryption,
+        std::io::stdout().is_terminal(),
+    )?;
 
     let scratch_parent = ctx
         .global
@@ -592,8 +599,19 @@ fn destination(
     alias: Option<&str>,
     now: &jiff::Timestamp,
     encryption: &Encryption,
+    stdout_is_terminal: bool,
 ) -> Result<Destination> {
     if args.stdout {
+        // An archive is compressed bytes, and a `--plaintext` one is the key among them. A
+        // terminal keeps what it is shown in scrollback that no zeroized buffer can reach, and
+        // some emulators log it to disk. Taken as a parameter rather than read here, so both
+        // answers are reachable from a test.
+        if stdout_is_terminal {
+            return Err(Error::refused(
+                "an archive is binary, and stdout is a terminal",
+                "redirect it to a file or pipe it into something, or drop --stdout",
+            ));
+        }
         return Ok(Destination::Stdout);
     }
     let name = archive_name(
@@ -908,6 +926,7 @@ mod tests {
             Some("maninak"),
             &now,
             &Encryption::None,
+            false,
         )
         .expect("a directory is a destination");
         match destination {
@@ -937,6 +956,32 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_is_refused_to_a_terminal_and_allowed_to_a_pipe() {
+        let identity = Identity::parse(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
+        )
+        .expect("the vector parses");
+        let now = jiff::Timestamp::from_second(1_786_000_000).expect("a valid instant");
+        let args = Create {
+            stdout: true,
+            ..blank_create()
+        };
+
+        // A terminal keeps the bytes in scrollback, so the archive never goes there.
+        // `matches!` rather than `expect_err`, which would want Debug on Destination.
+        let refused = destination(&args, &identity, None, &now, &Encryption::None, true);
+        assert!(
+            matches!(refused, Err(Error::Refused { .. })),
+            "a terminal should be refused"
+        );
+
+        // A pipe or a redirect is the whole point of --stdout and must keep working.
+        let allowed = destination(&args, &identity, None, &now, &Encryption::None, false)
+            .expect("a pipe is a destination");
+        assert!(matches!(allowed, Destination::Stdout));
+    }
+
+    #[test]
     fn asking_for_stdout_never_touches_the_filesystem() {
         let identity = Identity::parse(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
@@ -947,7 +992,7 @@ mod tests {
             stdout: true,
             ..blank_create()
         };
-        let destination = destination(&args, &identity, None, &now, &Encryption::None)
+        let destination = destination(&args, &identity, None, &now, &Encryption::None, false)
             .expect("stdout is a destination");
         assert!(matches!(destination, Destination::Stdout));
         assert!(destination.directory().is_none());

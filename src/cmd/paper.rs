@@ -4,6 +4,8 @@
 //! code for a scanner and as text a human can retype, plus enough plain English that whoever
 //! finds it in a drawer in ten years knows what they are holding.
 
+use std::io::IsTerminal;
+
 use qrcode::QrCode;
 use qrcode::render::svg;
 use zeroize::Zeroizing;
@@ -85,6 +87,17 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
             ctx.term.ok(&format!("wrote {}", path.display()));
             ctx.term
                 .hint("open it in a browser and print it; then delete the file");
+        }
+        // A terminal keeps thousands of lines of scrollback in its own memory, and some
+        // emulators log a session to disk, so a sheet printed to a TTY outlives the process
+        // that was careful to zeroize it. A pipe is different: `paper | wkhtmltopdf -` hands
+        // the bytes to one program and ends, so the refusal is about the terminal, not about
+        // the absence of `--output`.
+        None if std::io::stdout().is_terminal() => {
+            return Err(Error::refused(
+                "this sheet is the key in the clear, and stdout is a terminal",
+                "write it with --output <path>, or pipe it into something that keeps no history",
+            ));
         }
         None => ctx.term.print(&sheet),
     }
