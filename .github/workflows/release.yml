@@ -163,7 +163,10 @@ jobs:
           [ -f "$binary" ] || binary="$binary.exe"
           cp "$binary" "dist/$name/"
           cp README.md ARCHIVE-FORMAT.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
-          cp -r packaging/generated "dist/$name/generated"
+          # -R, not -r: `packaging/generated/rad-restore` is a symlink to the binary as it
+          # will be INSTALLED, so inside that directory it dangles by design. GNU cp -r copies
+          # the link; BSD cp -r follows it and dies, which is how both macOS jobs failed.
+          cp -R packaging/generated "dist/$name/generated"
           # Windows gets a .zip, because a .tar.gz there needs a tool the machine may not have.
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd dist && 7z a -bso0 "$name.zip" "$name" > /dev/null)

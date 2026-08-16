@@ -34,7 +34,10 @@ generated: build
     ./target/release/rad-backup completions fish > packaging/generated/rad-backup.fish
     # `rad restore` is the same binary under the name someone in trouble reaches for, and a
     # roff include so `man rad-restore` answers rather than saying there is no such page.
-    ln -sfn rad-backup packaging/generated/rad-restore
+    # Windows cannot make this link without developer mode, and has no man pages to read the
+    # include either, so it says so and carries on rather than failing the whole release.
+    ln -sfn rad-backup packaging/generated/rad-restore \
+        || echo "no rad-restore symlink on this platform; a packager must create it" >&2
     printf '.so man1/rad-backup.1\n' > packaging/generated/rad-restore.1
     printf 'radicle-backup (%s-1) stable; urgency=medium\n\n  * Upstream release %s. The changelog for it is at\n    https://github.com/maninak/radicle-backup/blob/master/CHANGELOG.md\n\n -- Konstantinos Maninakis <info@radicle.tools>  %s\n' "$(just version)" "$(just version)" "$(just rfc-date)" > packaging/generated/changelog.Debian
 
