@@ -14,6 +14,10 @@ on:
       tag:
         description: The existing tag to build
         required: true
+      skip_dependency_age:
+        description: Ship even though a dependency is younger than the 7-day floor
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,7 +41,9 @@ jobs:
   version:
     name: check the tag
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The dependency sweep below spaces its requests a second apart over ~270 crates, so this
+    # job is minutes rather than seconds. Everything else waits on it, which is the point.
+    timeout-minutes: 25
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
@@ -62,6 +68,20 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Every version in the lockfile, not just what the last commit moved. CI checks only what
+      # a push ADDS, which is right there and wrong here: a release ships the whole tree, and on
+      # a tag there is no meaningful "before" to diff against, so the incremental mode reports
+      # green having examined nothing. v0.1.0 shipped exactly that way, with fifteen crates
+      # younger than this floor and a passing check that had looked at zero of them.
+      #
+      # It gates the release rather than warning about it, because a version published days ago
+      # is the shape a compromised one arrives in, and once a tag is out the artifacts are on
+      # crates.io and in an apt repository. Dispatch with skip_dependency_age when a boring
+      # transitive crate is merely young and waiting is worse.
+      - name: Dependency age
+        if: ${{ !inputs.skip_dependency_age }}
+        run: ./.github/check-lockfile-age.py --all
 
   binaries:
     name: ${{ matrix.target }}
