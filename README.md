@@ -386,15 +386,11 @@ Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.
 
 ## Support
 
-This repository on Radicle is [`rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J`](https://app.radicle.at/nodes/seed.radicle.at/rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J). Clone it with `rad clone rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J`.
-
-Issues live there: `rad issue open` in that clone, or the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com).
-
 If this tool is useful to you:
 
 - 💛 Chip in on [Liberapay](https://liberapay.com/maninak/donate).
 - 🌱 `rad seed rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J` to keep a copy on the network, and ⭐ star it on [GitHub](https://github.com/maninak/radicle-backup).
-- 🗣️ Tell someone who keeps only one copy of their Radicle home, or backs it up by hand. Or open an issue with any edge case you hit.
+- 🗣️ Tell someone who doesn't keep Radicle home backups, or does them by hand.
 
 ## License
 
