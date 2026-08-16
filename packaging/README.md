@@ -9,7 +9,7 @@ What ships, how it is built, and what is not wired up yet.
 | Tarballs (linux musl, macOS, x86_64 and aarch64) | Working | the `binaries` job |
 | Windows `.zip` (x86_64-msvc) | Working, with the caveats in the README | the `binaries` job |
 | FreeBSD tarball (x86_64) | Cross-built, never executed by CI, labelled untested | the `binaries` job |
-| Signed `sha256sums.txt` | Working | `packaging/release/sign.sh`, run by the `binaries` job |
+| Signed `sha256sums.txt` | Working | `packaging/release/sign.sh`, run by the `release` job |
 | Nix flake | Working | `nix build`, checked twice by the `nix` job |
 | crates.io | Working | the `crate` job |
 | `.rpm` | Metadata written, needs `cargo generate-rpm` in CI | `just rpm` locally |
@@ -18,7 +18,7 @@ What ships, how it is built, and what is not wired up yet.
 
 ## The generated files
 
-`packaging/generated/` holds the man page, the shell completions and the Debian changelog. They are built by `just generated` and never committed, so a completion file cannot go stale against the binary.
+`packaging/generated/` holds the man pages, the shell completions, the `rad-restore` symlink and the Debian changelog. They are built by `just generated` and never committed, so a completion file cannot go stale against the binary.
 
 ## The apt repository
 
@@ -47,7 +47,7 @@ Every release ships `sha256sums.txt` and `sha256sums.txt.sig`, an ssh signature 
 ./packaging/release/verify.sh <directory holding both files>       # what a downloader runs
 ```
 
-`verify.sh` fails on an unlisted signer and on a tampered file. Both failures were watched before the script was trusted.
+`verify.sh` fails on an unlisted signer and on a tampered file.
 
 The signing keys live as CI secrets, and neither is a Radicle identity key: both are read unattended, and a Radicle identity cannot be reissued. A release missing them still builds and publishes every artifact they do not sign or host, and the run says which it skipped.
 

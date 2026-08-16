@@ -22,7 +22,7 @@ Four invariants those files exist to hold:
 
 - Anything that could hold key material is **created** at `0600`, and working directories at `0700`, rather than chmodded afterwards: a key that is briefly world-readable has already been read. Windows has no mode bits, and the program says so the first time it writes such a file.
 - A passphrase is never in `argv`, never in a log, and never in a child process's environment. `RAD_PASSPHRASE` reaches `rad` alone, because `rad` is the only thing that signs with the key.
-- No sockets are opened by this program. The only network traffic is the `rad sync` a restore runs to compare what it restored with the network. No telemetry, no update check, no upload.
+- The one socket this program opens itself is the node's local control socket, which it uses to ask whether the node is running. Everything else goes through `rad`: the `rad sync` a restore runs to compare what it restored with the network, and the `rad node stop` and `rad node start` a restore or a move needs. No telemetry, no update check, no upload.
 - `unsafe` is forbidden crate-wide, `unwrap` is a denied lint, and CI fails on either.
 
 Two checks to run:

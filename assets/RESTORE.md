@@ -1,7 +1,6 @@
 # Restoring this Radicle home by hand
 
-This archive was written by `rad-backup` on {{CREATED}}, from `{{RAD_HOME}}` on `{{HOST}}`.
-It holds the identity `{{ALIAS}}` (`{{DID}}`).
+This archive was written by `rad-backup` on {{CREATED}}, from `{{RAD_HOME}}` on `{{HOST}}`. It holds the identity `{{ALIAS}}` (`{{DID}}`).
 
 You do not need `rad-backup` to restore it. The archive is a plain tar of plain files, and everything below uses `git` and a POSIX shell. `jq` is used to read `manifest.json` and `policies.json`; where it appears, you can read those files by eye instead.
 
@@ -22,7 +21,7 @@ chmod 600 "$RAD_HOME/keys/radicle"
 cp keys/radicle.pub "$RAD_HOME/keys/radicle.pub"
 chmod 644 "$RAD_HOME/keys/radicle.pub"
 
-# config.json is absent from an identity-tier archive, and from a home that never had one.
+# config.json is absent when the home never had one, whatever the tier.
 [ -f config.json ] && cp config.json "$RAD_HOME/config.json"
 ```
 
@@ -40,9 +39,11 @@ ssh-keygen -l -f "$RAD_HOME/keys/radicle.pub"
 `policies.db` holds every repository you seed, every peer you follow, and everything you blocked.
 
 ```sh
-# Both are absent from an identity-tier archive, hence the guards.
+# All three are absent from an identity-tier archive, and node.db was only ever
+# carried if the archive was taken with --with-node-db, hence the guards.
 [ -f node/policies.db ] && cp node/policies.db "$RAD_HOME/node/policies.db"
 [ -f node/notifications.db ] && cp node/notifications.db "$RAD_HOME/node/notifications.db"
+[ -f node/node.db ] && cp node/node.db "$RAD_HOME/node/node.db"
 ```
 
 If that database refuses to open because Radicle has moved on to a newer schema, use `policies.json` instead, which is the same content as text. Every line of it maps to one command:

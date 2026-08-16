@@ -89,14 +89,14 @@ rad backup show                         # what is inside the newest one, without
 rad backup verify                       # do its bytes still match what it says they are
 rad backup verify --deep <archive>      # ...and does it actually restore the identity it claims
 rad backup restore <archive>            # put it back
-rad backup move <archive-path>          # move this identity to another machine, safely
+rad backup move <output-path>           # move this identity to another machine, safely
 rad backup paper                        # a printable recovery sheet, for the drawer
 rad backup prune --keep 7               # delete the older ones, keeping the newest 7
 ```
 
-**Every command that takes an archive can be given none**, and then acts on the newest archive of this identity it can find, saying on stderr which one that was. It looks in `RAD_BACKUP_DIR`, then wherever the last archive actually went. Naming a path is always allowed and always wins.
+**Every command that takes an archive can be given none**, and then acts on the newest archive of this identity it can find, saying on stderr which one that was. It looks in `RAD_BACKUP_DIR`, then wherever the last archive actually went, then the working directory. Naming a path is always allowed and always wins.
 
-`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped.
+`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception announces itself: a database that cannot be opened read-only is opened writable to recover its write-ahead log, and the run says so.
 
 Every knob that is not a one-off is an environment variable, so a run is configured the way `rad` itself is. They are listed under [Configuration](#configuration).
 
@@ -117,7 +117,7 @@ Taking the default archive of a home with four repositories, two of them private
   check it: rad-backup verify ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ```
 
-The two private repositories were carried; the two public ones are on other nodes and were not.
+The two private repositories were carried; the two public ones are on other nodes and were not. A plain-text note lands beside every archive as `<name>.README.txt`, saying what the file is and how to open it, for whoever finds it without this tool.
 
 ### Exit codes
 
@@ -246,7 +246,7 @@ recovery posture of /home/alice/.radicle
 ? archive location: no archive path was recorded, so this could not be judged
 ! private repositories: 3 of 3 are in no archive, though every one of those is allowed to a peer that could hold a copy
   --> rad backup --repos private
-! delegate quorum: 10 repositories have you as their only delegate: example-app, example-tool, example-config, example-docs, example-site, example-lib, ...
+! delegate quorum: 6 repositories have you as their only delegate: example-app, example-tool, example-config, example-docs, example-site, example-lib
   --> a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
 ✓ seeding elsewhere: every public repository is announced by at least one other node
 
@@ -325,7 +325,7 @@ rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 
 It refuses to enable a timer that cannot work: an unattended run has nobody to type a passphrase at, so a passphrase file (or `RAD_BACKUP_PASSPHRASE` in the timer's environment) is not optional. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
 
-It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. Edit any of the three by hand and they will not be overwritten: a file without this tool's marker line at the top is left alone. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
+It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. Edit either unit by hand and it stays yours: a unit file without this tool's marker line at the top is never replaced, and the run says so instead. The `env` file is rewritten by every `rad backup schedule` run, so a lasting settings change belongs on the command line that writes it. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
 
 Or with cron, if you prefer:
 
@@ -360,7 +360,7 @@ Unattended-Upgrade::Allowed-Origins {
 | `RAD_PASSPHRASE` | The *key's* passphrase. `paper --words` reads it to decrypt the key; `restore --words` reads it as the restored key's new passphrase. |
 | `RAD` | The `rad` binary to call. |
 | `GIT` | The `git` binary to call. |
-| `NO_COLOR` | Any value turns off colour, as does `--no-color` and a pipe. |
+| `NO_COLOR` | A non-empty value turns off colour, as does `--no-color` and a pipe. |
 | `RAD_BACKUP_SCRATCH_DIR` | Where working files go: database snapshots, fresh bundles, and the staging copy a restore is checked in. Defaults to beside whatever the command is producing. |
 | `XDG_STATE_HOME` | Where this tool remembers what it last wrote. Holds no secrets. |
 

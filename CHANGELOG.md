@@ -17,7 +17,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `schedule`: installs and turns on a systemd user timer, and refuses to enable one that has no way to get a passphrase.
 - `--dry-run`: what a backup would carry, and roughly how large, writing nothing.
 - Every command that takes an archive now defaults to the newest one of this identity it can find, and says which it chose.
-- `move`: a machine-to-machine migration that retires the source key only after the archive verifies deeply.
+- `move`: a machine-to-machine move that retires the source key only after the archive verifies deeply.
 - `paper`: a printable recovery sheet with a QR code, and `--words` for a 24-word mnemonic that `restore --words` reads back.
 - Encryption to a passphrase or to age and ssh recipients, with `--plaintext` for archives going straight into a store that encrypts them.
 - A recovery path that needs nothing but `tar`, `git` and a POSIX shell: `RESTORE.md` and `restore.sh` ride inside every archive.

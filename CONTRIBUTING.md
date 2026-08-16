@@ -50,6 +50,10 @@ docs: say what the state tier carries and why
 
 `ARCHIVE-FORMAT.md` is a specification other programs may implement. Changing it needs a version bump, a compatibility note, and a reason that survives the two guarantees the project does not trade away: an archive is readable without this tool, and an archive does not depend on a `rad` version.
 
+## Releasing
+
+Maintainer only. `just release <version>` bumps `Cargo.toml`, opens a fresh `[Unreleased]` section in `CHANGELOG.md` above the newly dated one, runs `just check`, then commits and tags `v<version>`, all locally. Pushing the tag is the publish: `.github/workflows/release.yml` builds every artifact, signs the checksums, refreshes the apt repository and pushes the crate.
+
 ## Security
 
 Do not open a public issue or pull request for a vulnerability. `SECURITY.md` says where to send it.
