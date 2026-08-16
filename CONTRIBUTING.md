@@ -38,7 +38,7 @@ Every constraint states its reason. If you meet one whose reason no longer holds
 
 ## Commits
 
-Conventional commits, lowercase subject, under 100 characters, no body unless the reason is genuinely not derivable from the diff:
+Conventional commits, lowercase subject in the imperative mood, under 100 characters, no body unless the reason is genuinely not derivable from the diff:
 
 ```
 fix: refuse an archive whose entry climbs out of the staging directory
@@ -52,7 +52,9 @@ docs: say what the state tier carries and why
 
 ## Releasing
 
-Maintainer only. `just release <version>` bumps `Cargo.toml`, opens a fresh `[Unreleased]` section in `CHANGELOG.md` above the newly dated one, runs `just check`, then commits and tags `v<version>`, all locally. Pushing the tag is the publish: `.github/workflows/release.yml` builds every artifact, signs the checksums, refreshes the apt repository and pushes the crate.
+Maintainer only. `just release <version>` bumps `Cargo.toml`, renames `CHANGELOG.md`'s `## [Unreleased]` heading to the version and its date, runs `just check`, then commits and tags `v<version>`, all locally. Pushing the tag is the publish: `.github/workflows/release.yml` builds every artifact, signs the checksums, refreshes the apt repository and pushes the crate.
+
+A released changelog carries no empty `## [Unreleased]` heading. The first change to land after a release opens one, in the same commit that adds the first entry under it.
 
 ## Security
 
