@@ -181,3 +181,22 @@ jobs:
             exec ./.github/check-lockfile-age.py --all
           fi
           ./.github/check-lockfile-age.py --base "$BASE"
+
+  # The release path, run before a tag makes it irreversible. Only on master and on demand: a
+  # pull request does not need six cross-built targets, and the weekly schedule exists for
+  # the advisory job, which reads a database rather than a compiler.
+  #
+  # This repository is public, so these runners cost nothing. That is the whole reason it can
+  # be every push rather than a nightly: the answer to "does the release still build" should
+  # never be older than the last commit.
+  #
+  # A called workflow does not inherit this file's `env`, so these jobs build without
+  # `-D warnings`, exactly as they did when they lived in release.yml. That is deliberate: a
+  # release must not fail because a dependency started emitting a warning, and `test` already
+  # holds the same code to `-D warnings` on three platforms.
+  artifacts:
+    name: artifacts
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/artifacts.yml
+    with:
+      ref: ${{ github.sha }}
