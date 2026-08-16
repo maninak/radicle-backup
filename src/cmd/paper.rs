@@ -58,9 +58,10 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         ("the key file", caution, key)
     };
 
-    let qr = qr_svg(&secret_text)?;
-    // Zeroizing, both of them: each holds the key or its 24 words in the clear. `render`
-    // returns its buffer by move, so wrapping the result wipes the sheet, not a copy of it.
+    // The QR encodes the key, so the SVG carrying it is key material as much as the text is.
+    let qr = Zeroizing::new(qr_svg(&secret_text)?);
+    // Both hold the key or its 24 words in the clear. `render` returns its buffer by move, so
+    // wrapping the result wipes the sheet itself rather than a copy of it.
     let words_html = Zeroizing::new(if args.words {
         word_grid(&secret_text)
     } else {
