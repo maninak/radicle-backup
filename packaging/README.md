@@ -22,18 +22,21 @@ What ships, how it is built, and what is not wired up yet.
 
 ## The apt repository
 
-A static tree in a Cloudflare R2 bucket, served at <https://apt.radicle.tools>, signed with a key held in the `APT_GPG_PRIVATE_KEY` secret. R2 charges nothing for egress, and the free tier covers 10 GB of storage and ten million reads a month. `Origin` and `Label` are both `radicle-tools`, which is what lets `unattended-upgrades` target it without also targeting everything else a machine has configured.
+A static tree in a Cloudflare R2 bucket, served at <https://apt.radicle.tools>, signed with a key held in the `APT_GPG_PRIVATE_KEY` secret. `Origin` and `Label` are both `radicle-tools`, which is what lets `unattended-upgrades` target it without also targeting everything else a machine has configured. `publish.sh` explains how it builds the indexes and why it uploads them in the order it does.
 
-`publish.sh` rebuilds every index from the whole pool on every run rather than appending, because an index that has drifted from the pool gives apt clients a hash mismatch and no way to work out why. It pulls the existing pool down first for the same reason, and uploads the pool before the indexes that name it, so no client ever reads an index pointing at a package that is not there yet.
-
-To test the whole thing without publishing anywhere: let apt itself judge a local copy of the tree.
+To judge a tree, let apt read it. Nothing else exercises the signature and the hashes the way a client will:
 
 ```sh
-apt-get update -o Dir::Etc::sourcelist=<a sources.list with a file:// line> \
-               -o Dir::State::Lists=<a scratch directory> ...
+tree=<a directory holding pubkey.asc, dists/ and pool/>
+d=$(mktemp -d) && mkdir -p "$d/lists/partial" "$d/cache"
+echo "deb [signed-by=$tree/pubkey.asc] file://$tree stable main" > "$d/sources.list"
+apt-get update -o Dir::Etc::sourcelist="$d/sources.list" \
+               -o Dir::Etc::sourceparts=/dev/null \
+               -o Dir::State::Lists="$d/lists" \
+               -o Dir::Cache="$d/cache"
 ```
 
-If apt verifies `InRelease` and fetches `Packages`, the repository is correct. Nothing else is proof.
+It exits 0 having fetched `InRelease` and `Packages`. It exits 100 on a signature from a key the source does not name, and on an index whose hashes do not match the signed `Release`. For the published tree, save <https://apt.radicle.tools/pubkey.asc> to a file, point `signed-by` at that file and the source at the URL.
 
 ## Release signatures
 
@@ -46,20 +49,8 @@ Every release ships `sha256sums.txt` and `sha256sums.txt.sig`, an ssh signature 
 
 `verify.sh` fails on an unlisted signer and on a tampered file. Both failures were watched before the script was trusted.
 
+The signing keys live as CI secrets, and neither is a Radicle identity key: both are read unattended, and a Radicle identity cannot be reissued. A release missing them still builds and publishes every artifact they do not sign or host, and the run says which it skipped.
+
 ## Reproducible builds
 
 `just repro` builds twice from a clean tree and compares the hashes; CI does the same in the `reproducible` job, and the `nix` job builds the flake twice and compares store paths. What makes it hold: a pinned toolchain in `rust-toolchain.toml`, `codegen-units = 1` and fat LTO, `SOURCE_DATE_EPOCH` taken from the commit, and `--remap-path-prefix` for the checkout and the cargo registry. The remapping goes through `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS`, because `RUSTFLAGS` splits on whitespace and a checkout path may contain a space.
-
-## First-time setup
-
-1. Generate a signing key that is used for nothing else:
-   ```sh
-   gpg --quick-generate-key "radicle.tools packages <info@radicle.tools>" default sign never
-   gpg --armor --export-secret-keys <key id>   # into the APT_GPG_PRIVATE_KEY secret
-   ```
-2. In Cloudflare, create an R2 bucket (`radicle-tools-apt`), give it the custom domain `apt.radicle.tools`, and create an API token scoped to *Object Read & Write* on that bucket alone.
-3. Add the repository secrets `APT_GPG_PRIVATE_KEY`, `APT_GPG_PASSPHRASE`, `R2_ENDPOINT` (`https://<account id>.r2.cloudflarestorage.com`), `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`. Set the variable `R2_BUCKET` if the bucket is not named `radicle-tools-apt`.
-4. Add `RELEASE_SIGNING_KEY` (the private half of the key in `packaging/release/allowed_signers`) and `CARGO_REGISTRY_TOKEN` for crates.io.
-5. Tag a release: `git tag v0.1.0 && git push --tags`.
-
-Steps 2 to 4 are all skippable: a release without them still builds and publishes every artefact those steps do not sign or host, and the workflow says which it skipped rather than failing silently.
