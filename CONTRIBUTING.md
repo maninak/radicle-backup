@@ -38,7 +38,7 @@ Every constraint states its reason. If you meet one whose reason no longer holds
 
 ## Commits
 
-Conventional commits, lowercase subject in the imperative mood, under 100 characters, no body unless the reason is genuinely not derivable from the diff:
+Conventional commits, lowercase subject in the imperative mood, under 72 characters, no body unless the reason is genuinely not derivable from the diff:
 
 ```
 fix: refuse an archive whose entry climbs out of the staging directory
