@@ -1,4 +1,4 @@
-//! `rad-backup`: back up, restore and migrate a Radicle identity.
+//! `rad-backup`: back up, restore and move a Radicle identity.
 //!
 //! `rad` runs `rad-<name>` from `PATH` for any subcommand it does not know, so installing this
 //! binary is all it takes for `rad backup` to work.

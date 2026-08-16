@@ -16,8 +16,8 @@ use crate::manifest::{RepoSelection, Tier};
 #[command(
     name = "rad-backup",
     version,
-    about = "Back up, restore and migrate a Radicle identity",
-    long_about = "Back up, restore and migrate a Radicle identity, node state and repositories.\n\n\
+    about = "Back up, restore and move a Radicle identity",
+    long_about = "Back up, restore and move a Radicle identity, node state and repositories.\n\n\
                   Installed on PATH, this is also `rad backup`.",
     disable_help_subcommand = true
 )]
@@ -210,7 +210,7 @@ pub enum Command {
     /// Render a printable recovery sheet.
     Paper(Paper),
 
-    /// Migrate this identity to another machine.
+    /// Move this identity to another machine.
     #[command(name = "move")]
     Migrate(Migrate),
 
