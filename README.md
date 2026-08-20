@@ -44,7 +44,12 @@ curl -fsSL https://github.com/maninak/radicle-backup/releases/latest/download/ra
 sudo install -m 755 rad-backup-x86_64-unknown-linux-musl/rad-backup /usr/local/bin/
 ```
 
-The Linux builds are statically linked against musl, so they run on any distribution and inside `scratch` containers. There are aarch64 builds for Linux and macOS as well as x86_64, a Windows `.zip`, and an x86_64 FreeBSD build that is cross-compiled and **untested**, because there is no FreeBSD runner to test it on; a report either way is welcome. Every release ships `sha256sums.txt` and a signature beside it, and `verify.sh` in the same release checks both.
+The Linux builds are statically linked against musl, so they run on any distribution and inside `scratch` containers. There are aarch64 builds for Linux and macOS as well as x86_64, a Windows `.zip`, and an x86_64 FreeBSD build that is cross-compiled and **untested**, because there is no FreeBSD runner to test it on; a report either way is welcome. Every release ships `sha256sums.txt` and a signature beside it, and `verify.sh` in the same release checks both. It trusts the `allowed_signers` next to itself, and the copy in the release came from the same place as the binary, so run the one from a Radicle clone:
+
+```sh
+rad clone rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J
+radicle-backup/packaging/release/verify.sh <the directory you downloaded into>
+```
 
 ### From source
 

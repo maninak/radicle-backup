@@ -34,6 +34,8 @@ just repro                              # build it twice, get one binary
 ./packaging/release/verify.sh <dir>     # what you downloaded is what was signed
 ```
 
+Run the second one from a `rad clone`, not from the copy beside the download: it trusts the `allowed_signers` next to itself.
+
 Then read `ARCHIVE-FORMAT.md` and open an archive with nothing but `age`, `zstd` and `tar`.
 
 ## What it does not protect against
