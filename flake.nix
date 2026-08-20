@@ -7,7 +7,7 @@
 
   # Pinned by revision rather than by branch, so a flake.lock is a convenience here and not
   # the only thing standing between two builds and two different results.
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/0e251e24a4f24e036a084b6b4b2d2491af4167f4";
+  inputs.nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=master&rev=0e251e24a4f24e036a084b6b4b2d2491af4167f4&shallow=1";
 
   outputs =
     { self, nixpkgs }:
