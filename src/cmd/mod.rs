@@ -150,7 +150,7 @@ pub fn copy_owner_only(from: &Path, to: &Path) -> Result<()> {
         return Ok(());
     }
     let bytes = zeroize::Zeroizing::new(std::fs::read(from).map_err(|e| Error::io(from, e))?);
-    write_owner_only(to, &bytes)
+    crate::perms::replace(to, &bytes, crate::perms::SECRET_MODE)
 }
 
 /// Copy a file that holds nothing secret, landing it at the mode a home `rad` built itself
@@ -160,8 +160,10 @@ pub fn copy_plain(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
     }
-    std::fs::copy(from, to).map_err(|e| Error::io(to, e))?;
-    crate::perms::set_mode(to, crate::perms::DOC_MODE)
+    // Through the same staged replacement as a key: `config.json` half written over is a
+    // home that will not start, and this runs while a restore is putting one back together.
+    let bytes = std::fs::read(from).map_err(|e| Error::io(from, e))?;
+    crate::perms::replace(to, &bytes, crate::perms::DOC_MODE)
 }
 
 /// Substitute `{{KEY}}` markers in one of the shipped documents, in ONE pass over it.

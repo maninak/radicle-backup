@@ -8,6 +8,56 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rad-backup-perms-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+        dir
+    }
+
+    #[test]
+    fn a_replacement_that_cannot_even_be_staged_leaves_the_original_alone() {
+        let dir = scratch("replace-keeps-the-original");
+        let path = dir.join("radicle");
+        std::fs::write(&path, b"the identity already here").expect("a file worth protecting");
+        // Nothing can be created under the staging name, so the replacement fails at its
+        // first step, which is the earliest a failure can happen.
+        std::fs::create_dir(dir.join("radicle.partial")).expect("the staging name is occupied");
+
+        assert!(replace(&path, b"the identity being restored", SECRET_MODE).is_err());
+
+        // Writing in place unlinked the target first, so any failure after that left a home
+        // holding neither the old identity nor the new one.
+        assert_eq!(
+            std::fs::read(&path).expect("the original is still readable"),
+            b"the identity already here"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_replacement_that_worked_leaves_no_staging_file_behind() {
+        let dir = scratch("replace-sweeps-up");
+        let path = dir.join("radicle");
+        replace(&path, b"the identity being restored", SECRET_MODE).expect("the write lands");
+
+        assert_eq!(
+            std::fs::read(&path).expect("the new content is readable"),
+            b"the identity being restored"
+        );
+        assert!(
+            !dir.join("radicle.partial").exists(),
+            "the staging name must not survive a successful write"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// A private key, and the archives that carry one.
 pub const SECRET_MODE: u32 = 0o600;
 /// A public key, a config, a manifest: what a Radicle home keeps world-readable itself.
@@ -143,6 +193,45 @@ pub use platform::{create_private, same_device, set_mode};
 /// created first, with permissions of their choosing, is exactly the one this must refuse, so
 /// an existing path is an error here rather than a reuse. The parent must exist already.
 pub use platform::create_private_dir;
+
+/// Put `bytes` at `path` so that whatever happens, the path holds either what was there
+/// before or the whole of the new content, and never a prefix of it or nothing at all.
+///
+/// `write_owner_only` unlinks the target before creating it, which is what makes the mode
+/// argument mean anything (see `create_private`) and what makes the window dangerous: a
+/// `restore --force` over an occupied home has already destroyed the old secret key by the
+/// time the first byte of the new one is written, so a crash, a full disk or a killed run
+/// leaves a home with no identity at all. Staged beside the target and renamed over it, the
+/// same failure leaves the old file exactly as it was, because a rename within a directory is
+/// atomic. There is no corresponding fsync of the parent: a crash may lose the rename, but
+/// losing the rename means keeping the old file, which is the promise this function makes.
+pub fn replace(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let mut beside = path.as_os_str().to_os_string();
+    beside.push(".partial");
+    let beside = std::path::PathBuf::from(beside);
+
+    let staged = (|| -> Result<()> {
+        use std::io::Write as _;
+
+        // Owner-only from its first byte whatever the final mode is, so key material is never
+        // briefly readable under a name a watcher can predict.
+        let mut file = create_private(&beside)?;
+        file.write_all(bytes).map_err(|e| Error::io(&beside, e))?;
+        // Before the rename that publishes it: a rename is atomic against a crash, but only
+        // over content the filesystem has been told to keep.
+        file.sync_all().map_err(|e| Error::io(&beside, e))?;
+        drop(file);
+        set_mode(&beside, mode)?;
+        std::fs::rename(&beside, path).map_err(|e| Error::io(&beside, e))
+    })();
+
+    if staged.is_err() {
+        // Best effort, and deliberately not reported: the error being returned is the one
+        // worth reading, and a leftover staging file changes nothing about the target.
+        let _ = std::fs::remove_file(&beside);
+    }
+    staged
+}
 
 /// Write a file only its owner can read, creating it with those permissions rather than
 /// fixing them afterwards: a private key that is briefly world-readable has been read.
