@@ -5,11 +5,10 @@
 //! written, so that a run that is going to fail does so before it has touched anything.
 
 use std::collections::BTreeSet;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
-use crate::archives::{archive_name, file_stamp, sidecar_path};
+use crate::archives::sidecar_path;
 use crate::cli::Create;
 use crate::cmd::{Ctx, Scratch, fill, iso_stamp};
 use crate::container::{DOC_MODE, SECRET_MODE, Writer};
@@ -17,25 +16,25 @@ use crate::crypt::{self, Encryption};
 use crate::db;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
-use crate::home::NodeState;
 use crate::inventory::{self, Inventory};
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{
     self, IdentityInfo, Manifest, NodeInfo, PolicySummary, RepoSelection, SourceInfo, Tier,
     ToolInfo,
 };
-use crate::perms::create_private;
 use crate::rad::Rad;
 use crate::state;
-use crate::term::{self, Term};
+use crate::term;
 
-const RESTORE_DOC: &str = include_str!("../../assets/RESTORE.md");
-const RESTORE_SCRIPT: &str = include_str!("../../assets/restore.sh");
-const SIDECAR: &str = include_str!("../../assets/sidecar.txt");
+mod destination;
+mod node;
 
-/// How long to wait for a node to let go of its control socket after being asked to stop.
-const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
-const NODE_STOP_POLL: Duration = Duration::from_millis(200);
+use destination::destination;
+use node::quiesce;
+
+const RESTORE_DOC: &str = include_str!("../../../assets/RESTORE.md");
+const RESTORE_SCRIPT: &str = include_str!("../../../assets/restore.sh");
+const SIDECAR: &str = include_str!("../../../assets/sidecar.txt");
 
 /// Permissions for the restore script, which is meant to be run straight out of the archive.
 const SCRIPT_MODE: u32 = 0o755;
@@ -413,141 +412,6 @@ fn remember(
     }
 }
 
-/// A node this run may have stopped, and the promise to put it back.
-///
-/// A guard rather than a pair of booleans and a call at the end, because `run` has about
-/// fifteen `?` sites between the stop and the restart: a passphrase that cannot be read, a
-/// repository that changes size mid-read, a full disk. Every one of them used to unwind past
-/// the restart and leave a seed offline until somebody noticed. `Drop` runs on all of them.
-struct NodeHandling<'a> {
-    ctx: &'a Ctx,
-    rad: Option<&'a Rad>,
-    was_running: bool,
-    stopped_by_backup: bool,
-}
-
-impl NodeHandling<'_> {
-    /// Put the node back now rather than at the end of the scope, for the paths that want to
-    /// report it in order. Idempotent: the flag is cleared, so `Drop` then does nothing.
-    fn restart(&mut self) {
-        if !self.stopped_by_backup {
-            return;
-        }
-        self.stopped_by_backup = false;
-        self.ctx.term.step("starting the node again");
-        let Some(rad) = self.rad else {
-            self.ctx
-                .term
-                .warn("rad is no longer on PATH, so the node this run stopped is still stopped");
-            return;
-        };
-        if !matches!(rad.start_node(), Ok(true)) {
-            self.ctx
-                .term
-                .warn("`rad node start` failed, so the node this run stopped is still stopped");
-            self.ctx.term.detail("start it with `rad node start`");
-        }
-    }
-}
-
-impl Drop for NodeHandling<'_> {
-    fn drop(&mut self) {
-        self.restart();
-    }
-}
-
-/// Stop the node if asked, and say so plainly if it is running and we were not.
-///
-/// Only git storage is at risk from a running node: the databases are snapshotted through
-/// SQLite's own backup API, and keys and config do not change. So a running node is a warning
-/// with a reason attached, not a refusal.
-fn quiesce<'a>(
-    ctx: &'a Ctx,
-    args: &Create,
-    rad: Option<&'a Rad>,
-    warnings: &mut Vec<String>,
-) -> Result<NodeHandling<'a>> {
-    let was_running = ctx.home.node_state() == NodeState::Running;
-    if !was_running {
-        return Ok(NodeHandling {
-            ctx,
-            rad,
-            was_running: false,
-            stopped_by_backup: false,
-        });
-    }
-    if !args.stop_node {
-        warnings.push(
-            "the node was running: databases were snapshotted consistently, but a repository \
-             fetched during the run may be missing its newest refs"
-                .to_string(),
-        );
-        ctx.term
-            .warn("the node is running; pass --stop-node for a guaranteed-clean copy");
-        return Ok(NodeHandling {
-            ctx,
-            rad,
-            was_running: true,
-            stopped_by_backup: false,
-        });
-    }
-
-    let rad = rad.ok_or_else(|| {
-        Error::refused(
-            "--stop-node was passed but rad is not on PATH",
-            "install rad, or stop the node yourself and run again",
-        )
-    })?;
-    ctx.term.step("stopping the node");
-    // The exit status, not just the spawn. A `rad node stop` that fails outright used to be
-    // discarded here, and the run then spent the whole timeout watching a socket that was
-    // never going to close before blaming the node for not stopping.
-    let stopped = rad.stop_node()?;
-
-    // The guard exists from the moment the stop is asked for, not from the moment it is
-    // confirmed. `rad node stop` can succeed and the socket still be up when the deadline
-    // passes, and that path returned an error with nothing recorded as owing a restart.
-    let mut node = NodeHandling {
-        ctx,
-        rad: Some(rad),
-        was_running: true,
-        stopped_by_backup: true,
-    };
-
-    // A stop that failed outright is asked about once and no more: there is nothing in
-    // flight to wait for, and spending the whole timeout on it only delays the refusal by
-    // twenty seconds. A stop that was accepted gets the full deadline, because the node closes
-    // its socket when it is done serving and that is not instant.
-    let deadline = Instant::now()
-        + if stopped {
-            NODE_STOP_TIMEOUT
-        } else {
-            Duration::ZERO
-        };
-    loop {
-        if ctx.home.node_state() == NodeState::Stopped {
-            return Ok(node);
-        }
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(NODE_STOP_POLL);
-    }
-    // It never went down, so there is nothing this run stopped and nothing to put back.
-    node.stopped_by_backup = false;
-    Err(if stopped {
-        Error::refused(
-            "the node is still serving its control socket after being asked to stop",
-            "stop it by hand and run again, or run without --stop-node",
-        )
-    } else {
-        Error::refused(
-            "`rad node stop` failed, and the node is still serving its control socket",
-            "read what it said above, stop it by hand, or run without --stop-node",
-        )
-    })
-}
-
 fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
     if args.plaintext {
         ctx.term
@@ -566,164 +430,6 @@ fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
     )?;
     Ok(Encryption::Passphrase(passphrase))
 }
-
-/// Where the archive is going, and how it gets there safely.
-///
-/// A file is written under a `.partial` name and renamed once it is complete, so an
-/// interrupted run cannot leave something that looks like a usable backup.
-///
-/// The `.partial` is removed on drop when it was never committed. Nothing lists or prunes
-/// those files, so every failed run left one behind: a directory of encrypted-looking rubble
-/// beside the real archives, growing without limit and impossible to tell apart by eye.
-enum Destination {
-    Stdout,
-    File {
-        final_path: PathBuf,
-        partial: PathBuf,
-        committed: std::cell::Cell<bool>,
-    },
-}
-
-impl Drop for Destination {
-    fn drop(&mut self) {
-        if let Self::File {
-            partial, committed, ..
-        } = self
-            && !committed.get()
-        {
-            let _ = std::fs::remove_file(partial);
-        }
-    }
-}
-
-impl Destination {
-    fn directory(&self) -> Option<PathBuf> {
-        match self {
-            Self::Stdout => None,
-            Self::File { final_path, .. } => final_path.parent().map(Path::to_path_buf),
-        }
-    }
-
-    fn open(&self) -> Result<Box<dyn Write>> {
-        match self {
-            Self::Stdout => Ok(Box::new(std::io::stdout())),
-            Self::File { partial, .. } => Ok(Box::new(create_private(partial)?)),
-        }
-    }
-
-    fn commit(&self, term: &Term) -> Result<Option<PathBuf>> {
-        match self {
-            Self::Stdout => Ok(None),
-            Self::File {
-                final_path,
-                partial,
-                committed,
-            } => {
-                // Flushed is not durable: `Write::flush` on a `File` is a no-op, so without
-                // this the rename could land before the bytes and a crash would leave an empty
-                // file under the finished name, which is what `.partial` exists to stop.
-                // Opened for WRITING, because Windows refuses FlushFileBuffers on a read-only
-                // handle, which failed every backup there after the whole archive was written.
-                std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(partial)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|e| Error::io(partial, e))?;
-                std::fs::rename(partial, final_path).map_err(|e| Error::io(final_path, e))?;
-                sync_directory(term, final_path.parent());
-                committed.set(true);
-                Ok(Some(final_path.clone()))
-            }
-        }
-    }
-}
-
-/// Fsync the directory, so the rename that just happened survives a crash.
-///
-/// Unix only: there is no portable way to open a directory as a file, and Windows does not
-/// need one, since NTFS orders the rename against the file's own flushed data. A failure is
-/// reported rather than swallowed, because the whole point of the rename was durability.
-fn sync_directory(term: &Term, directory: Option<&Path>) {
-    #[cfg(unix)]
-    {
-        if let Some(directory) = directory
-            && let Err(error) = std::fs::File::open(directory).and_then(|dir| dir.sync_all())
-        {
-            term.warn(&format!(
-                "{}: the directory entry could not be flushed, so a crash now could lose the \
-                 archive that was just written ({error})",
-                directory.display()
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (term, directory);
-    }
-}
-
-fn destination(
-    args: &Create,
-    identity: &Identity,
-    alias: Option<&str>,
-    now: &jiff::Timestamp,
-    encryption: &Encryption,
-    stdout_is_terminal: bool,
-) -> Result<Destination> {
-    if args.stdout {
-        // An archive is compressed bytes, and a `--plaintext` one is the key among them. A
-        // terminal keeps what it is shown in scrollback that no zeroized buffer can reach, and
-        // some emulators log it to disk. Taken as a parameter rather than read here, so both
-        // answers are reachable from a test.
-        if stdout_is_terminal {
-            return Err(Error::refused(
-                "an archive is binary, and stdout is a terminal",
-                "redirect it to a file or pipe it into something, or drop --stdout",
-            ));
-        }
-        return Ok(Destination::Stdout);
-    }
-    let name = archive_name(
-        alias,
-        &identity.node_id(),
-        &file_stamp(*now),
-        encryption.is_encrypted(),
-    );
-    let chosen = args.output.clone().unwrap_or_else(|| PathBuf::from("."));
-
-    let final_path = if names_an_archive(&chosen) {
-        if let Some(parent) = chosen.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-        }
-        chosen
-    } else {
-        std::fs::create_dir_all(&chosen).map_err(|e| Error::io(&chosen, e))?;
-        chosen.join(name)
-    };
-    let partial = final_path.with_extension("partial");
-    Ok(Destination::File {
-        final_path,
-        partial,
-        committed: std::cell::Cell::new(false),
-    })
-}
-
-/// Whether a path names the archive itself rather than a directory to put it in.
-///
-/// An existing directory is a directory. Otherwise the extension decides: someone naming a
-/// file names it `.tar.zst` or `.age`, and someone naming a directory that does not exist yet
-/// does not. Guessing "file" for a bare name is the worse mistake, because it writes what the
-/// user reads as a folder as a single archive, and the next run silently replaces it.
-fn names_an_archive(path: &Path) -> bool {
-    const ARCHIVE_SUFFIXES: [&str; 3] = [".age", ".zst", ".tar"];
-
-    if path.is_dir() {
-        return false;
-    }
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    ARCHIVE_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
-}
-
 /// Take a consistent copy of a database, then archive that copy.
 fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &str) -> Result<()> {
     if !source.is_file() {
@@ -995,114 +701,4 @@ fn hostname() -> Option<String> {
                 .map(|said| said.stdout)
                 .filter(|name| !name.is_empty())
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_directory_output_gets_a_generated_name_and_a_file_output_is_taken_as_given() {
-        let identity = Identity::parse(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
-        )
-        .expect("the vector parses");
-        let now = jiff::Timestamp::from_second(1_786_000_000).expect("a valid instant");
-
-        let into_directory = Create {
-            output: Some(PathBuf::from("/tmp")),
-            ..blank_create()
-        };
-        let destination = destination(
-            &into_directory,
-            &identity,
-            Some("maninak"),
-            &now,
-            &Encryption::None,
-            false,
-        )
-        .expect("a directory is a destination");
-        match destination {
-            Destination::File { ref final_path, .. } => {
-                assert!(final_path.starts_with("/tmp"));
-                assert!(
-                    final_path
-                        .file_name()
-                        .expect("it has a name")
-                        .to_string_lossy()
-                        .starts_with("maninak-z6MkvAFBkdph-")
-                );
-            }
-            Destination::Stdout => panic!("a path is not stdout"),
-        }
-    }
-
-    #[test]
-    fn a_path_is_a_directory_unless_it_is_named_like_an_archive() {
-        assert!(names_an_archive(Path::new("/backups/mine.tar.zst")));
-        assert!(names_an_archive(Path::new("/backups/mine.tar.zst.age")));
-        assert!(names_an_archive(Path::new("mine.age")));
-        // The trap this guards: a directory that does not exist yet, named like a directory.
-        assert!(!names_an_archive(Path::new("/backups")));
-        assert!(!names_an_archive(Path::new("backups/radicle")));
-        assert!(!names_an_archive(Path::new("/tmp")));
-    }
-
-    #[test]
-    fn an_archive_is_refused_to_a_terminal_and_allowed_to_a_pipe() {
-        let identity = Identity::parse(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
-        )
-        .expect("the vector parses");
-        let now = jiff::Timestamp::from_second(1_786_000_000).expect("a valid instant");
-        let args = Create {
-            stdout: true,
-            ..blank_create()
-        };
-
-        // A terminal keeps the bytes in scrollback, so the archive never goes there.
-        // `matches!` rather than `expect_err`, which would want Debug on Destination.
-        let refused = destination(&args, &identity, None, &now, &Encryption::None, true);
-        assert!(
-            matches!(refused, Err(Error::Refused { .. })),
-            "a terminal should be refused"
-        );
-
-        // A pipe or a redirect is the whole point of --stdout and must keep working.
-        let allowed = destination(&args, &identity, None, &now, &Encryption::None, false)
-            .expect("a pipe is a destination");
-        assert!(matches!(allowed, Destination::Stdout));
-    }
-
-    #[test]
-    fn asking_for_stdout_never_touches_the_filesystem() {
-        let identity = Identity::parse(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
-        )
-        .expect("the vector parses");
-        let now = jiff::Timestamp::from_second(1_786_000_000).expect("a valid instant");
-        let args = Create {
-            stdout: true,
-            ..blank_create()
-        };
-        let destination = destination(&args, &identity, None, &now, &Encryption::None, false)
-            .expect("stdout is a destination");
-        assert!(matches!(destination, Destination::Stdout));
-        assert!(destination.directory().is_none());
-    }
-
-    fn blank_create() -> Create {
-        Create {
-            output: None,
-            tier: crate::cli::TierArg::State,
-            repos: None,
-            stdout: false,
-            plaintext: false,
-            recipient: Vec::new(),
-            stop_node: false,
-            with_node_db: false,
-            keep: None,
-            dry_run: false,
-        }
-    }
 }
