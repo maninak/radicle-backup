@@ -328,14 +328,18 @@ One command sets up a systemd user timer, writes the environment it needs, and t
 rad backup schedule --output /mnt/backups/radicle --keep 14 \
                     --passphrase-file ~/.config/rad-backup/passphrase
 
+# Or to a key, which needs no passphrase file because nothing has to be unlocked to write:
+rad backup schedule --output /mnt/backups/radicle --keep 14 \
+                    --recipient "$(cat ~/.ssh/id_ed25519.pub)"
+
 rad backup schedule --status        # is it on, when does it next run, did the last one fail
 rad backup schedule --off           # stop, leaving the unit files in place
 rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 ```
 
-It refuses to enable a timer that cannot work: an unattended run has nobody to type a passphrase at, so `--passphrase-file` is not optional. An exported `RAD_BACKUP_PASSPHRASE` does not count, because it reaches the command you are typing and not the timer, which systemd starts from its own environment. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
+It refuses to enable a timer that cannot work. An unattended run has nobody to type a passphrase at, so a passphrase-encrypted schedule needs `--passphrase-file`. A passphrase exported in your shell does not count, because it reaches the command you are typing and not the timer, which systemd starts from its own environment; one you have put where systemd itself keeps it, with `systemctl --user set-environment` or a file in `~/.config/environment.d/`, does. `--recipient` and `--plaintext` need no passphrase at all, and go into the unit's command line rather than the environment file: a recipient is not a secret, and "this timer writes your private key in the clear every night" is not a thing to keep out of sight. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
 
-It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. To keep a hand edit, delete the marker line at the top of the unit: a unit file without that line is never replaced, and the run says so instead. A unit that still carries the marker is rewritten by the next `rad backup schedule`. The `env` file is rewritten by every `rad backup schedule` run, so a lasting settings change belongs on the command line that writes it. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
+It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. To keep a hand edit to a unit, delete the two marker lines at the top of it: a unit file without them is never replaced, and the run says so instead. A unit that still carries them is rewritten by the next `rad backup schedule`. The `env` file has no such escape and is rewritten in full by every run, so a lasting settings change belongs on the command line that writes it. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
 
 Or with cron, if you prefer:
 

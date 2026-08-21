@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `schedule --recipient` and `schedule --plaintext`. A timer could only ever write passphrase-encrypted archives, so an identity backed up to an age or ssh key could not be scheduled at all. Neither needs a passphrase file, and both go into the unit's command line rather than the environment file.
+
 ### Fixed
 
 - `--dry-run --json` answers with the report every other command's `--json` gives, instead of printing the human table on stdout and no object at all.

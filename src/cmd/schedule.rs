@@ -78,8 +78,11 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     // systemd starts the service from its own environment, and the environment file this
     // command writes deliberately never carries the passphrase itself. Accepting that passed
     // the check and installed a timer that then failed every night at the prompt.
+    // Nothing to unlock, so nothing to ask for: an archive written to a recipient needs
+    // only their public key, and a plaintext one needs nothing at all.
+    let unattended = !args.recipient.is_empty() || args.plaintext;
     let passphrase_file = ctx.global.passphrase_file.clone();
-    if passphrase_file.is_none() && !systemd_holds_passphrase(&systemctl)? {
+    if !unattended && passphrase_file.is_none() && !systemd_holds_passphrase(&systemctl)? {
         return Err(Error::refused(
             "a scheduled run has nobody to ask for the archive passphrase",
             "put it in a file only you can read and pass --passphrase-file <path>; an exported \
@@ -92,7 +95,12 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
     let environment = environment_file()?;
     write_environment(ctx, &environment, args, passphrase_file.as_deref())?;
-    write_unit(ctx, &dir.join(SERVICE), &service_unit(&environment))?;
+    let encryption = encryption_arguments(&args.recipient, args.plaintext);
+    write_unit(
+        ctx,
+        &dir.join(SERVICE),
+        &service_unit(&environment, &encryption),
+    )?;
     write_unit(ctx, &dir.join(TIMER), &timer_unit(&args.every))?;
 
     // The booleans matter: `enable` is where systemd parses OnCalendar=, so a schedule it
@@ -230,15 +238,19 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
         .warn("there is no systemd here, so nothing was installed");
     ctx.term.detail("this crontab line does the same job:");
     ctx.term.blank();
+    let encryption = shell_encryption_arguments(&args.recipient, args.plaintext);
     ctx.term.print(&format!(
-        "  0 3 * * *  '{binary}' --output '{}' --keep {keep} --yes --quiet",
-        output.display()
+        "  0 3 * * *  {} --output {} --keep {keep} --yes --quiet{encryption}",
+        shell_quoted(&binary),
+        shell_quoted(&output.display().to_string())
     ))?;
     ctx.term.blank();
-    ctx.term.hint(
-        "the run needs RAD_BACKUP_PASSPHRASE_FILE set in that crontab, or it will stop \
-               to ask for a passphrase nobody is there to type",
-    );
+    if encryption.is_empty() {
+        ctx.term.hint(
+            "the run needs RAD_BACKUP_PASSPHRASE_FILE set in that crontab, or it will stop \
+             to ask for a passphrase nobody is there to type",
+        );
+    }
     Err(Error::refused(
         "no timer was installed",
         "paste the line above into `crontab -e`",
@@ -328,7 +340,57 @@ fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn service_unit(environment: &Path) -> String {
+/// One argument as systemd will read it back: quoted, because systemd word-splits an
+/// unquoted `ExecStart=` and an age recipient is a public key with spaces in it.
+///
+/// `$` and `%` are doubled as well as escaped. Quoting does not stop systemd substituting
+/// `$VAR` or expanding a `%h`-style specifier in `ExecStart=`, and an ssh recipient carries
+/// a free-text comment, so both can arrive inside a key this tool was handed.
+fn quoted(argument: &str) -> String {
+    format!(
+        "\"{}\"",
+        argument
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "$$")
+            .replace('%', "%%")
+    )
+}
+
+/// One argument as `sh` will read it back. Single quotes take every other character
+/// literally, and the quote itself is closed, escaped and reopened.
+fn shell_quoted(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
+/// How the scheduled run should encrypt, spelled on the command line rather than put in the
+/// environment file: a recipient is not a secret, and the flag that says "no encryption at
+/// all" belongs where somebody reading the unit will see it.
+fn encryption_arguments(recipients: &[String], plaintext: bool) -> String {
+    if plaintext {
+        return " --plaintext".to_string();
+    }
+    recipients
+        .iter()
+        .map(|key| format!(" --recipient {}", quoted(key)))
+        .collect()
+}
+
+/// The same, for the crontab line printed where there is no systemd. Built from the recipients
+/// rather than by rewriting the systemd spelling: those are two quoting languages, and the
+/// rewrite left systemd's doubled backslashes inside single quotes and could produce a line
+/// `sh` would not run at all.
+fn shell_encryption_arguments(recipients: &[String], plaintext: bool) -> String {
+    if plaintext {
+        return " --plaintext".to_string();
+    }
+    recipients
+        .iter()
+        .map(|key| format!(" --recipient {}", shell_quoted(key)))
+        .collect()
+}
+
+fn service_unit(environment: &Path, encryption: &str) -> String {
     let binary = std::env::current_exe()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "rad-backup".to_string());
@@ -341,11 +403,12 @@ Documentation=man:rad-backup(1)
 [Service]
 Type=oneshot
 EnvironmentFile=-{}
-ExecStart=\"{binary}\" --yes --quiet
+ExecStart={} --yes --quiet{encryption}
 Nice=10
 IOSchedulingClass=idle
 ",
-        environment.display()
+        environment.display(),
+        quoted(&binary)
     )
 }
 
@@ -384,7 +447,7 @@ mod tests {
     #[test]
     fn a_unit_this_tool_wrote_carries_the_mark_that_lets_it_be_replaced() {
         assert!(timer_unit("daily").contains(MARKER));
-        assert!(service_unit(Path::new("/tmp/env")).contains(MARKER));
+        assert!(service_unit(Path::new("/tmp/env"), "").contains(MARKER));
     }
 
     #[test]
@@ -410,6 +473,69 @@ mod tests {
     fn the_word_is_enabled_printed_is_the_answer_whatever_its_exit_status_was() {
         assert_eq!(timer_verdict("enabled", "").as_deref(), Some("enabled"));
         assert_eq!(timer_verdict("static", "").as_deref(), Some("static"));
+    }
+
+    #[test]
+    fn a_recipient_reaches_the_unit_quoted_and_a_passphrase_file_is_not_demanded() {
+        // An age recipient is a public key with spaces in it, so an unquoted one would be
+        // word-split by systemd into flags it does not recognise.
+        let unit = service_unit(
+            Path::new("/tmp/env"),
+            &encryption_arguments(&["ssh-ed25519 AAAA nobody@example".to_string()], false),
+        );
+        let exec = unit
+            .lines()
+            .find(|line| line.starts_with("ExecStart="))
+            .expect("the service has an ExecStart");
+        assert!(
+            exec.contains("--recipient \"ssh-ed25519 AAAA nobody@example\""),
+            "{exec}"
+        );
+    }
+
+    #[test]
+    fn asking_for_no_encryption_says_so_on_the_command_line_the_timer_runs() {
+        // In the unit rather than the environment file, because "this timer writes your
+        // private key in the clear every night" is not a thing to keep out of sight.
+        let arguments = encryption_arguments(&[], true);
+        assert_eq!(arguments, " --plaintext");
+        assert!(service_unit(Path::new("/tmp/env"), &arguments).contains("--plaintext"));
+    }
+
+    #[test]
+    fn a_recipient_that_holds_a_quote_cannot_break_out_of_the_unit() {
+        let broken = quoted("ssh-ed25519 \"AAAA\" \\x");
+        assert_eq!(broken, "\"ssh-ed25519 \\\"AAAA\\\" \\\\x\"");
+    }
+
+    #[test]
+    fn a_recipient_systemd_would_expand_reaches_the_run_as_it_was_given() {
+        // Quoting does not stop systemd substituting in `ExecStart=`: `$HOME` becomes the
+        // value of a variable and `%h` becomes a path. An ssh recipient ends in a free-text
+        // comment, so both arrive in keys people really paste.
+        let expanded = quoted("ssh-ed25519 AAAA 100% of $HOME");
+        assert_eq!(expanded, "\"ssh-ed25519 AAAA 100%% of $$HOME\"");
+    }
+
+    #[test]
+    fn the_crontab_line_quotes_a_recipient_the_shell_would_otherwise_choke_on() {
+        // Built from the recipients, not by rewriting the systemd spelling: that rewrite left
+        // systemd's doubled backslashes inside single quotes, and a recipient holding a quote
+        // produced a line `sh` refused outright with "unterminated quoted string".
+        let arguments =
+            shell_encryption_arguments(&["ssh-ed25519 AAAA it's mine".to_string()], false);
+        assert_eq!(arguments, " --recipient 'ssh-ed25519 AAAA it'\\''s mine'");
+
+        // And the shell really does read it back as the one word it went in as.
+        let out = std::process::Command::new("sh")
+            .args(["-c", &format!("printf '%s'{arguments}")])
+            .output()
+            .expect("sh runs");
+        assert!(out.status.success(), "sh refused: {arguments}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "--recipientssh-ed25519 AAAA it's mine"
+        );
     }
 
     #[test]
@@ -447,7 +573,7 @@ mod tests {
         // systemd word-splits an unquoted ExecStart=, and this project itself lives under a
         // path with a space in it, so a dev-built binary produced a unit that parsed into a
         // truncated path and failed only when the timer first fired.
-        let unit = service_unit(Path::new("/tmp/env"));
+        let unit = service_unit(Path::new("/tmp/env"), "");
         let exec = unit
             .lines()
             .find(|line| line.starts_with("ExecStart="))

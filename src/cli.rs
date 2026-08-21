@@ -331,12 +331,24 @@ pub struct Schedule {
     #[arg(long, value_name = "N")]
     pub keep: Option<usize>,
 
+    /// Encrypt the scheduled archives to an age or ssh public key instead of to a
+    /// passphrase. Repeatable.
+    ///
+    /// The reason a timer can exist without a passphrase file at all: nothing has to be
+    /// unlocked to write to a recipient, so an unattended run has nothing to be asked for.
+    #[arg(long, value_name = "KEY", action = ArgAction::Append)]
+    pub recipient: Vec<String>,
+
+    /// Do not encrypt the scheduled archives. They will hold your private key in the clear.
+    #[arg(long, conflicts_with = "recipient")]
+    pub plaintext: bool,
+
     /// Turn the timer off again. The unit files are left in place.
-    #[arg(long, conflicts_with_all = ["every", "output", "keep"])]
+    #[arg(long, conflicts_with_all = ["every", "output", "keep", "recipient", "plaintext"])]
     pub off: bool,
 
     /// Say whether it is on, and when it next runs, without changing anything.
-    #[arg(long, conflicts_with_all = ["every", "output", "keep", "off"])]
+    #[arg(long, conflicts_with_all = ["every", "output", "keep", "off", "recipient", "plaintext"])]
     pub status: bool,
 }
 
