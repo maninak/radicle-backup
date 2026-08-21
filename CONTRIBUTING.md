@@ -4,7 +4,7 @@ The Radicle repository is [`rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J`](https://app.radic
 
 Patches are welcome either way: `rad patch` against that clone, or a GitHub pull request.
 
-**Issues live on Radicle only.** `rad issue open` in a clone of this repository; GitHub issues are turned off. If Radicle is not an option for you, the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com) reaches the same person.
+**Issues live on Radicle only.** `rad issue open` in a clone of this repository; GitHub issues are turned off, because a bug report about Radicle tooling should not be the one thing about this project that only one company can serve. If Radicle is not an option for you, the `#support` channel on the [Radicle Zulip](https://radicle.zulipchat.com) reaches the same person.
 
 ## Before you start
 
