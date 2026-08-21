@@ -16,6 +16,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- `doctor` no longer tells you an unencrypted archive `holds your private key in the clear` when the key file inside it carries its own passphrase. That check reads whether the archive was encrypted and knows nothing about the key, so it now says the archive can be read by anyone holding it, which is true either way.
+- `doctor`'s remedy for an unprotected key now names the key's real path instead of `$RAD_HOME/keys/radicle`, which was not a runnable command for anyone who never set `RAD_HOME`.
 - `--dry-run --json` now prints a JSON report, like every other command's `--json`, instead of the human-readable table.
 - Output a machine consumes (JSON reports, listings, recovery sheets) now fails the run when it cannot be written, instead of exiting `0` over a truncated report. A pipe closed on purpose, as `... | head` does, still counts as success.
 - A repository whose visibility `rad` could not report is now treated as private and named in a warning, instead of being taken for public and left out of `--repos private`.

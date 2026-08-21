@@ -178,7 +178,7 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let record = stored.record();
     let now = jiff::Timestamp::now();
 
-    let mut checks = vec![check_key_protection(&secret)];
+    let mut checks = vec![check_key_protection(&secret, &home.secret_key())];
     checks.push(check_backup_freshness(&stored, now, args));
     checks.push(check_backup_encryption(record));
     checks.push(check_backup_locality(home.path(), record));
@@ -194,7 +194,7 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     Ok(checks)
 }
 
-fn check_key_protection(secret: &SecretKey) -> Check {
+fn check_key_protection(secret: &SecretKey, key_path: &std::path::Path) -> Check {
     const TOPIC: &str = "key passphrase";
     match secret.protection() {
         crate::key::Protection::Encrypted { cipher, kdf } => Check::new(
@@ -207,7 +207,10 @@ fn check_key_protection(secret: &SecretKey) -> Check {
             Verdict::Fail,
             "the key is stored in the clear, so anyone who can read the file is you",
         )
-        .with_remedy("add one: ssh-keygen -p -f $RAD_HOME/keys/radicle"),
+        .with_remedy(format!(
+            "add one: ssh-keygen -p -f '{}'",
+            key_path.display()
+        )),
     }
 }
 
@@ -278,7 +281,7 @@ fn check_backup_encryption(record: Option<&state::Record>) -> Check {
         Some(_) => Check::new(
             TOPIC,
             Verdict::Fail,
-            "the newest archive holds your private key in the clear",
+            "the newest archive can be read by anyone who holds it, your key file included",
         )
         .with_remedy("take another without --plaintext, then delete the old one"),
         None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to judge"),
@@ -606,7 +609,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("rad-backup-topics-{}", std::process::id()));
         std::fs::write(&path, &*openssh).expect("scratch key is writable");
         let secret = SecretKey::read(&path).expect("key is readable");
-        let key = check_key_protection(&secret);
+        let key = check_key_protection(&secret, &path);
         let _ = std::fs::remove_file(path);
 
         vec![
@@ -689,6 +692,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unencrypted_archive_does_not_claim_to_know_how_the_key_inside_it_is_stored() {
+        // This check reads one bool: whether the ARCHIVE was encrypted. It has never been told
+        // whether the key file inside carries its own passphrase, so a detail claiming the key
+        // is in the clear was false for everyone whose key is not, which is everyone the check
+        // above tells to add one.
+        let mut plaintext = record();
+        plaintext.encrypted = false;
+        let check = check_backup_encryption(Some(&plaintext));
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert!(!check.detail.contains("in the clear"), "{}", check.detail);
+    }
+
+    #[test]
     fn a_plaintext_key_fails_and_says_how_to_fix_it() {
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
@@ -696,9 +712,13 @@ mod tests {
         std::fs::write(&path, &*openssh).expect("scratch key is writable");
 
         let secret = SecretKey::read(&path).expect("key is readable");
-        let check = check_key_protection(&secret);
+        let check = check_key_protection(&secret, &path);
         assert_eq!(check.verdict, Verdict::Fail);
-        assert!(check.remedy.is_some());
+        // The path this home actually uses, not `$RAD_HOME`, which is unset for everyone who
+        // never set it and left the one line that fixes this un-runnable as printed.
+        let remedy = check.remedy.clone().expect("a failing key names its fix");
+        assert!(remedy.contains(&path.display().to_string()), "{remedy}");
+        assert!(!remedy.contains("RAD_HOME"), "{remedy}");
 
         let _ = std::fs::remove_file(path);
     }
