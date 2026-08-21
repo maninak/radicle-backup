@@ -45,11 +45,7 @@ impl Ctx {
 /// actually went, then the working directory. The remembered directory matters most: someone
 /// who has taken a backup once has already answered this question, and asking again by way of
 /// an empty listing is a worse answer than using what they said.
-pub fn archive_dir(
-    ctx: &Ctx,
-    given: Option<&Path>,
-    record: Option<&crate::state::Record>,
-) -> PathBuf {
+pub fn archive_dir(given: Option<&Path>, record: Option<&crate::state::Record>) -> PathBuf {
     if let Some(dir) = given {
         return dir.to_path_buf();
     }
@@ -64,7 +60,6 @@ pub fn archive_dir(
     {
         return parent;
     }
-    let _ = ctx;
     PathBuf::from(".")
 }
 
@@ -77,7 +72,7 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
     }
     let node_id = ctx.node_id()?;
     let record = crate::state::read(&crate::key::Identity::read(ctx.home.public_key())?.did())?;
-    let directory = archive_dir(ctx, None, record.record());
+    let directory = archive_dir(None, record.record());
     let found = crate::archives::newest(&directory, &node_id)?;
     let Some(archive) = found else {
         return Err(Error::refused(

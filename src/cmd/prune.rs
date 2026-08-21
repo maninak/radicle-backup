@@ -17,7 +17,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     refuse_keep_zero(args.keep)?;
     let identity = Identity::read(ctx.home.public_key())?;
     let record = state::read(&identity.did())?;
-    let directory = archive_dir(ctx, args.dir.as_deref(), record.record());
+    let directory = archive_dir(args.dir.as_deref(), record.record());
     let found = archives::in_dir(&directory, &identity.node_id())?;
 
     let doomed: Vec<&Archive> = found.iter().skip(args.keep).collect();

@@ -29,7 +29,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
         ctx.term.warn(&complaint);
     }
     let record = stored.record();
-    let directory = archive_dir(ctx, args.dir.as_deref(), record);
+    let directory = archive_dir(args.dir.as_deref(), record);
     let found = archives::in_dir(&directory, &identity.node_id())?;
 
     if ctx.global.json {
