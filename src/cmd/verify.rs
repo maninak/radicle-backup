@@ -12,7 +12,7 @@ use crate::cli::Verify;
 use crate::cmd::{Ctx, Scratch};
 use crate::crypt;
 use crate::db;
-use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
+use crate::error::{EXIT_CHECKS_FAILED, Result};
 use crate::git::Git;
 use crate::key::{Identity, SecretKey};
 use crate::manifest::Manifest;
@@ -217,7 +217,22 @@ fn deep_checks(
     }
 
     let git = Git::new();
+    let carried = manifest
+        .repos
+        .iter()
+        .filter(|repo| repo.bundle.is_some())
+        .count();
     if !git.is_available() {
+        // Not a silent return: without git the bundles are never opened, and a report that
+        // said "complete" over an unopened bundle is the same report a fully verified archive
+        // gets. The archive may be fine; this run cannot say so.
+        if carried > 0 {
+            problems.push(format!(
+                "git is not on PATH, so {} in this archive could not be opened; install git \
+                 and verify again",
+                crate::term::count(carried, "repository bundle", "repository bundles")
+            ));
+        }
         return Ok(());
     }
     let mut checked = 0;
@@ -236,10 +251,4 @@ fn deep_checks(
         ));
     }
     Ok(())
-}
-
-impl From<Error> for std::process::ExitCode {
-    fn from(error: Error) -> Self {
-        error.exit_code()
-    }
 }

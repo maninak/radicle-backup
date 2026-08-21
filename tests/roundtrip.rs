@@ -428,6 +428,47 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
 }
 
 #[test]
+fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open() {
+    let fixture = Fixture::create("verify-deep-without-git");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a full backup");
+    let archive = only_archive(&backups);
+
+    let out = fixture
+        .command(
+            &["verify", "--deep", &archive.to_string_lossy()],
+            &fixture.home(),
+        )
+        .env("GIT", "/nonexistent/git")
+        .output()
+        .expect("rad-backup runs");
+    let said = stderr(&out);
+
+    // A re-wrap once left the continuation indentation inside the string literal, so the line
+    // arrived with a run of eighteen spaces in the middle of a sentence. Neither `cargo fmt`
+    // nor clippy reads inside a literal, so nothing but a reader would ever have caught it.
+    assert!(
+        said.contains("1 repository bundle in this archive could not be opened"),
+        "the sentence has to read as one: {said}"
+    );
+    assert!(
+        !said.contains("  not opened"),
+        "no run of spaces inside the sentence: {said}"
+    );
+}
+
+#[test]
 fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
     let fixture = Fixture::create("diff");
     let backups = fixture.path("backups");
