@@ -382,7 +382,7 @@ fn check_delegate_quorum(inventory: &Inventory) -> Check {
         .map(|repo| repo.display_name())
         .collect();
     let delegated = inventory
-        .records
+        .described
         .iter()
         .filter(|repo| repo.delegate)
         .count();
@@ -424,7 +424,7 @@ fn check_delegate_quorum(inventory: &Inventory) -> Check {
 
 fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check {
     let alone: Vec<&str> = inventory
-        .records
+        .described
         .iter()
         .filter(|repo| !repo.is_private())
         .filter(|repo| routing.get(&repo.rid).copied().unwrap_or(0) == 0)
@@ -469,7 +469,7 @@ mod tests {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
         let args = Doctor { backup_dir: None };
         let empty = Inventory {
-            records: Vec::new(),
+            described: Vec::new(),
             selected: Default::default(),
             warnings: Vec::new(),
         };
@@ -648,7 +648,7 @@ mod tests {
             entries: 5,
             bytes: 1024,
             encrypted: true,
-            repos: Default::default(),
+            carried: Default::default(),
             described: Default::default(),
             sigrefs: Default::default(),
             seeded: 0,

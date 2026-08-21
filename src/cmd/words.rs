@@ -16,7 +16,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     use std::io::BufRead;
 
     let home = &ctx.home;
-    if home.exists() {
+    if home.holds_identity() {
         return Err(Error::refused(
             format!("{} already holds an identity", home.path().display()),
             "restore into an empty --home",

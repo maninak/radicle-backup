@@ -29,8 +29,11 @@ pub struct Record {
     pub bytes: u64,
     pub encrypted: bool,
     /// The repositories whose data that archive carried.
-    #[serde(default)]
-    pub repos: BTreeSet<String>,
+    ///
+    /// Spelled `repos` on disk, because a state file written by an older version has to keep
+    /// answering `carries`. Revisit if a state file ever gains a version field.
+    #[serde(default, rename = "repos")]
+    pub carried: BTreeSet<String>,
     /// Every repository the archive described, carried or not.
     #[serde(default)]
     pub described: BTreeSet<String>,
@@ -59,7 +62,7 @@ impl Record {
             entries: manifest.entries.len(),
             bytes: manifest.total_bytes(),
             encrypted,
-            repos: manifest
+            carried: manifest
                 .repos
                 .iter()
                 .filter(|repo| repo.bundle.is_some())
@@ -80,7 +83,7 @@ impl Record {
     }
 
     pub fn carries(&self, rid: &str) -> bool {
-        self.repos.contains(rid)
+        self.carried.contains(rid)
     }
 
     /// Days between the archive and now, or `None` when the stamp does not parse.
@@ -195,7 +198,7 @@ mod tests {
             entries: 9,
             bytes: 22_371,
             encrypted: true,
-            repos: BTreeSet::from(["rad:zAAA".to_string()]),
+            carried: BTreeSet::from(["rad:zAAA".to_string()]),
             described: BTreeSet::from(["rad:zAAA".to_string(), "rad:zBBB".to_string()]),
             sigrefs: BTreeMap::new(),
             seeded: 45,
@@ -223,6 +226,20 @@ mod tests {
         assert!(record.carries("rad:zAAA"));
         assert!(!record.carries("rad:zBBB"));
         assert!(record.described.contains("rad:zBBB"));
+    }
+
+    #[test]
+    fn a_state_file_written_before_the_field_was_renamed_still_says_what_it_carried() {
+        // The field is `carried` in Rust and `repos` on disk. A state file already sitting in
+        // `~/.local/state` spells it the old way, and `doctor` reads that file to say whether
+        // the last archive covers a repository. Renaming the key would make every one of them
+        // read as an archive that carried nothing.
+        let written = serde_json::to_value(record()).expect("a record serialises");
+        assert!(written.get("repos").is_some(), "{written}");
+        assert!(written.get("carried").is_none(), "{written}");
+
+        let read: Record = serde_json::from_value(written).expect("a record round-trips");
+        assert!(read.carries("rad:zAAA"));
     }
 
     #[test]

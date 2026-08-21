@@ -18,7 +18,7 @@ use crate::rad::{Described, Listed, Listing, Rad};
 /// What the inventory pass worked out, before anything is written.
 pub struct Inventory {
     /// Every repository the archive will describe, whether or not it carries its data.
-    pub records: Vec<RepoRecord>,
+    pub described: Vec<RepoRecord>,
     /// Repositories whose data the archive will carry, by identifier.
     pub selected: BTreeSet<String>,
     pub warnings: Vec<String>,
@@ -26,13 +26,13 @@ pub struct Inventory {
 
 impl Inventory {
     pub fn private(&self) -> impl Iterator<Item = &RepoRecord> {
-        self.records.iter().filter(|record| record.is_private())
+        self.described.iter().filter(|record| record.is_private())
     }
 
     /// What to call a repository in a message: its name when the paperwork knows one, and its
     /// identifier when it does not.
     pub fn display_name(&self, rid: &str) -> String {
-        self.records
+        self.described
             .iter()
             .find(|record| record.rid == rid)
             .map(|record| record.display_name().to_string())
@@ -42,7 +42,7 @@ impl Inventory {
     /// Repositories this identity is the only delegate of. Losing the key ends their
     /// governance, which is the one loss a backup cannot undo.
     pub fn sole_delegate(&self) -> impl Iterator<Item = &RepoRecord> {
-        self.records
+        self.described
             .iter()
             .filter(|record| record.delegate && record.delegates.len() == 1)
     }
@@ -83,14 +83,14 @@ pub fn collect(
 
     // Paperwork is gathered for what is yours and for what is being carried, and for nothing
     // else: on a seed, the other twelve thousand repositories are somebody else's paperwork.
-    let described: BTreeSet<&String> = mine.iter().chain(selected.iter()).collect();
+    let to_describe: BTreeSet<&String> = mine.iter().chain(selected.iter()).collect();
     let seeding = policies.seeding_by_rid();
-    let mut records = Vec::with_capacity(described.len());
+    let mut records = Vec::with_capacity(to_describe.len());
     let mut undescribed = BTreeSet::new();
     let mut first_reason = None;
     let mut unreadable = BTreeSet::new();
     let mut first_unreadable = None;
-    for rid in described {
+    for rid in to_describe {
         let (record, trouble) = describe(home, git, rad, rid, node_id, &seeding, routing)?;
         if let Some(why) = trouble.undescribed {
             first_reason.get_or_insert(why);
@@ -144,7 +144,7 @@ pub fn collect(
     }
 
     Ok(Inventory {
-        records,
+        described: records,
         selected,
         warnings,
     })

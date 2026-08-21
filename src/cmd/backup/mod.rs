@@ -166,7 +166,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
             stopped_by_backup: node.stopped_by_backup,
         },
         entries: Vec::new(),
-        repos: inventory.records.clone(),
+        repos: inventory.described.clone(),
         policies: PolicySummary {
             seeded: policies.seeded().count(),
             blocked_repos: policies.blocked_repos().count(),
@@ -312,7 +312,7 @@ fn rehearse(
     let term = &ctx.term;
     let mut total = 0;
     let mut selected = Vec::new();
-    for record in &inventory.records {
+    for record in &inventory.described {
         if !inventory.selected.contains(&record.rid) {
             continue;
         }
@@ -644,7 +644,8 @@ fn report(
     // A private repository left out of the archive is only lost if nobody else has it: the
     // owner may have allowed a peer to hold it, and a peer that holds it can hand it back.
     //
-    // Judged on what REACHED the archive, not on what was selected for it. `inventory.records`
+    // Judged on what REACHED the archive, not on what was selected for it.
+    // `inventory.described`
     // never has its `bundle` set (that field is filled on `manifest.repos`, a different
     // collection), so the old first clause was a constant true, and a repository whose bundle
     // failed stayed in `selected` and was therefore counted as carried. The one repository

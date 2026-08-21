@@ -99,12 +99,12 @@ impl Home {
     }
 
     /// A home is real once it holds a secret key. Everything else `rad` recreates.
-    pub fn exists(&self) -> bool {
+    pub fn holds_identity(&self) -> bool {
         self.secret_key().is_file()
     }
 
     pub fn require(&self) -> Result<()> {
-        if self.exists() {
+        if self.holds_identity() {
             return Ok(());
         }
         Err(Error::NotAHome {

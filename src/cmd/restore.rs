@@ -69,7 +69,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     let home = &ctx.home;
     let term = &ctx.term;
 
-    if home.exists() && !args.force {
+    if home.holds_identity() && !args.force {
         return Err(Error::refused(
             format!("{} already holds an identity", home.path().display()),
             "move it aside, restore into a different --home, or pass --force to overwrite it",
@@ -168,7 +168,7 @@ fn remember(
     // report them as newly missing.
     let present: BTreeSet<String> = restored.iter().map(|repo| repo.rid.clone()).collect();
     record.sigrefs.retain(|rid, _| present.contains(rid));
-    record.repos.clone_from(&present);
+    record.carried.clone_from(&present);
     record.described = present;
     if let Err(e) = state::write(&record) {
         ctx.term.warn(&format!(

@@ -22,14 +22,14 @@ const NODE_STOP_POLL: Duration = Duration::from_millis(200);
 /// fifteen `?` sites between the stop and the restart: a passphrase that cannot be read, a
 /// repository that changes size mid-read, a full disk. Every one of them used to unwind past
 /// the restart and leave a seed offline until somebody noticed. `Drop` runs on all of them.
-pub(super) struct NodeHandling<'a> {
+pub(super) struct NodeGuard<'a> {
     ctx: &'a Ctx,
     rad: Option<&'a Rad>,
     pub(super) was_running: bool,
     pub(super) stopped_by_backup: bool,
 }
 
-impl NodeHandling<'_> {
+impl NodeGuard<'_> {
     /// Put the node back now rather than at the end of the scope, for the paths that want to
     /// report it in order. Idempotent: the flag is cleared, so `Drop` then does nothing.
     pub(super) fn restart(&mut self) {
@@ -53,7 +53,7 @@ impl NodeHandling<'_> {
     }
 }
 
-impl Drop for NodeHandling<'_> {
+impl Drop for NodeGuard<'_> {
     fn drop(&mut self) {
         self.restart();
     }
@@ -69,10 +69,10 @@ pub(super) fn quiesce<'a>(
     args: &Create,
     rad: Option<&'a Rad>,
     warnings: &mut Vec<String>,
-) -> Result<NodeHandling<'a>> {
+) -> Result<NodeGuard<'a>> {
     let was_running = ctx.home.node_state() == NodeState::Running;
     if !was_running {
-        return Ok(NodeHandling {
+        return Ok(NodeGuard {
             ctx,
             rad,
             was_running: false,
@@ -87,7 +87,7 @@ pub(super) fn quiesce<'a>(
         );
         ctx.term
             .warn("the node is running; pass --stop-node for a guaranteed-clean copy");
-        return Ok(NodeHandling {
+        return Ok(NodeGuard {
             ctx,
             rad,
             was_running: true,
@@ -110,7 +110,7 @@ pub(super) fn quiesce<'a>(
     // The guard exists from the moment the stop is asked for, not from the moment it is
     // confirmed. `rad node stop` can succeed and the socket still be up when the deadline
     // passes, and that path returned an error with nothing recorded as owing a restart.
-    let mut node = NodeHandling {
+    let mut node = NodeGuard {
         ctx,
         rad: Some(rad),
         was_running: true,

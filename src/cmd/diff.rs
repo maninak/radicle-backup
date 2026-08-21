@@ -52,7 +52,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     )?;
 
     let now: BTreeSet<String> = inventory
-        .records
+        .described
         .iter()
         .map(|repo| repo.rid.clone())
         .collect();
@@ -62,7 +62,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     // A repository has moved on when the signed refs of this peer point somewhere else than
     // they did. That is the only change that can cost work, so it is the one worth naming.
     let moved: Vec<&crate::manifest::RepoRecord> = inventory
-        .records
+        .described
         .iter()
         .filter(|repo| {
             let current = repo.sigrefs.get(&node_id);
