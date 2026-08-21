@@ -87,17 +87,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // and a second probe after a multi-gigabyte unpack can find the file moved or the medium
     // ejected. Guessing "unencrypted" there made `doctor` fail an archive that is encrypted.
     let encrypted = crypt::looks_encrypted(archive)?;
-    let passphrase = if crypt::needs_passphrase(archive)? {
-        Some(crypt::read_passphrase(
-            crypt::PASSPHRASE_ENV,
-            ctx.global.passphrase_file.as_deref(),
-            "Passphrase for the archive: ",
-            crypt::Purpose::Opening,
-            term.is_interactive(),
-        )?)
-    } else {
-        None
-    };
+    let passphrase = crate::cmd::archive_passphrase(ctx, archive)?;
 
     // Staging sits beside the home by default, so the filesystem that has to hold the
     // restored data is the one proven to have room for it before anything is installed.

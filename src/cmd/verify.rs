@@ -10,7 +10,6 @@ use std::path::Path;
 use crate::archive::Reader;
 use crate::cli::Verify;
 use crate::cmd::{Ctx, Scratch};
-use crate::crypt;
 use crate::db;
 use crate::error::{EXIT_CHECKS_FAILED, Result};
 use crate::git::Git;
@@ -89,17 +88,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
 
 pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
     let archive = &crate::cmd::resolve_archive(ctx, args.target.archive.as_deref())?;
-    let passphrase = if crypt::needs_passphrase(archive)? {
-        Some(crypt::read_passphrase(
-            crypt::PASSPHRASE_ENV,
-            ctx.global.passphrase_file.as_deref(),
-            "Passphrase for the archive: ",
-            crypt::Purpose::Opening,
-            ctx.term.is_interactive(),
-        )?)
-    } else {
-        None
-    };
+    let passphrase = crate::cmd::archive_passphrase(ctx, archive)?;
 
     let mut checks = Vec::new();
     let mut problems = Vec::new();

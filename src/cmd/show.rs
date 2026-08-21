@@ -3,7 +3,6 @@
 use crate::archive::Reader;
 use crate::cli::Target;
 use crate::cmd::Ctx;
-use crate::crypt;
 use crate::error::Result;
 use crate::manifest::Manifest;
 use crate::term;
@@ -106,17 +105,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
 /// the entries exist.
 pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
     let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
-    let passphrase = if crypt::needs_passphrase(&archive)? {
-        Some(crypt::read_passphrase(
-            crypt::PASSPHRASE_ENV,
-            ctx.global.passphrase_file.as_deref(),
-            "Passphrase for the archive: ",
-            crypt::Purpose::Opening,
-            ctx.term.is_interactive(),
-        )?)
-    } else {
-        None
-    };
+    let passphrase = crate::cmd::archive_passphrase(ctx, &archive)?;
     let reader = Reader::open(&archive, passphrase.as_ref(), ctx.identity_files())?;
     Ok(reader.scan(&archive)?.manifest)
 }

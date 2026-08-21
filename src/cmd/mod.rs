@@ -39,6 +39,24 @@ impl Ctx {
     }
 }
 
+/// The passphrase for opening an archive, if that archive wants one.
+///
+/// One place, because `restore`, `show` and `verify` each carried a verbatim copy of it, and
+/// a change to the wording or to where a passphrase may come from had to land in all three or
+/// two verbs would start asking differently from the third.
+pub fn archive_passphrase(ctx: &Ctx, archive: &Path) -> Result<Option<zeroize::Zeroizing<String>>> {
+    if !crate::crypt::needs_passphrase(archive)? {
+        return Ok(None);
+    }
+    Ok(Some(crate::crypt::read_passphrase(
+        crate::crypt::PASSPHRASE_ENV,
+        ctx.global.passphrase_file.as_deref(),
+        "Passphrase for the archive: ",
+        crate::crypt::Purpose::Opening,
+        ctx.term.is_interactive(),
+    )?))
+}
+
 /// Where this identity's archives are expected to live.
 ///
 /// In order: what the caller said, then RAD_BACKUP_DIR, then wherever the last archive
