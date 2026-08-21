@@ -10,13 +10,54 @@ use std::path::Path;
 use crate::error::Result;
 use crate::exec::Tool;
 
+/// What `rad` was able to say about one repository.
+///
+/// A failed call is not folded into "there is no paperwork", because the two are opposites
+/// where it matters: a repository whose visibility could not be read looks public, and the
+/// private selection then leaves it out of the archive without naming it. An archive quietly
+/// missing the repositories it was taken for is the failure this tool exists to prevent, so
+/// the reason travels back to whoever can act on it.
+pub enum Described {
+    Identity(RepoIdentity),
+    Unavailable { why: String },
+}
+
+/// What `rad ls` was able to answer, for the same reason `Described` exists: a listing that
+/// failed is not a listing that came back empty.
+pub enum Listed {
+    Ids(Vec<String>),
+    Unavailable { why: String },
+}
+
+/// An error as one line, because these end up inside a warning next to a repository id.
+fn one_line(error: &crate::error::Error) -> String {
+    error
+        .to_string()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Which repositories to ask `rad ls` about.
 #[derive(Debug, Clone, Copy)]
 pub enum Listing {
     /// Repositories this identity initialised or forked.
     Own,
-    /// Repositories the network has never seen and never will.
+    /// Repositories marked private: the open network does not carry them, and only the
+    /// peers their identity document allows can fetch them.
     Private,
+}
+
+impl Listing {
+    /// The command as it would be typed, for a message about the one that failed.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            Self::Own => "ls",
+            Self::Private => "ls --private",
+        }
+    }
 }
 
 pub struct Rad {
@@ -52,26 +93,29 @@ impl Rad {
     ///
     /// One `rad inspect` per repository rather than one per question: on a seed being asked
     /// about every repository it holds, each extra subprocess is another fork and exec.
-    pub fn describe_repo(&self, rid: &str) -> Result<Option<RepoIdentity>> {
-        let Some(json) = self.tool.raw_output(&["inspect", rid, "--identity"])? else {
-            return Ok(None);
+    pub fn describe_repo(&self, rid: &str) -> Result<Described> {
+        let json = match self.tool.output(&["inspect", rid, "--identity"]) {
+            Ok(json) => json,
+            Err(e) => return Ok(Described::Unavailable { why: one_line(&e) }),
         };
-        let Ok(document) = serde_json::from_str::<serde_json::Value>(&json) else {
-            return Ok(None);
-        };
-        Ok(Some(RepoIdentity::from_document(&document)))
+        match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(document) => Ok(Described::Identity(RepoIdentity::from_document(&document))),
+            Err(e) => Ok(Described::Unavailable {
+                why: format!("its identity document did not parse as JSON: {e}"),
+            }),
+        }
     }
 
     /// Repository identifiers from a `rad ls` listing.
-    pub fn list(&self, listing: Listing) -> Result<Vec<String>> {
+    pub fn list(&self, listing: Listing) -> Result<Listed> {
         let args: &[&str] = match listing {
             Listing::Own => &["ls"],
             Listing::Private => &["ls", "--private"],
         };
-        let Some(out) = self.tool.raw_output(args)? else {
-            return Ok(Vec::new());
-        };
-        Ok(repository_ids(&out))
+        match self.tool.output(args) {
+            Ok(out) => Ok(Listed::Ids(repository_ids(&out))),
+            Err(e) => Ok(Listed::Unavailable { why: one_line(&e) }),
+        }
     }
 
     /// Fetch a repository from the network, which is what makes a restored copy comparable
