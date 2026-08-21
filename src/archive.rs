@@ -128,7 +128,9 @@ impl<'a> Writer<'a> {
                      an archive can carry",
                     json.len()
                 ),
-                remedy: "take several archives with `--repos`, each covering part of the home"
+                remedy: "narrow what the archive carries with `--repos private` or \
+                         `--repos mine`, and report this home: nothing else here can \
+                         split it further"
                     .to_string(),
             });
         }

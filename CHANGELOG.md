@@ -30,6 +30,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Pasting section 1 of `RESTORE.md` over a home that already holds a key now refuses instead of warning and then overwriting the identity on the next line.
 - `restore.sh` inside an archive no longer claims to have restored policies that a tier without them never carried.
 - The refusal over an oversized manifest names a remedy that can be followed. It asked for several archives with `--repos`, each covering part of the home, and `--repos` picks a category rather than a slice of one.
+- `restore.sh` inside an archive no longer tells the reader to check policies that a tier without them never carried.
 - A restore writes the secret key, the public key and `config.json` beside their targets and renames them into place. A crash or a full disk part way through used to leave a home holding neither the old identity nor the new one, because the old file was unlinked before the first byte of the new one was written.
 - `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
 - Reading a node database that has a write-ahead log beside it creates a `-shm` file in the home, and the run now says so. It was reported as nothing at all, because the recording sat behind a writable-connection fallback that a write-ahead log never reaches. That fallback is gone: it could not run, and could not have helped.
@@ -50,6 +51,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - An archive encrypted to recipients now says which key to pass when none of the given identities open it, instead of blaming a passphrase it never asked for.
 - Pasting section 1 of `RESTORE.md` over a home that already holds a key now refuses instead of warning and then overwriting the identity on the next line.
 - `restore.sh` inside an archive no longer tells the reader to check policies that a tier without them never carried.
+- The refusal over an oversized manifest names a remedy that exists: `--repos` selects a category, and never could cover "part of the home".
 
 ### Security
 
