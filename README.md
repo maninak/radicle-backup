@@ -22,7 +22,7 @@ Beyond copying files:
 
 - The default archive carries what the network will not hand back and skips what it will: a public repository is on other nodes, a private one is by default nowhere else at all.
 - `restore` compares every restored repository with the network before handing control back, because pushing on top of stale signed refs forks your own peer history.
-- An archive is `tar` inside `zstd` inside optional `age`, with recovery instructions and a shell script inside it, so `tar`, `git` and a POSIX shell can restore it without this tool.
+- An archive is `tar` inside `zstd` inside optional `age`, with recovery instructions and a shell script inside it: `tar`, `zstd` and (when encrypted) `age` open it, and `git` and a POSIX shell put it back, without this tool.
 - `doctor` reports what would be lost right now and names the command that fixes each failing line.
 
 ## Install
@@ -100,7 +100,7 @@ rad backup paper                        # a printable recovery sheet, for the dr
 rad backup prune --keep 7               # delete the older ones, keeping the newest 7
 ```
 
-**Every command that takes an archive can be given none**, and then acts on the newest archive of this identity it can find, saying on stderr which one that was. It looks in `RAD_BACKUP_DIR`, then wherever the last archive actually went, then the working directory. Naming a path is always allowed and always wins.
+**`verify` and `show` can be given no archive**, and then act on the newest archive of this identity they can find, saying on stderr which one that was. They look in `RAD_BACKUP_DIR`, then wherever the last archive actually went, then the working directory. Naming a path is always allowed and always wins. `restore` is the exception and always wants an explicit path, because restoring the wrong archive is not a mistake to default into.
 
 `doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception announces itself: a database that cannot be opened read-only is opened writable to recover its write-ahead log, and the run says so.
 
@@ -228,6 +228,10 @@ So after restoring, and before handing control back, every restored repository i
 
 `--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push.
 
+`--replay-policies` re-applies the seeding and following policies through `rad` instead of copying the policy database, for restoring into a Radicle whose schema has moved past the archived one.
+
+A repository the archive carried and this run could not put back is named and costs exit `3`, the same as a divergence: the rest of the restore stands, and the archive is untouched.
+
 ### Restoring without this tool
 
 If this program is gone, or does not run where you are:
@@ -329,9 +333,9 @@ rad backup schedule --off           # stop, leaving the unit files in place
 rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 ```
 
-It refuses to enable a timer that cannot work: an unattended run has nobody to type a passphrase at, so a passphrase file (or `RAD_BACKUP_PASSPHRASE` in the timer's environment) is not optional. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
+It refuses to enable a timer that cannot work: an unattended run has nobody to type a passphrase at, so `--passphrase-file` is not optional. An exported `RAD_BACKUP_PASSPHRASE` does not count, because it reaches the command you are typing and not the timer, which systemd starts from its own environment. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
 
-It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. Edit either unit by hand and it stays yours: a unit file without this tool's marker line at the top is never replaced, and the run says so instead. The `env` file is rewritten by every `rad backup schedule` run, so a lasting settings change belongs on the command line that writes it. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
+It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. To keep a hand edit, delete the marker line at the top of the unit: a unit file without that line is never replaced, and the run says so instead. A unit that still carries the marker is rewritten by the next `rad backup schedule`. The `env` file is rewritten by every `rad backup schedule` run, so a lasting settings change belongs on the command line that writes it. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
 
 Or with cron, if you prefer:
 

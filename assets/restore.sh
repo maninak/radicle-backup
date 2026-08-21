@@ -66,10 +66,18 @@ for bundle in repos/*.bundle; do
 	restored=$((restored + 1))
 done
 
-echo "restored the identity, its policies and $restored repositories"
+case "$restored" in
+1) counted="1 repository" ;;
+*) counted="$restored repositories" ;;
+esac
+if [ -f node/policies.db ]; then
+	echo "restored the identity, its policies and $counted"
+else
+	echo "restored the identity and $counted; this archive carried no policies"
+fi
 echo
 echo "before writing to any restored repository, fetch what the network has:"
 echo "    rad sync <rid> --fetch"
-echo "building on refs that are behind the network's forks your own history."
+echo "writing on top of refs the network has already moved past forks your own history."
 echo
 echo "and never run two nodes with this key at once."

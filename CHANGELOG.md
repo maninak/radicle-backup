@@ -48,6 +48,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - A `following` row with no alias no longer fails the whole read of the node database.
 - Write and parse errors name the file they are about.
 - An archive encrypted to recipients now says which key to pass when none of the given identities open it, instead of blaming a passphrase it never asked for.
+- Pasting section 1 of `RESTORE.md` over a home that already holds a key now refuses instead of warning and then overwriting the identity on the next line.
+- `restore.sh` inside an archive no longer tells the reader to check policies that a tier without them never carried.
 
 ### Security
 

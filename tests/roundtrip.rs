@@ -904,6 +904,11 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         .output()
         .expect("the restore script runs");
     assert_success(&out, "restoring with the shipped script");
+    // The fixture home holds exactly one repository, and the closing line the script prints is
+    // the last thing somebody reads before deciding the restore worked. `term::count` is the
+    // rule this tool holds its own output to; the shipped script has to keep it too.
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("and 1 repository\n"), "{said}");
     assert!(
         !decoy.exists(),
         "the script ignored its argument and restored into RAD_HOME instead"
@@ -974,6 +979,43 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
 // the key in the clear, so `paper` refuses a terminal but must keep working when piped.
 // Written as "refuse whenever --output is absent" the guard would take piping away, and
 // this test is what goes red if anyone writes it that way.
+#[test]
+fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
+    let fixture = Fixture::create("restore-md-guard");
+    let stage = fixture.path("stage");
+    let home = fixture.path("occupied");
+    std::fs::create_dir_all(stage.join("keys")).expect("the staging directory is made");
+    std::fs::create_dir_all(home.join("keys")).expect("the occupied home is made");
+    std::fs::write(stage.join("keys/radicle"), b"the archived key").expect("a key to copy");
+    std::fs::write(stage.join("keys/radicle.pub"), b"the archived public key").expect("a pub");
+    std::fs::write(home.join("keys/radicle"), b"the key already here").expect("a key to guard");
+
+    // The block a reader in a recovery panic pastes whole. Its guard used to only echo, and
+    // the `cp` that ends whatever identity is already there was the very next line.
+    let sheet = include_str!("../assets/RESTORE.md");
+    let block = sheet
+        .split("```sh")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the sheet opens with a shell block");
+
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(block)
+        .current_dir(&stage)
+        .env("RAD_HOME", &home)
+        .env("HOME", fixture.path("elsewhere"))
+        .output()
+        .expect("sh runs");
+
+    assert_eq!(
+        std::fs::read(home.join("keys/radicle")).expect("the key is still readable"),
+        b"the key already here",
+        "pasting the block must not overwrite an identity: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
     let fixture = Fixture::create("paper-pipe");

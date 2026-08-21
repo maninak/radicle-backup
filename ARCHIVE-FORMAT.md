@@ -11,7 +11,7 @@ This document is the specification: enough for another program, or a person with
 
 - **age**: [age](https://age-encryption.org) v1, either an `scrypt` recipient (a passphrase) or one or more `X25519`/`ssh` recipients (`--recipient`). The file begins with the ASCII bytes `age-encryption.org/`, which is how a reader decides whether to decrypt rather than trusting the file name.
 - **zstd**: a standard zstd stream, level 10.
-- **tar**: a GNU tar stream. Entries are regular files only; no directories, symlinks, hardlinks or device nodes are ever written, and a reader must not create any. Every header carries `uid=0`, `gid=0` and `mtime=0`, so an entry's bytes do not depend on who wrote it or when. The archive as a whole still differs between runs: `manifest.json` carries the creation time, and encryption adds a fresh salt.
+- **tar**: a GNU tar stream. Entries are regular files only; no directories, symlinks, hardlinks or device nodes are ever written, and a reader must not create any, because a symlink or a device node in a hostile archive is how extraction escapes the directory it was pointed at or reaches into the system. Every header carries `uid=0`, `gid=0` and `mtime=0`, so an entry's bytes do not depend on who wrote it or when. The archive as a whole still differs between runs: `manifest.json` carries the creation time, and encryption adds a fresh salt.
 
 Nothing in the format depends on a `rad` version. An archive written next to Radicle 1.10 restores next to Radicle 2.x, because it carries the files and the git objects rather than a serialisation of anyone's internal types.
 
@@ -112,15 +112,15 @@ install -m 600 node/policies.db ~/.radicle/node/policies.db
 
 rid=z<rid>
 git init --bare ~/.radicle/storage/$rid
-git --git-dir ~/.radicle/storage/$rid fetch --force repos/$rid.bundle 'refs/*:refs/*'
+git --git-dir ~/.radicle/storage/$rid -c fetch.fsckObjects=true fetch --force repos/$rid.bundle 'refs/*:refs/*'
 git --git-dir ~/.radicle/storage/$rid symbolic-ref HEAD "$(jq -r '.repos[]|select(.rid|endswith("'$rid'")).head' manifest.json)"
 ```
 
-`restore.sh` inside the archive runs this loop for every repository. It does not check digests: compare `sha256sum` output against the manifest by hand, or use `rad-backup verify`. Drop `age -d` for a plaintext archive.
+`fetch.fsckObjects` because a bundle is the one part of an archive that nothing else validates, and one can carry a tree entry named `.git` or `..`. `restore.sh` inside the archive runs this loop for every repository. It does not check digests: compare `sha256sum` output against the manifest by hand, or use `rad-backup verify`. Drop `age -d` for a plaintext archive.
 
 ## Compatibility rules
 
-- **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words.
+- **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words, because a newer format may change what an entry means, and a half-understood restore is worse than a refused one.
 - **New entries may be added** in a future version 1 archive. A reader must ignore an entry it does not recognise rather than treating it as corruption; the manifest is what decides whether the archive is complete.
 - **Entry paths never change meaning.** If what belongs at `node/policies.db` ever stops being a policy database, it gets a new path and the format version goes up.
 - **The plaintext recovery path never goes away.** Any change that would make an archive unreadable without this tool is out of scope.

@@ -2,27 +2,31 @@
 
 This archive was written by `rad-backup` on {{CREATED}}, from `{{RAD_HOME}}` on `{{HOST}}`. It holds the identity `{{ALIAS}}` (`{{DID}}`).
 
-You do not need `rad-backup` to restore it. The archive is a plain tar of plain files, and everything below uses `git` and a POSIX shell. `jq` is used to read `manifest.json` and `policies.json`; where it appears, you can read those files by eye instead.
+You do not need `rad-backup` to restore it. The archive is a plain tar of plain files, and everything below uses `git` and a POSIX shell. `jq` is used to read `manifest.json` and `policies.json`; where it appears, you can read those files by eye instead. `ssh-keygen` and `sha256sum` appear only in the checks, so the restore itself works without them.
 
 ## 1. Put the identity back
 
 ```sh
 export RAD_HOME="${RAD_HOME:-$HOME/.radicle}"
 
-# Stop if a key is already there. Overwriting one ends whatever identity it belongs to.
-[ -e "$RAD_HOME/keys/radicle" ] && echo "a key is already there; move it aside first"
+# Overwriting a key ends whatever identity it belongs to, so the copy happens only when
+# there is nothing to overwrite. Paste this whole block: a warning on its own would not stop
+# the lines below it from running.
+if [ -e "$RAD_HOME/keys/radicle" ]; then
+  echo "a key is already there; move it aside, or point RAD_HOME somewhere empty" >&2
+else
+  mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node"
 
-mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node"
+  # The umask so the key is never briefly world-readable, and the chmod because a umask
+  # applies only when cp creates the file: over an existing 0644 file it does nothing.
+  (umask 077 && cp keys/radicle "$RAD_HOME/keys/radicle")
+  chmod 600 "$RAD_HOME/keys/radicle"
+  cp keys/radicle.pub "$RAD_HOME/keys/radicle.pub"
+  chmod 644 "$RAD_HOME/keys/radicle.pub"
 
-# The umask so the key is never briefly world-readable, and the chmod because a umask
-# applies only when cp creates the file: over an existing 0644 file it does nothing.
-(umask 077 && cp keys/radicle "$RAD_HOME/keys/radicle")
-chmod 600 "$RAD_HOME/keys/radicle"
-cp keys/radicle.pub "$RAD_HOME/keys/radicle.pub"
-chmod 644 "$RAD_HOME/keys/radicle.pub"
-
-# config.json is absent when the home never had one, whatever the tier.
-[ -f config.json ] && cp config.json "$RAD_HOME/config.json"
+  # config.json is absent when the home never had one, whatever the tier.
+  [ -f config.json ] && cp config.json "$RAD_HOME/config.json"
+fi
 ```
 
 That is the whole identity. The key file is still protected by whatever passphrase it had when the archive was made.
