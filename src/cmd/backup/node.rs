@@ -18,6 +18,12 @@ const NODE_STOP_POLL: Duration = Duration::from_millis(200);
 
 /// A node this run may have stopped, and the promise to put it back.
 ///
+/// The promise is kept on a return and on a panic, and on neither when a signal kills the
+/// process: Ctrl-C during a long `--stop-node` backup leaves the node down with nothing said.
+/// The scheduled unit this tool writes never passes `--stop-node`, so a killed timer run
+/// cannot strand a seed, and the person who pressed Ctrl-C is by definition at the keyboard.
+/// Revisit if `--stop-node` ever becomes something a machine turns on by itself.
+///
 /// A guard rather than a pair of booleans and a call at the end, because `run` has about
 /// fifteen `?` sites between the stop and the restart: a passphrase that cannot be read, a
 /// repository that changes size mid-read, a full disk. Every one of them used to unwind past

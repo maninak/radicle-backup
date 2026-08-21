@@ -32,6 +32,11 @@ pub(super) enum Destination {
     },
 }
 
+/// Drop runs on a return and on a panic, and on neither when a signal kills the process.
+/// A Ctrl-C mid-write therefore leaves the `.partial` behind. Said here rather than fixed,
+/// because a handler is the wrong trade for it: the file is named `.partial`, it is never the
+/// archive anybody is pointed at, and the next run to the same destination overwrites it.
+/// Revisit if this tool ever grows a signal handler for another reason.
 impl Drop for Destination {
     fn drop(&mut self) {
         if let Self::File {
