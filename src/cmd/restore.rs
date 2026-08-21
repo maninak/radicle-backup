@@ -533,6 +533,43 @@ fn wait_for_node(ctx: &Ctx) -> bool {
     false
 }
 
+/// What `git merge-base --is-ancestor` said about the two sides, asked both ways round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ancestry {
+    /// The archived refs are an ancestor of what is here now: the network moved on without us.
+    ArchivedIsBehind,
+    /// What is here now is an ancestor of the archived refs: the archive holds unpushed work.
+    ArchivedIsAhead,
+    /// Neither reaches the other, so there is no history that holds both.
+    Unrelated,
+}
+
+/// Where the archive's signed refs stand against what the network now holds.
+///
+/// Kept apart from the fetching and the spawning of `git` because this is the decision the
+/// whole tool exists for: writing on top of a restored copy whose sigrefs are behind the
+/// network forks your own peer history, and there is no undo. Fused into the caller, every arm
+/// of it needed a node and a network to reach, which is another way of saying none of them was
+/// ever checked.
+///
+/// `ancestry` is a closure rather than a value, so two identical oids cost no `git` at all.
+fn classify<F>(archived: &str, current: Option<&str>, ancestry: F) -> Result<Standing>
+where
+    F: FnOnce(&str) -> Result<Ancestry>,
+{
+    let Some(current) = current else {
+        return Ok(Standing::NotChecked);
+    };
+    if current == archived {
+        return Ok(Standing::Same);
+    }
+    Ok(match ancestry(current)? {
+        Ancestry::ArchivedIsBehind => Standing::NetworkWasAhead,
+        Ancestry::ArchivedIsAhead => Standing::ArchiveIsAhead,
+        Ancestry::Unrelated => Standing::Diverged,
+    })
+}
+
 fn compare_with_network(
     ctx: &Ctx,
     manifest: &Manifest,
@@ -560,19 +597,15 @@ fn compare_with_network(
 
         let path = ctx.home.repository_path(&repo.rid);
         let current = git.ref_oid(&path, &sigrefs)?;
-        let standing = match current {
-            None => Standing::NotChecked,
-            Some(current) if &current == archived => Standing::Same,
-            Some(current) => {
-                if git.is_ancestor(&path, archived, &current)? {
-                    Standing::NetworkWasAhead
-                } else if git.is_ancestor(&path, &current, archived)? {
-                    Standing::ArchiveIsAhead
-                } else {
-                    Standing::Diverged
-                }
+        let standing = classify(archived, current.as_deref(), |current| {
+            if git.is_ancestor(&path, archived, current)? {
+                Ok(Ancestry::ArchivedIsBehind)
+            } else if git.is_ancestor(&path, current, archived)? {
+                Ok(Ancestry::ArchivedIsAhead)
+            } else {
+                Ok(Ancestry::Unrelated)
             }
-        };
+        })?;
         standings.insert(repo.rid.clone(), standing);
     }
     Ok(())
@@ -803,6 +836,74 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An ancestry answer that also records whether it was ever asked for.
+    fn asked(
+        answer: Ancestry,
+        calls: &std::cell::Cell<usize>,
+    ) -> impl FnOnce(&str) -> Result<Ancestry> + '_ {
+        move |_| {
+            calls.set(calls.get() + 1);
+            Ok(answer)
+        }
+    }
+
+    #[test]
+    fn refs_the_network_has_moved_past_are_read_as_the_network_being_ahead() {
+        let calls = std::cell::Cell::new(0);
+        let standing = classify(
+            "aaaa",
+            Some("bbbb"),
+            asked(Ancestry::ArchivedIsBehind, &calls),
+        )
+        .expect("the ancestry answer is not an error");
+        assert_eq!(standing, Standing::NetworkWasAhead);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn refs_the_network_has_not_seen_are_read_as_the_archive_being_ahead() {
+        let calls = std::cell::Cell::new(0);
+        let standing = classify(
+            "aaaa",
+            Some("bbbb"),
+            asked(Ancestry::ArchivedIsAhead, &calls),
+        )
+        .expect("the ancestry answer is not an error");
+        assert_eq!(standing, Standing::ArchiveIsAhead);
+    }
+
+    #[test]
+    fn two_histories_that_do_not_reach_each_other_are_a_divergence() {
+        // The hazard this whole tool exists for. Restoring here and pushing forks the peer
+        // history under the identity's own key, and nothing undoes that afterwards.
+        let calls = std::cell::Cell::new(0);
+        let standing = classify("aaaa", Some("bbbb"), asked(Ancestry::Unrelated, &calls))
+            .expect("the ancestry answer is not an error");
+        assert_eq!(standing, Standing::Diverged);
+    }
+
+    #[test]
+    fn identical_refs_are_in_step_without_asking_git_anything() {
+        let calls = std::cell::Cell::new(0);
+        let standing = classify("aaaa", Some("aaaa"), asked(Ancestry::Unrelated, &calls))
+            .expect("the ancestry answer is not an error");
+        assert_eq!(standing, Standing::Same);
+        // Two oids that are the same string are the same commit, and asking `git` to walk
+        // between them is a process spawned per repository to learn nothing.
+        assert_eq!(calls.get(), 0, "git was asked about two identical oids");
+    }
+
+    #[test]
+    fn a_repository_with_no_signed_refs_of_ours_here_is_left_unchecked() {
+        let calls = std::cell::Cell::new(0);
+        let standing = classify("aaaa", None, asked(Ancestry::Unrelated, &calls))
+            .expect("the ancestry answer is not an error");
+        // Not `Same`, and not `Diverged`: nothing was compared, and saying either would be a
+        // verdict this run has no evidence for.
+        assert_eq!(standing, Standing::NotChecked);
+        assert_eq!(calls.get(), 0);
+    }
 
     #[test]
     fn every_standing_says_what_it_means_in_words_a_person_can_act_on() {
