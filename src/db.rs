@@ -109,10 +109,13 @@ pub fn read_policies(path: &Path) -> Result<Policies> {
     let mut following = Vec::new();
     let mut statement = db.prepare("select id, alias, policy from following order by id")?;
     let rows = statement.query_map([], |row| {
-        let alias: String = row.get(1)?;
+        // Option, because the column is nullable and nothing here filters it: read as a
+        // String, a NULL alias failed its row, one failed row failed the whole read, and a
+        // backup died over a field this code already treats as absent when it is empty.
+        let alias: Option<String> = row.get(1)?;
         Ok(FollowingPolicy {
             nid: row.get(0)?,
-            alias: (!alias.is_empty()).then_some(alias),
+            alias: alias.filter(|alias| !alias.is_empty()),
             policy: row.get(2)?,
         })
     })?;
@@ -188,8 +191,8 @@ fn open_read_only(path: &Path) -> Result<Connection> {
 ///
 /// Process-wide rather than threaded back through four return types, because that is the shape
 /// of the fact: somewhere in this run, a file we said we would only read was opened for
-/// writing. The command layer drains this once and says so, which is what the doc comment above
-/// has always claimed happens.
+/// writing. The command layer drains this once and says so, which is what the doc comment
+/// above has always claimed happens.
 static OPENED_WRITABLE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 fn record_writable_open(path: &Path) {
@@ -225,7 +228,8 @@ mod tests {
              insert into seeding values ('rad:zAAA', 'all', 'allow');
              insert into seeding values ('rad:zBBB', 'followed', 'block');
              insert into following values ('z6MkAAA', 'lorenz', 'allow');
-             insert into following values ('z6MkBBB', '', 'block');",
+             insert into following values ('z6MkBBB', '', 'block');
+             insert into following values ('z6MkCCC', null, 'allow');",
         )
         .expect("fixture schema applies");
     }
@@ -239,7 +243,7 @@ mod tests {
         assert_eq!(policies.seeding.len(), 2);
         assert_eq!(policies.seeded().count(), 1);
         assert_eq!(policies.blocked_repos().count(), 1);
-        assert_eq!(policies.followed().count(), 1);
+        assert_eq!(policies.followed().count(), 2);
         assert_eq!(policies.blocked_peers().count(), 1);
         assert_eq!(
             policies.followed().next().and_then(|p| p.alias.as_deref()),
@@ -253,6 +257,22 @@ mod tests {
                 .and_then(|p| p.alias.as_deref()),
             None
         );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_null_alias_is_absence_rather_than_a_row_that_fails_the_whole_read() {
+        let path = scratch("null-alias");
+        seed_policies_db(&path);
+
+        let policies = read_policies(&path).expect("a null alias does not fail the read");
+        let null_alias = policies
+            .following
+            .iter()
+            .find(|policy| policy.nid == "z6MkCCC")
+            .expect("the peer with the null alias is still in the export");
+        assert_eq!(null_alias.alias, None);
 
         let _ = std::fs::remove_file(path);
     }
@@ -274,7 +294,7 @@ mod tests {
         snapshot(&source, &destination).expect("snapshot succeeds");
         let copied = read_policies(&destination).expect("the copy is a database");
         assert_eq!(copied.seeding.len(), 2);
-        assert_eq!(copied.following.len(), 2);
+        assert_eq!(copied.following.len(), 3);
 
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(destination);
