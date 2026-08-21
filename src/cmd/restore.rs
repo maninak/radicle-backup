@@ -311,6 +311,17 @@ fn write_displaced_note(ctx: &Ctx, retired: &Path, was: Option<&str>) -> Result<
 /// Move the identity, the config and the databases into place.
 fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     let home = &ctx.home;
+    // Asked again here, not only at the top of `run`. Unpacking and verifying a multi-gigabyte
+    // archive takes long enough for a login, a `rad node start` or a socket activation to land
+    // in between, and a node writing to the home while this copies its databases over corrupts
+    // both. The check up front is the courtesy that fails before the work; this is the one
+    // that matters.
+    if home.node_state() == NodeState::Running {
+        return Err(Error::refused(
+            "the node started against this home while the archive was being read",
+            "run `rad node stop` and restore again: nothing has been written yet",
+        ));
+    }
     for directory in [home.path().to_path_buf(), home.keys_dir(), home.node_dir()] {
         std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
     }

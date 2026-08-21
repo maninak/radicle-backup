@@ -53,6 +53,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore.sh` inside an archive no longer tells the reader to check policies that a tier without them never carried.
 - The refusal over an oversized manifest names a remedy that exists: `--repos` selects a category, and never could cover "part of the home".
 - A restore writes the secret key, the public key and `config.json` beside their targets and renames them into place. A crash or a full disk part way through used to leave a home holding neither the old identity nor the new one, because the old file was unlinked before the first byte of the new one was written.
+- `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
 
 ### Security
 
