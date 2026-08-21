@@ -165,6 +165,21 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_named_by_the_writer_is_found_again_by_the_reader() {
+        let dir = scratch("writer-and-reader");
+        let name = crate::cmd::archive_name(Some("fixture"), NODE, "20260101T000000Z", true);
+        touch(&dir, &name);
+
+        // The writer used to spell the length of the short node id by hand while this reader
+        // matched on SHORT_ID. They agreed only by coincidence, and moving the constant would
+        // have made every new archive invisible to `ls`, `prune` and `--keep` at once.
+        let found = in_dir(&dir, NODE).expect("the directory is readable");
+        assert_eq!(found.iter().map(Archive::name).collect::<Vec<_>>(), [name]);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_directory_that_is_not_there_holds_no_archives_rather_than_failing() {
         let missing =
             std::env::temp_dir().join(format!("rad-backup-absent-{}", std::process::id()));

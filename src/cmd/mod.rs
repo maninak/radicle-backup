@@ -218,7 +218,7 @@ pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: 
         .map(sanitise)
         .filter(|alias| !alias.is_empty())
         .unwrap_or_else(|| "radicle".to_string());
-    let short: String = node_id.chars().take(12).collect();
+    let short: String = node_id.chars().take(crate::archives::SHORT_ID).collect();
     let extension = if encrypted { "tar.zst.age" } else { "tar.zst" };
     format!("{alias}-{short}-{stamp}.{extension}")
 }
