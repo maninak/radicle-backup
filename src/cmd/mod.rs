@@ -164,8 +164,7 @@ pub fn copy_plain(from: &Path, to: &Path) -> Result<()> {
     crate::perms::set_mode(to, crate::perms::DOC_MODE)
 }
 
-/// Fill `{{PLACEHOLDER}}` markers in one of the shipped documents.
-/// Substitute `{{KEY}}` markers, in ONE pass over the template.
+/// Substitute `{{KEY}}` markers in one of the shipped documents, in ONE pass over it.
 ///
 /// Sequential `replace` calls read their own output, so a value containing a marker was
 /// expanded by a later key. An alias of `{{SECRET}}`, which arrives in a `config.json` copied

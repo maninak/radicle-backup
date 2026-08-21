@@ -1,9 +1,11 @@
 //! Finding the archives of one identity on disk.
 //!
-//! Every command that takes an archive can be given none, and mean the newest one. That is
-//! only safe if "the newest one" is decided the same way everywhere, and if the set it is
-//! chosen from can never include a file this tool did not write: a retention rule or a
-//! default argument that could reach anything else is a deletion bug waiting for a bad path.
+//! Every command that reads an archive, except `restore`, can be given none and mean the
+//! newest one. (`restore` asks for the path, because putting the wrong archive back is not
+//! something a default should be able to do.) Defaulting is only safe if "the newest one" is
+//! decided the same way everywhere, and if the set it is chosen from can never include a file
+//! this tool did not write: a retention rule or a default argument that could reach anything
+//! else is a deletion bug waiting for a bad path.
 
 use std::path::{Path, PathBuf};
 

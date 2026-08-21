@@ -26,8 +26,9 @@ const COMPRESSION_LEVEL: i32 = 10;
 /// A ceiling on the manifest, checked before a byte of it is allocated.
 ///
 /// `read_to_string` grows to whatever the tar header declares, so an archive whose manifest
-/// header claims 8 GiB costs 8 GiB of memory to reject. The real thing is a few kilobytes of
-/// JSON per entry; a home with a hundred thousand entries would not reach a tenth of this.
+/// header claims 8 GiB costs 8 GiB of memory to reject. The real thing is a few hundred bytes
+/// of JSON per entry and about a kilobyte per repository, so a home would need thousands of
+/// repositories to come near this.
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A ceiling on any single entry, likewise checked from the header before copying.
@@ -118,9 +119,9 @@ impl<'a> Writer<'a> {
 
         let json = serde_json::to_vec_pretty(manifest)?;
         // The same ceiling the reader enforces, checked here so the tool cannot write an
-        // archive it would then refuse to open. A home would need on the order of a hundred
-        // thousand repositories to reach it; if one ever does, this says so at the moment the
-        // archive is written rather than at the moment somebody needs it back.
+        // archive it would then refuse to open. A home would need thousands of repositories to
+        // reach it; if one ever does, this says so at the moment the archive is written rather
+        // than at the moment somebody needs it back.
         if json.len() as u64 > MAX_MANIFEST_BYTES {
             return Err(Error::Refused {
                 what: format!(
@@ -265,8 +266,9 @@ impl<'a> Reader<'a> {
             reject_traversal(&entry_path, path)?;
 
             // `entry.size()`, not `header().size()`: a PAX header can override the ustar
-            // size field, and the override is what bounds the reader. Read from the header,
-            // both ceilings below saw a declared 1 while the entry handed out gigabytes.
+            // size field, and the override is what bounds the reader. Reading the ustar field
+            // instead, both ceilings below saw a declared 1 while the entry handed out
+            // gigabytes.
             let declared = entry.size();
 
             if entry_path == MANIFEST_ENTRY {
