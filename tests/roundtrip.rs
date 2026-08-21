@@ -201,7 +201,53 @@ impl Fixture {
         child.wait_with_output().expect("rad-backup finishes")
     }
 
+    /// Put a stand-in `rad` where this fixture's runs will find it.
+    ///
+    /// Without one every test drives the no-`rad` path, which is the path that cannot see a
+    /// repository's visibility: the private selection, the delegate list and the name in the
+    /// manifest all come from `rad inspect`, and none of them was reachable from a test. The
+    /// stub answers only what these tests ask and shouts on stderr about anything else, so a
+    /// question nobody stubbed fails the test rather than quietly degrading to "no rad".
+    #[cfg(unix)]
+    fn stub_rad(&self, visibility: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bin = self.path("bin");
+        std::fs::create_dir_all(&bin).expect("the stub directory is creatable");
+        let private_listing = match visibility {
+            "private" => format!("echo 'rad:{RID}  stub  a stub repository'"),
+            _ => "true".to_string(),
+        };
+        let script = format!(
+            r#"#!/bin/sh
+case "$1" in
+--version) echo "rad 1.0.0-stub" ;;
+ls)
+	case "$2" in
+	--private) {private_listing} ;;
+	*) echo 'rad:{RID}  stub  a stub repository' ;;
+	esac
+	;;
+inspect)
+	[ "$3" = "--identity" ] || exit 1
+	printf '%s
+' '{{"payload":{{"xyz.radicle.project":{{"name":"stub"}}}},"delegates":["did:key:{DID}"],"visibility":{{"type":"{visibility}"}}}}'
+	;;
+*)
+	echo "STUB-RAD-UNSTUBBED: $*" >&2
+	exit 1
+	;;
+esac
+"#
+        );
+        let path = bin.join("rad");
+        std::fs::write(&path, script).expect("the stub is writable");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the stub is executable");
+    }
+
     fn command(&self, args: &[&str], home: &Path) -> Command {
+        let stub = self.path("bin/rad");
         let mut command = Command::new(env!("CARGO_BIN_EXE_rad-backup"));
         command
             .args(args)
@@ -212,8 +258,15 @@ impl Fixture {
             .env("RAD_PASSPHRASE", KEY_PASSPHRASE)
             .env("RAD_BACKUP_PASSPHRASE", ARCHIVE_PASSPHRASE)
             .env("NO_COLOR", "1")
-            // A `rad` on PATH would reach for a node this fixture does not have.
-            .env("RAD", "/nonexistent/rad");
+            // A real `rad` on PATH would reach for a node this fixture does not have, so the
+            // default is a path that cannot exist and the stub is opted into per test.
+            .env(
+                "RAD",
+                match stub.is_file() {
+                    true => stub,
+                    false => PathBuf::from("/nonexistent/rad"),
+                },
+            );
         command
     }
 }
@@ -509,6 +562,80 @@ fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
         report["repositoriesMoved"],
         serde_json::json!([format!("rad:{RID}")])
     );
+}
+
+/// What a `--repos private` run put in the archive, and what the run said while doing it.
+#[cfg(unix)]
+fn private_run(name: &str, visibility: &str) -> (serde_json::Value, String) {
+    let fixture = Fixture::create(name);
+    fixture.stub_rad(visibility);
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--repos",
+            "private",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a private-selection archive");
+    let said = stderr(&out).to_string();
+
+    // The stub shouts about anything it was not taught. Without this the test would pass just
+    // as happily against a `rad` that failed every call, which is the state it replaced.
+    assert!(!said.contains("STUB-RAD-UNSTUBBED"), "{said}");
+
+    let archive = only_archive(&backups);
+    let shown = fixture.run(
+        &["show", "--json", &archive.to_string_lossy()],
+        &fixture.home(),
+    );
+    assert_success(&shown, "showing the archive");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&shown.stdout).expect("the report is json");
+    assert_eq!(
+        manifest["source"]["radVersion"], "rad 1.0.0-stub",
+        "the run did not go through the stub at all"
+    );
+    (manifest, said)
+}
+
+#[test]
+#[cfg(unix)]
+fn a_private_selection_carries_the_repository_rad_calls_private() {
+    let (manifest, _said) = private_run("private-yes", "private");
+
+    let repo = &manifest["repos"][0];
+    assert_eq!(repo["visibility"], "private", "{manifest}");
+    assert_eq!(repo["name"], "stub", "{manifest}");
+    assert!(
+        !repo["bundle"].is_null(),
+        "a private repository was left out of a --repos private archive: {manifest}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_private_selection_leaves_out_the_repository_rad_calls_public() {
+    let (manifest, said) = private_run("private-no", "public");
+
+    let repo = &manifest["repos"][0];
+    assert_eq!(repo["visibility"], "public", "{manifest}");
+    assert!(
+        repo["bundle"].is_null(),
+        "a public repository was carried by a --repos private archive: {manifest}"
+    );
+
+    // And the summary says so in the line somebody actually reads, because an archive that
+    // quietly carries none of the repositories it was taken for is the failure this selection
+    // exists to avoid.
+    assert!(said.contains("repositories private (0 carried)"), "{said}");
 }
 
 #[test]
