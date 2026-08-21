@@ -3,7 +3,8 @@
 default:
     @just --list
 
-# Everything CI runs, in the order that fails fastest.
+# What CI runs on every push, in the order that fails fastest. CI spells the cargo steps
+# out itself rather than calling this, so a gate added here has to be added there too.
 check: fmt-check audit-map lint test
 
 # Every file SECURITY.md sends a reviewer to still exists.

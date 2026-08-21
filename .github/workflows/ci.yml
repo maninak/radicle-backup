@@ -41,6 +41,27 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Formatting
         run: cargo fmt --check
+      # Here as well as in `just check`, because CI runs the cargo commands directly rather
+      # than the recipe: a gate that only one of the two enforces is a gate that lands broken
+      # on whichever side nobody ran. Shell-only, so it costs nothing on any of the three.
+      - name: Audit map
+        shell: bash
+        run: |
+          missing=0
+          rows=0
+          for path in $(grep -o '^| `src/[^`]*`' SECURITY.md | tr -d '|` '); do
+            if [ ! -e "$path" ]; then
+              echo "::error::SECURITY.md sends a reviewer to $path, which is not there"
+              missing=1
+            fi
+            rows=$((rows + 1))
+          done
+          # Zero rows means the table stopped matching the pattern, not that the map is clean.
+          if [ "$rows" -eq 0 ]; then
+            echo "::error::the audit map in SECURITY.md matched no rows, so nothing was checked"
+            missing=1
+          fi
+          exit "$missing"
       # `--locked`, so a Cargo.toml requirement widened without updating Cargo.lock is an error
       # rather than a silent re-resolve. Without it the dependency-age gate below sees no added
       # versions while the build pulls and runs a crate published this morning.
