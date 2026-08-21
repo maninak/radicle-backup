@@ -61,6 +61,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - Reading a node database that has a write-ahead log beside it creates a `-shm` file in the home, and the run now says so. It was reported as nothing at all, because the recording sat behind a writable-connection fallback that a write-ahead log never reaches. That fallback is gone: it could not run, and could not have helped.
 - A node database that cannot be read names itself, instead of surfacing as a bare `unable to open database file` from whichever query happened to run first.
 - An archive whose manifest will not parse names the archive, instead of surfacing as serde's own `expected value at line 1 column 1` with no file attached.
+- `--stop-node` asks for the archive passphrase before it stops the node, not while the node is down waiting for somebody to find it.
+- The `diff --json` report names moved repositories by rid, like every other field in it. It named them by display name, so the one list a consumer would act on was the one it could not look anything up with.
+- The manifest records the hostname on macOS and the BSDs, which have neither `/etc/hostname` nor `HOSTNAME` and so recorded nothing at all.
 
 ### Security
 

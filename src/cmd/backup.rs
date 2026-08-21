@@ -84,6 +84,14 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
         crate::cmd::refuse_keep_zero(keep)?;
     }
 
+    // Asked for before the node is stopped, not after. Asking afterwards left the node down
+    // for as long as it took somebody to find their passphrase, and a run they then abandoned
+    // had stopped it for nothing. A rehearsal writes no archive, so it is never asked.
+    let encryption = match args.dry_run {
+        true => None,
+        false => Some(encryption_for(ctx, args)?),
+    };
+
     let mut warnings = Vec::new();
     let mut node = quiesce(ctx, args, rad.as_ref(), &mut warnings)?;
 
@@ -114,7 +122,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
         });
     }
 
-    let encryption = encryption_for(ctx, args)?;
+    let encryption = encryption.expect("a run that is not a rehearsal has returned by now");
     let now = jiff::Timestamp::now();
     let destination = destination(
         args,
@@ -766,6 +774,16 @@ fn archive_repositories(
 
     let mut archived = 0;
     let mut failed = Vec::new();
+    // Where each record sits, looked up once. Finding it by scanning the whole vec per
+    // bundle is a scan per repository, and a seed archiving thousands of them pays for that
+    // twice over: once here and once in whatever reads the result.
+    let by_rid: std::collections::BTreeMap<String, usize> = manifest
+        .repos
+        .iter()
+        .enumerate()
+        .map(|(at, record)| (record.rid.clone(), at))
+        .collect();
+
     for rid in &inventory.selected {
         let repo = ctx.home.repository_path(rid);
         let bundle = scratch.file("repository.bundle");
@@ -791,7 +809,7 @@ fn archive_repositories(
             writer.add_file(&git::config_entry(rid), &config, DOC_MODE)?;
         }
 
-        if let Some(record) = manifest.repos.iter_mut().find(|record| &record.rid == rid) {
+        if let Some(record) = by_rid.get(rid).and_then(|at| manifest.repos.get_mut(*at)) {
             record.bundle = Some(stored);
         }
         archived += 1;
@@ -962,7 +980,21 @@ fn hostname() -> Option<String> {
         .ok()
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| {
+            std::env::var("HOSTNAME")
+                .ok()
+                .filter(|name| !name.is_empty())
+        })
+        // Neither of the two above exists on macOS or the BSDs, so every manifest written
+        // there recorded `host: null` and an archive could not say which machine it came
+        // from. `uname -n` is POSIX and answers on all three.
+        .or_else(|| {
+            crate::exec::Tool::on_path("uname")
+                .spoken(&["-n"])
+                .ok()
+                .map(|said| said.stdout)
+                .filter(|name| !name.is_empty())
+        })
 }
 
 #[cfg(test)]
