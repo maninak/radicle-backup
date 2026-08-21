@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - `--dry-run --json` answers with the report every other command's `--json` gives, instead of printing the human table on stdout and no object at all.
+- Output a machine consumes (JSON reports, listings, recovery sheets) now fails the run when it cannot be written, instead of exiting `0` over a truncated report. A pipe closed on purpose, as `... | head` does, still counts as success.
 
 ## [0.1.0] - 2026-08-16
 

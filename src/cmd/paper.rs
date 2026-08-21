@@ -99,7 +99,7 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
                 "write it with --output <path>, or pipe it into something that keeps no history",
             ));
         }
-        None => ctx.term.print(&sheet),
+        None => ctx.term.print(&sheet)?,
     }
     Ok(())
 }

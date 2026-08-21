@@ -149,7 +149,7 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ctx.term.print(&format!(
         "  0 3 * * *  {binary} --output {} --keep {keep} --yes --quiet",
         output.display()
-    ));
+    ))?;
     ctx.term.blank();
     ctx.term.hint(
         "the run needs RAD_BACKUP_PASSPHRASE_FILE set in that crontab, or it will stop \

@@ -46,7 +46,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
         term::bytes(manifest.total_bytes())
     ));
     for entry in &manifest.entries {
-        term.print(&format!("{:>10}  {}", term::bytes(entry.bytes), entry.path));
+        term.print(&format!("{:>10}  {}", term::bytes(entry.bytes), entry.path))?;
     }
 
     if !manifest.repos.is_empty() {
@@ -76,7 +76,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
                 "{:<24} {:<40} {marks}",
                 truncate(repo.name.as_deref().unwrap_or(""), 24),
                 repo.rid
-            ));
+            ))?;
         }
     }
 
@@ -88,7 +88,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
         manifest.policies.blocked_repos,
         manifest.policies.followed,
         manifest.policies.blocked_peers
-    ));
+    ))?;
 
     if !manifest.warnings.is_empty() {
         term.blank();

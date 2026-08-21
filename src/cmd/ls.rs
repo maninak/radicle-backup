@@ -91,7 +91,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
             } else {
                 "  (not encrypted)"
             }
-        ));
+        ))?;
     }
     if found.iter().any(|archive| is_recorded(archive, record)) {
         ctx.term.blank();

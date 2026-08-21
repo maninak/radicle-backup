@@ -108,15 +108,24 @@ impl Term {
         self.say("");
     }
 
-    /// Anything a machine consumes goes to stdout: archives, JSON reports, generated sheets.
-    pub fn print(&self, line: &str) {
+    /// Anything a machine consumes goes to stdout: JSON reports, listings, recovery sheets.
+    ///
+    /// Unlike the narration above, a failure here is the failure of the thing the command was
+    /// asked to produce, so it is returned rather than dropped: half a JSON report, written
+    /// onto a full disk under an exit code that said success, is output no consumer can tell
+    /// from the real thing. A closed pipe is the one exception, because `... | head` closes it
+    /// on purpose and the run did nothing wrong.
+    pub fn print(&self, line: &str) -> Result<()> {
         let mut out = io::stdout();
-        let _ = writeln!(out, "{line}");
+        match writeln!(out, "{line}").and_then(|()| out.flush()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(Error::Bare(e)),
+        }
     }
 
     pub fn print_json(&self, value: &serde_json::Value) -> Result<()> {
-        self.print(&serde_json::to_string_pretty(value)?);
-        Ok(())
+        self.print(&serde_json::to_string_pretty(value)?)
     }
 
     pub fn is_interactive(&self) -> bool {

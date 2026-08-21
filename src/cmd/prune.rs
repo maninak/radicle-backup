@@ -41,7 +41,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
             "  {}  {}",
             archive.name(),
             term::bytes(archive.bytes)
-        ));
+        ))?;
     }
     let freed: u64 = doomed.iter().map(|archive| archive.bytes).sum();
     ctx.term.blank();

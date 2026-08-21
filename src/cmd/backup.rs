@@ -343,10 +343,10 @@ fn rehearse(
             record.display_name(),
             term::bytes(*bytes),
             if record.is_private() { "  private" } else { "" }
-        ));
+        ))?;
     }
     if selected.is_empty() {
-        term.print("  no repositories, only the identity and its paperwork");
+        term.print("  no repositories, only the identity and its paperwork")?;
     }
     term.blank();
     term.ok(&format!(
