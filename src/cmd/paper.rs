@@ -83,7 +83,7 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
 
     match &args.output {
         Some(path) => {
-            crate::cmd::write_owner_only(path, sheet.as_bytes())?;
+            crate::perms::write_owner_only(path, sheet.as_bytes())?;
             ctx.term.ok(&format!("wrote {}", path.display()));
             ctx.term
                 .hint("open it in a browser and print it; then delete the file");

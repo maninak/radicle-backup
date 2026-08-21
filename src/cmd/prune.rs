@@ -4,9 +4,10 @@
 //! rule with nothing else happening around it, for someone who has just noticed that a disk is
 //! full and wants to see what would go before it goes.
 
+use crate::archives::sidecar_path;
 use crate::archives::{self, Archive};
 use crate::cli::Prune;
-use crate::cmd::{Ctx, archive_dir, refuse_keep_zero, sidecar_path};
+use crate::cmd::{Ctx, archive_dir, refuse_keep_zero};
 use crate::error::{Error, Result};
 use crate::key::Identity;
 use crate::state;

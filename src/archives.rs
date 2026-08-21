@@ -1,4 +1,4 @@
-//! Finding the archives of one identity on disk.
+//! Naming the archives of one identity, and finding them again on disk.
 //!
 //! Every command that reads an archive, except `restore`, can be given none and mean the
 //! newest one. (`restore` asks for the path, because putting the wrong archive back is not
@@ -94,6 +94,48 @@ fn parse_stamp(stamp: &str) -> Option<jiff::Timestamp> {
         .map(|zoned| zoned.timestamp())
 }
 
+/// The name an archive gets: identity first, then when it was taken, so that a directory of
+/// them sorts by identity and then chronologically.
+pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: bool) -> String {
+    let alias = alias
+        .map(sanitise)
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or_else(|| "radicle".to_string());
+    let short: String = node_id.chars().take(SHORT_ID).collect();
+    let extension = if encrypted { "tar.zst.age" } else { "tar.zst" };
+    format!("{alias}-{short}-{stamp}.{extension}")
+}
+
+/// The note written beside an archive, in plain text, whatever the archive itself is.
+pub fn sidecar_path(archive: &Path) -> PathBuf {
+    let mut name = archive
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "archive".to_string());
+    name.push_str(".README.txt");
+    archive.with_file_name(name)
+}
+
+/// A UTC timestamp for a file name: sortable, no punctuation a shell would mind.
+pub fn file_stamp(now: jiff::Timestamp) -> String {
+    now.strftime("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// Keep the characters a file name can hold everywhere, and drop the rest.
+fn sanitise(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,9 +209,47 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_is_named_after_the_identity_and_the_moment_it_was_taken() {
+        let name = archive_name(
+            Some("maninak"),
+            "z6MkvAFBkdph6yXSZDkkVqf9FfCcvkG29JD4KbwwnGphDRLV",
+            "20260814T173500Z",
+            true,
+        );
+        assert_eq!(name, "maninak-z6MkvAFBkdph-20260814T173500Z.tar.zst.age");
+    }
+
+    #[test]
+    fn an_alias_with_spaces_or_slashes_cannot_reach_out_of_its_directory() {
+        let name = archive_name(
+            Some("../../etc/pa sswd"),
+            "z6MkAAA",
+            "20260814T173500Z",
+            false,
+        );
+        assert!(!name.contains('/'));
+        assert!(name.starts_with(".."), "{name}");
+        assert!(name.ends_with(".tar.zst"));
+    }
+
+    #[test]
+    fn a_home_with_no_alias_still_gets_a_usable_name() {
+        let name = archive_name(None, "z6MkAAA", "20260814T173500Z", true);
+        assert_eq!(name, "radicle-z6MkAAA-20260814T173500Z.tar.zst.age");
+    }
+
+    #[test]
+    fn the_note_sits_beside_the_archive_and_keeps_its_name() {
+        assert_eq!(
+            sidecar_path(Path::new("/backups/maninak-z6Mk-2026.tar.zst.age")),
+            PathBuf::from("/backups/maninak-z6Mk-2026.tar.zst.age.README.txt")
+        );
+    }
+
+    #[test]
     fn an_archive_named_by_the_writer_is_found_again_by_the_reader() {
         let dir = scratch("writer-and-reader");
-        let name = crate::cmd::archive_name(Some("fixture"), NODE, "20260101T000000Z", true);
+        let name = crate::archives::archive_name(Some("fixture"), NODE, "20260101T000000Z", true);
         touch(&dir, &name);
 
         // The writer used to spell the length of the short node id by hand while this reader

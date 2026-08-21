@@ -323,7 +323,7 @@ fn write_environment(
         args.keep,
         passphrase_file,
     );
-    crate::cmd::write_owner_only(path, text.as_bytes())?;
+    crate::perms::write_owner_only(path, text.as_bytes())?;
     ctx.term.step(&format!("wrote {}", path.display()));
     Ok(())
 }

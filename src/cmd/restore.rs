@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::archive::Reader;
 use crate::cli::Restore;
-use crate::cmd::{Ctx, Scratch, copy_owner_only, copy_plain, set_owner_only, write_owner_only};
+use crate::cmd::{Ctx, Scratch};
 use crate::crypt;
 use crate::db::Policies;
 use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
@@ -19,6 +19,7 @@ use crate::git::{self, Git};
 use crate::home::NodeState;
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
+use crate::perms::{copy_owner_only, copy_plain, set_owner_only, write_owner_only};
 use crate::rad::Rad;
 use crate::state;
 use crate::term;

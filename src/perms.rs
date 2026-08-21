@@ -8,6 +8,34 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 
+/// Make a directory readable only by its owner, before anything is written into it.
+pub fn set_owner_only(path: &Path) -> Result<()> {
+    set_mode(path, DIR_MODE)
+}
+
+/// Copy a file that may hold key material, landing it owner-only. Missing sources are not an
+/// error: an archive of one tier simply does not carry what another tier would.
+pub fn copy_owner_only(from: &Path, to: &Path) -> Result<()> {
+    if !from.is_file() {
+        return Ok(());
+    }
+    let bytes = zeroize::Zeroizing::new(std::fs::read(from).map_err(|e| Error::io(from, e))?);
+    replace(to, &bytes, SECRET_MODE)
+}
+
+/// Copy a file that holds nothing secret, landing it at the mode a home `rad` built itself
+/// would have. The staging copy is owner-only because it sat beside a private key, and
+/// carrying that mode through would leave a restored home subtly unlike a native one.
+pub fn copy_plain(from: &Path, to: &Path) -> Result<()> {
+    if !from.is_file() {
+        return Ok(());
+    }
+    // Through the same staged replacement as a key: `config.json` half written over is a
+    // home that will not start, and this runs while a restore is putting one back together.
+    let bytes = std::fs::read(from).map_err(|e| Error::io(from, e))?;
+    replace(to, &bytes, DOC_MODE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

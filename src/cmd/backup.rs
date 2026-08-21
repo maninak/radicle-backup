@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::archive::{DOC_MODE, SECRET_MODE, Writer};
+use crate::archives::{archive_name, file_stamp, sidecar_path};
 use crate::cli::Create;
-use crate::cmd::{Ctx, Scratch, archive_name, file_stamp, fill, iso_stamp, sidecar_path};
+use crate::cmd::{Ctx, Scratch, fill, iso_stamp};
 use crate::crypt::{self, Encryption};
 use crate::db;
 use crate::error::{Error, Result};
