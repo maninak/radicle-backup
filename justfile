@@ -97,11 +97,14 @@ rpm: generated
 lint-deb: deb
     just lint-deb-at target/debian
 
-# The suppressed tags, in order: uploading to Debian itself is not what this is; and a static
+# Run lintian over a package built anywhere, which is how the release checks a cross-built one.
+#
+# The suppressed tags, in order. Uploading to Debian itself is not what this is. A static
 # binary is the entire point of a musl build, which lintian grades as an error on a foreign
 # architecture and a warning on the native one, so one release built the same package twice
-# and only the arm64 half failed.
-# Run lintian over a package built anywhere, which is how the release checks a cross-built one.
+# and only the arm64 half failed. And a static-pie binary is an ET_DYN ELF, which lintian
+# reads as a shared library and then faults for declaring no dependencies, which is the same
+# fact about the same build said a third way.
 lint-deb-at dir:
     lintian --suppress-tags initial-upload-closes-no-bugs \
         --suppress-tags statically-linked-binary \

@@ -171,8 +171,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./.github/check-action-pins.sh
       # And the third: what the crate links against. Normally only what this push or pull
-      # request ADDS, because a pin that is already here only gets older, and sweeping all 269
-      # against a rate-limited API costs five minutes to learn nothing new.
+      # request ADDS, because a pin that is already here only gets older, and sweeping every
+      # pin in the lockfile against a rate-limited API costs minutes to learn nothing new.
       #
       # When the base cannot be read the fallback is to sweep everything, not to skip. It used
       # to skip, and printed a notice while doing it, so a force-push (or the first push to a
