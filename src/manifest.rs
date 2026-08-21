@@ -172,6 +172,15 @@ pub struct SourceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_version: Option<String>,
     pub os: String,
+    /// Whether the machine that wrote this archive retires its own key as part of the run,
+    /// which only `move` does.
+    ///
+    /// A home restored from an archive where this is false may not be the only one holding the
+    /// identity, and two nodes signing under one peer id is the one hazard everyone in the
+    /// thread that produced this tool agreed on. `None` in an archive written before this
+    /// field existed, which is the case nothing here can resolve either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retires_key: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

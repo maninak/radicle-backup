@@ -51,7 +51,22 @@ pub struct Outcome {
     pub incomplete: bool,
 }
 
-pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
+/// Why an archive is being written, which decides what its manifest says about the fate of the
+/// machine writing it.
+///
+/// An enum rather than a flag on `Create`, because it is not something a user types: it is
+/// which of this tool's own commands is asking, and `move` is the only one that answers
+/// differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// An ordinary backup. The key stays on this machine, and so may a node running it.
+    Backup,
+    /// A move. This machine's key is retired once the archive is verified, so the home
+    /// restored from it is meant to be the only one holding the identity.
+    Move,
+}
+
+pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     ctx.home.require()?;
     let home = &ctx.home;
     let term = &ctx.term;
@@ -160,6 +175,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
             rad_version: rad.as_ref().and_then(|rad| rad.version().ok()),
             git_version: git.version().ok(),
             os: std::env::consts::OS.to_string(),
+            retires_key: Some(purpose == Purpose::Move),
         },
         node: NodeInfo {
             was_running: node.was_running,

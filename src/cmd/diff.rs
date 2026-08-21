@@ -19,13 +19,13 @@ use crate::term;
 
 /// Describe the same set of repositories the archive described, so the two are comparable.
 ///
-/// A `--repos all` or `--repos seeded` archive describes repositories that are not this peer's.
-/// Comparing that against a listing of only this peer's own reported every one of them as gone,
-/// on every run, forever: a scheduled `diff` meant to say "nothing changed, skip the backup"
-/// answered "repositories are missing" instead, and exited `3` doing it.
+/// A `--repos all` or `--repos seeded` archive describes repositories that are not this
+/// peer's. Comparing that against a listing of only this peer's own reported every one of
+/// them as gone, on every run, forever: a scheduled `diff` meant to say "nothing changed,
+/// skip the backup" answered "repositories are missing" instead, and exited `3` doing it.
 ///
-/// A selection this version does not know is read as `all`, because the two ways of being wrong
-/// are not equal: describing too much makes a repository look newly added, and describing too
+/// A selection this version does not know is read as `all`, because the two ways of being
+/// wrong are not equal: describing too much makes a repository look newly added, and too
 /// little makes one look lost.
 fn comparison_selection(recorded: &str) -> RepoSelection {
     match RepoSelection::from_str(recorded) {

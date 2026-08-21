@@ -61,7 +61,8 @@ Keys are camelCase. Unknown keys must be ignored, and unknown values of `tier` a
     "radHome": "/home/alice/.radicle",
     "radVersion": "rad 1.10.1 (71f39fb195068d598d75f7cd606d41a4f8ad4b10)",
     "gitVersion": "git version 2.43.0",
-    "os": "linux"
+    "os": "linux",
+    "retiresKey": false
   },
   "node": { "wasRunning": false, "stoppedByBackup": false },
   "entries": [
@@ -121,6 +122,7 @@ git --git-dir ~/.radicle/storage/$rid symbolic-ref HEAD "$(jq -r '.repos[]|selec
 ## Compatibility rules
 
 - **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words, because a newer format may change what an entry means, and a half-understood restore is worse than a refused one.
+- **New manifest keys may be added** in a future version 1 archive, and a reader must ignore the ones it does not know. `source.retiresKey` is the first: it is `true` only in an archive written by `rad backup move`, which retires the key on the machine it came from, and absent in any archive written before the key existed. A reader must treat absent as "not known" rather than as `false`, because the difference is whether another machine may still be running the identity.
 - **New entries may be added** in a future version 1 archive. A reader must ignore an entry it does not recognise rather than treating it as corruption; the manifest is what decides whether the archive is complete.
 - **A reader trusts nothing in the manifest.** `rid` and `head` reach `git` and `rad` as command-line arguments, and neither takes a `--` that fences a value off from its own flags, so a `head` of `-d` is read as a flag. `git symbolic-ref` also stores whatever it is handed without checking it, so a `head` of `refs/../../evil` writes a file outside the repository the next time anything updates that ref. A reader must check that a repository id is base58 and that a `head` names a ref (a `refs/` prefix, no empty or dot-leading component, none of the characters git forbids in a refname) before either reaches a command line, and must skip the offending value rather than the repository it belongs to.
 - **Entry paths never change meaning.** If what belongs at `node/policies.db` ever stops being a policy database, it gets a new path and the format version goes up.

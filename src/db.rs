@@ -6,7 +6,7 @@
 //! database that is being written to, which is why a backup does not have to stop the node
 //! for these files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -147,6 +147,44 @@ pub fn routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap<Stri
         counts.insert(repo, count);
     }
     Ok(counts)
+}
+
+/// Which of this peer's sigrefs some other node is known to hold, per repository.
+///
+/// The node records, per repository and per peer, the head of *your* `rad/sigrefs` that peer
+/// was last seen to carry. A repository whose current local head appears here against somebody
+/// else is work that has left this machine; one whose head appears against nobody is work that
+/// exists on this disk and nowhere in the world.
+///
+/// Empty when the node has never run or the table is not there, which a caller must read as
+/// "not known" rather than as "nothing has propagated". Every repository would otherwise look
+/// stranded on a machine whose node has simply never been started.
+pub fn synced_heads(
+    node_db: &Path,
+    own_node_id: &str,
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
+    if !node_db.is_file() {
+        return Ok(BTreeMap::new());
+    }
+    let db = open_read_only(node_db)?;
+    // A table this version has not met is not a failure: the node's schema is heartwood's, and
+    // this tool is not entitled to a release every time heartwood adds or renames one.
+    let mut statement = match db
+        .prepare("select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head")
+    {
+        Ok(statement) => statement,
+        Err(_) => return Ok(BTreeMap::new()),
+    };
+    let rows = statement.query_map([own_node_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut heads: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for row in rows {
+        let (repo, head) = row?;
+        heads.entry(repo).or_default().insert(head);
+    }
+    Ok(heads)
 }
 
 /// The aliases peers announced for themselves, so that a restored home shows names instead of

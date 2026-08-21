@@ -42,6 +42,25 @@ pub struct Record {
     pub sigrefs: BTreeMap<String, String>,
     pub seeded: usize,
     pub followed: usize,
+    /// Set when a restore, rather than a backup, wrote this record.
+    ///
+    /// Cleared by the next backup taken here, deliberately: once this machine is taking its
+    /// own archives it is the machine this identity lives on, and a warning that can never be
+    /// answered is one people learn to scroll past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<Restored>,
+}
+
+/// What a restore knows about where this home came from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Restored {
+    /// Whether the archive said its source retires its own key, which only `move` does.
+    /// `None` for an archive written before the manifest carried the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_retires_key: Option<bool>,
+    /// Whether a node was serving on the machine the archive was taken from.
+    pub source_node_was_running: bool,
 }
 
 impl Record {
@@ -79,6 +98,9 @@ impl Record {
                 .collect(),
             seeded: manifest.policies.seeded,
             followed: manifest.policies.followed,
+            // A backup records nothing here. Only a restore knows where a home came from, and
+            // it sets this after building the record.
+            restored: None,
         }
     }
 
@@ -201,6 +223,7 @@ mod tests {
             sigrefs: BTreeMap::new(),
             seeded: 45,
             followed: 3,
+            restored: None,
         }
     }
 

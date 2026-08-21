@@ -476,6 +476,7 @@ mod tests {
                 rad_version: None,
                 git_version: None,
                 os: "linux".to_string(),
+                retires_key: None,
             },
             node: NodeInfo::default(),
             entries: Vec::new(),

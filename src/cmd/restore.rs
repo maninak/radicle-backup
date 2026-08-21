@@ -172,6 +172,13 @@ fn remember(
     record.sigrefs.retain(|rid, _| present.contains(rid));
     record.carried.clone_from(&present);
     record.described = present;
+    // What `doctor` needs to answer "may another machine still be running this identity". Only
+    // a restore can record it: by the time doctor runs, the archive is gone and the machine it
+    // came from is somewhere else.
+    record.restored = Some(state::Restored {
+        source_retires_key: manifest.source.retires_key,
+        source_node_was_running: manifest.node.was_running,
+    });
     if let Err(e) = state::write(&record) {
         ctx.term.warn(&format!(
             "the restore is done, but it could not be recorded: {e}"

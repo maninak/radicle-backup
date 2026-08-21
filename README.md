@@ -258,13 +258,20 @@ recovery posture of /home/alice/.radicle
   --> rad backup --repos private
 ! delegate quorum: 6 repositories have you as their only delegate: example-app, example-tool, example-config, example-docs, example-site, example-lib
   --> a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
-✓ seeding elsewhere: every public repository is announced by at least one other node
+✓ other seeds: every public repository is announced by at least one other node
+✓ key copies: this home was not restored from an archive, so nothing here suggests a second copy
+! signed refs propagation: the newest signed refs of 1 repository are on this disk and no other: example-app
+  --> `rad sync --announce` them, and keep an archive covering them until they have propagated
 
-2 pass, 2 worth improving, 1 failing, 2 could not be checked
+3 pass, 3 worth improving, 1 failing, 2 could not be checked
   every ✗ is a way to lose this identity; the line under it is the fix
 ```
 
-Seven checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line is the command that fixes the one above it.
+Nine checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line is the command that fixes the one above it.
+
+`other seeds` and `signed refs propagation` ask different questions. The first asks whether a repository exists anywhere but here; the second asks whether the newest work in it does. A repository forty seeds carry can still have this morning's commits on one disk, and that is the loss a file copy of the home cannot see.
+
+`key copies` is the one check about a machine that is not this one. Restoring a backup puts the key here while the machine it came from keeps its copy, and two nodes signing under one peer id is the thing never to do; `rad backup move` is the path that closes it, because it retires the source key as part of the run. Said as a possibility and never as a finding, because this tool cannot see the other machine.
 
 The line between a `!` and a `✗` is whether anything else holds a copy: a private repository in no archive fails when no other node has it and warns when its identity allows a peer that could, and an archive older than 30 days warns rather than fails.
 

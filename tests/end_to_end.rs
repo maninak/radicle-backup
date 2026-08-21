@@ -1732,3 +1732,61 @@ fn a_diff_against_an_archive_of_everything_does_not_report_a_foreign_repository_
         stdout(&out)
     );
 }
+
+/// The whole wiring of the two-nodes-one-key warning, end to end.
+///
+/// `backup` stamps the manifest with whether the run retires this machine's key, `restore`
+/// copies that into the state file, and `doctor` reads it back. Every one of those is a place
+/// the answer can be lost, and losing it means the check quietly passes on the hazard it was
+/// added for.
+#[test]
+fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_holds_the_key() {
+    let fixture = Fixture::create("sole-holder");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &["--output", &backups.to_string_lossy(), "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a backup");
+    let archive = only_archive(&backups);
+
+    // The home the archive was taken from: nothing was restored here, so there is no second
+    // machine to warn about.
+    let out = fixture.run(&["doctor", "--json"], &fixture.home());
+    assert_eq!(verdict_of(&out, "key copies"), "pass");
+
+    let restored = fixture.path("restored");
+    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
+    assert_success(&out, "restoring the archive");
+
+    // And the home it was restored into, which now holds a key another machine also holds.
+    let out = fixture.run(&["doctor", "--json"], &restored);
+    assert_eq!(verdict_of(&out, "key copies"), "warn");
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("the doctor report is json");
+    let check = report["checks"]
+        .as_array()
+        .expect("the report lists checks")
+        .iter()
+        .find(|check| check["topic"] == "key copies")
+        .expect("the check is in the report");
+    assert!(
+        check["remedy"].is_string(),
+        "a warning with no way out is a nag: {check}"
+    );
+}
+
+/// The verdict of one doctor check, by topic, out of a `--json` run.
+fn verdict_of(out: &Output, topic: &str) -> String {
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(out)).expect("the doctor report is json");
+    report["checks"]
+        .as_array()
+        .expect("the report lists checks")
+        .iter()
+        .find(|check| check["topic"] == topic)
+        .and_then(|check| check["verdict"].as_str())
+        .unwrap_or_else(|| panic!("no check named {topic} in {}", stdout(out)))
+        .to_string()
+}

@@ -5,7 +5,7 @@
 //! and every check says what it actually looked at, because a score nobody can audit is a
 //! score nobody should trust.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -185,6 +185,12 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     checks.push(check_private_coverage(&inventory, record));
     checks.push(check_delegate_quorum(&inventory));
     checks.push(check_replication(&inventory, &routing));
+    checks.push(check_sole_holder(record));
+    checks.push(check_propagation(
+        &inventory,
+        &db::synced_heads(&home.node_db(), &node_id)?,
+        &node_id,
+    ));
     Ok(checks)
 }
 
@@ -431,14 +437,16 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
         .map(|repo| repo.display_name())
         .collect();
 
-    const TOPIC: &str = "seeding elsewhere";
+    const TOPIC: &str = "other seeds";
     if routing.is_empty() {
         return Check::new(
             TOPIC,
             Verdict::Unknown,
             "the routing table is empty, so no other node is known to hold anything",
         )
-        .with_remedy("start the node and let it gossip, then run this again");
+        .with_remedy(
+            "start the node with `rad node start` and let it gossip, then run this again",
+        );
     }
     if alone.is_empty() {
         return Check::new(
@@ -460,6 +468,123 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
     .with_remedy("`rad sync --announce` them, or ask a seed to hold a copy")
 }
 
+/// Work that is signed here and has reached nobody.
+///
+/// Distinct from `check_replication` beside it, and the distinction is the whole point: that
+/// one asks whether a repository exists anywhere else, this one asks whether the LATEST work
+/// in it does. A repository can be held by forty seeds and still have this morning's commits
+/// on one disk, which is the loss a file copy of the home cannot see.
+///
+/// Private repositories are left out. They are announced to nobody by design, so counting them
+/// here would report the feature working as a failure.
+fn check_propagation(
+    inventory: &Inventory,
+    synced: &BTreeMap<String, BTreeSet<String>>,
+    node_id: &str,
+) -> Check {
+    const TOPIC: &str = "signed refs propagation";
+    if synced.is_empty() {
+        return Check::new(
+            TOPIC,
+            Verdict::Unknown,
+            "the node has no record of what any other node holds, so nothing can be compared",
+        )
+        .with_remedy("start the node with `rad node start` and run this again once it has synced");
+    }
+
+    let mut here_only = Vec::new();
+    for repo in &inventory.described {
+        if repo.is_private() {
+            continue;
+        }
+        // No signed refs of our own means nothing of ours to propagate, not work stuck here.
+        let Some(mine) = repo.sigrefs.get(node_id) else {
+            continue;
+        };
+        let elsewhere = synced
+            .get(&repo.rid)
+            .is_some_and(|heads| heads.contains(mine));
+        if !elsewhere {
+            here_only.push(repo.display_name());
+        }
+    }
+
+    if here_only.is_empty() {
+        return Check::new(
+            TOPIC,
+            Verdict::Pass,
+            "every public repository here has its current signed refs on at least one other node",
+        );
+    }
+    Check::new(
+        TOPIC,
+        Verdict::Warn,
+        format!(
+            "the newest signed refs of {} {} on this disk and no other: {}",
+            term::count(here_only.len(), "repository", "repositories"),
+            term::agree(here_only.len()),
+            here_only.join(", ")
+        ),
+    )
+    .with_remedy(
+        "`rad sync --announce` them, and keep an archive covering them until they have propagated",
+    )
+}
+
+/// Whether another machine may still be running this identity.
+///
+/// Two nodes signing under one peer id is the one hazard the thread that produced this tool
+/// agreed on without dissent, and a restore is how a second one comes into being: the archive
+/// puts the key here while the machine it came from still holds its own copy. `move` is the
+/// command that closes it, by retiring the source key as part of the run, so an archive that
+/// says it was written by a move is the one case this can pass on.
+fn check_sole_holder(record: Option<&state::Record>) -> Check {
+    const TOPIC: &str = "key copies";
+    let Some(restored) = record.and_then(|record| record.restored.as_ref()) else {
+        return Check::new(
+            TOPIC,
+            Verdict::Pass,
+            "this home was not restored from an archive, so nothing here suggests a second copy",
+        );
+    };
+
+    match restored.source_retires_key {
+        Some(true) => Check::new(
+            TOPIC,
+            Verdict::Pass,
+            "this home was moved here, and a move retires the key on the machine it came from",
+        ),
+        // Said as a possibility, never as a finding: this tool cannot see the other machine,
+        // and telling somebody their identity is being double-signed when it is not would send
+        // them to retire a key they still need.
+        Some(false) => Check::new(
+            TOPIC,
+            Verdict::Warn,
+            match restored.source_node_was_running {
+                true => {
+                    "this home was restored from a backup, and that backup was taken from a \
+                         machine with a node running"
+                }
+                false => {
+                    "this home was restored from a backup, which leaves the key on the \
+                          machine the backup was taken from"
+                }
+            },
+        )
+        .with_remedy(
+            "make sure that machine is not running a node: `rad node stop` there, or `rad \
+             backup move` next time, which retires its key for you",
+        ),
+        None => Check::new(
+            TOPIC,
+            Verdict::Unknown,
+            "this home was restored from an archive written before archives said whether their \
+             source retires its key",
+        )
+        .with_remedy("make sure the machine it came from is not running a node"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,7 +599,7 @@ mod tests {
             warnings: Vec::new(),
         };
         // The key check is built the long way rather than left out: a sweep that exempts
-        // one of the seven checks it exists to police is a sweep that reports a conformance
+        // one of the nine checks it exists to police is a sweep that reports a conformance
         // it is not checking.
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
@@ -492,6 +617,8 @@ mod tests {
             check_private_coverage(&empty, None),
             check_delegate_quorum(&empty),
             check_replication(&empty, &BTreeMap::new()),
+            check_sole_holder(None),
+            check_propagation(&empty, &BTreeMap::new(), "z6MkAAA"),
         ]
         .into_iter()
         .map(|check| check.topic)
@@ -505,7 +632,20 @@ mod tests {
     /// assertion to the detail beside it, which is written to be true whatever was found.
     #[test]
     fn no_topic_asserts_a_state_so_a_failing_line_cannot_contradict_its_own_marker() {
-        const CLAIMS: [&str; 7] = ["exists", " is ", " are ", " has ", " have ", "no ", "not "];
+        // ` on ` and `elsewhere` were added after `key on another machine` and `signed refs
+        // elsewhere` both printed a topic the detail beside them then denied. The seven before
+        // them caught neither.
+        const CLAIMS: [&str; 9] = [
+            "exists",
+            " is ",
+            " are ",
+            " has ",
+            " have ",
+            "no ",
+            "not ",
+            " on ",
+            "elsewhere",
+        ];
         for topic in every_topic() {
             let padded = format!(" {topic} ");
             for claim in CLAIMS {
@@ -638,6 +778,114 @@ mod tests {
         assert_eq!(check_backup_encryption(None).verdict, Verdict::Unknown);
     }
 
+    const ME: &str = "z6MkAAA";
+
+    /// A public repository whose current signed refs are `head`.
+    fn signed(rid: &str, head: &str) -> crate::manifest::RepoRecord {
+        crate::manifest::RepoRecord {
+            rid: rid.to_string(),
+            name: None,
+            visibility: Some("public".to_string()),
+            allowed: Vec::new(),
+            delegate: false,
+            delegates: Vec::new(),
+            scope: None,
+            policy: None,
+            head: None,
+            refs: 1,
+            sigrefs: BTreeMap::from([(ME.to_string(), head.to_string())]),
+            other_seeds: None,
+            bundle: None,
+        }
+    }
+
+    fn holding(records: Vec<crate::manifest::RepoRecord>) -> Inventory {
+        Inventory {
+            described: records,
+            selected: Default::default(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn work_no_other_node_holds_is_named_as_being_on_this_disk_alone() {
+        let inventory = holding(vec![signed("rad:zAAA", "aaa"), signed("rad:zBBB", "bbb")]);
+        // Somebody else has zAAA's current head. Nobody has zBBB's: it was committed and
+        // signed here and has reached nothing, which no file copy of the home can tell you.
+        let synced = BTreeMap::from([
+            ("rad:zAAA".to_string(), BTreeSet::from(["aaa".to_string()])),
+            (
+                "rad:zBBB".to_string(),
+                BTreeSet::from(["older".to_string()]),
+            ),
+        ]);
+
+        let check = check_propagation(&inventory, &synced, ME);
+        assert_eq!(check.verdict, Verdict::Warn);
+        assert!(check.detail.contains("rad:zBBB"), "{}", check.detail);
+        assert!(!check.detail.contains("rad:zAAA"), "{}", check.detail);
+    }
+
+    #[test]
+    fn a_private_repository_is_not_counted_as_work_that_failed_to_propagate() {
+        // Private repositories are announced to nobody on purpose. Counting them here would
+        // report the feature working as a fault, on every run, for everyone who has one.
+        let mut private = signed("rad:zPriv", "aaa");
+        private.visibility = Some("private".to_string());
+        let synced =
+            BTreeMap::from([("rad:zOther".to_string(), BTreeSet::from(["x".to_string()]))]);
+
+        let check = check_propagation(&holding(vec![private]), &synced, ME);
+        assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
+    }
+
+    #[test]
+    fn a_node_that_has_never_run_is_unknown_rather_than_everything_being_stranded() {
+        let inventory = holding(vec![signed("rad:zAAA", "aaa")]);
+        let check = check_propagation(&inventory, &BTreeMap::new(), ME);
+        assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
+    }
+
+    #[test]
+    fn a_home_restored_from_a_plain_backup_is_warned_about_the_machine_it_came_from() {
+        let mut record = record();
+        record.restored = Some(state::Restored {
+            source_retires_key: Some(false),
+            source_node_was_running: true,
+        });
+        let check = check_sole_holder(Some(&record));
+        assert_eq!(check.verdict, Verdict::Warn);
+        assert!(check.remedy.is_some(), "a warning with no way out is a nag");
+    }
+
+    #[test]
+    fn a_home_that_was_moved_here_is_not_warned_about_a_key_that_was_retired() {
+        let mut record = record();
+        record.restored = Some(state::Restored {
+            source_retires_key: Some(true),
+            source_node_was_running: true,
+        });
+        assert_eq!(check_sole_holder(Some(&record)).verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn an_archive_too_old_to_say_whether_it_retired_its_source_is_unknown_not_a_pass() {
+        // The dangerous shape: silence read as safety. An archive written before the manifest
+        // carried the answer cannot vouch for the machine it came from.
+        let mut record = record();
+        record.restored = Some(state::Restored {
+            source_retires_key: None,
+            source_node_was_running: false,
+        });
+        assert_eq!(check_sole_holder(Some(&record)).verdict, Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_home_that_was_never_restored_is_not_asked_about_a_machine_it_never_came_from() {
+        assert_eq!(check_sole_holder(Some(&record())).verdict, Verdict::Pass);
+        assert_eq!(check_sole_holder(None).verdict, Verdict::Pass);
+    }
+
     fn record() -> state::Record {
         state::Record {
             did: "did:key:z6MkAAA".to_string(),
@@ -653,6 +901,7 @@ mod tests {
             sigrefs: Default::default(),
             seeded: 0,
             followed: 0,
+            restored: None,
         }
     }
 }

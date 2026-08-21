@@ -6,7 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
+- `doctor` gained `signed refs propagation`: it names the repositories whose newest signed refs exist on this disk and nowhere else. Distinct from `other seeds` beside it, which asks whether a repository exists anywhere else at all: a repository forty seeds carry can still have this morning's commits on one machine.
+- `doctor` gained `key copies`: a home restored from an ordinary backup is warned that the machine the backup came from still holds the same key, which is how two nodes end up signing under one peer id. A home moved here with `rad backup move` passes, because a move retires the source key. Read from the archive, so it can only be answered for a home restored by this version or later.
 - `schedule --recipient` and `schedule --plaintext`: a scheduled backup can now encrypt to an age or ssh key, or skip encryption for a store that encrypts it, with no passphrase file needed.
+
+### Changed
+
+- `doctor`'s `seeding elsewhere` check is now called `other seeds`. The old name asserted the good state, so a failing line read `seeding elsewhere: 1 public repository is announced by no other node`, which argues with itself. Topics are the key `--json` consumers match on, so a probe keyed to the old string needs updating once.
 
 ### Fixed
 
