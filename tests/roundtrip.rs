@@ -634,6 +634,29 @@ fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
     );
 }
 
+#[test]
+fn a_dry_run_asked_for_json_answers_with_json() {
+    let fixture = Fixture::create("rehearsal-json");
+    let dir = fixture.path("backups").to_string_lossy().into_owned();
+
+    let out = fixture.run(
+        &["--dry-run", "--json", "--tier", "full", "--output", &dir],
+        &fixture.home(),
+    );
+    assert_success(&out, "rehearsing a backup as json");
+
+    // `--json` was honoured by every reporting path except this one, which printed the human
+    // table on stdout. A consumer got something that parses as far as the first line.
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("--dry-run --json prints json");
+    assert_eq!(report["dryRun"], serde_json::Value::Bool(true));
+    assert_eq!(report["tier"], serde_json::Value::String("full".into()));
+    assert_eq!(
+        report["repos"][0]["rid"],
+        serde_json::Value::String(format!("rad:{RID}"))
+    );
+}
+
 /// Every file under a directory, so a test can look at what a run left behind rather than at
 /// what it meant to leave behind.
 fn files_under(directory: &Path) -> Vec<PathBuf> {

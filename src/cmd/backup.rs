@@ -102,7 +102,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
     warnings.extend(inventory.warnings.iter().cloned());
 
     if args.dry_run {
-        rehearse(ctx, &inventory, tier, selection, &warnings);
+        rehearse(ctx, &inventory, tier, selection, &warnings)?;
         // `quiesce` already ran, so a rehearsal with `--stop-node` really did stop the node.
         // Put it back before returning, or `--dry-run` leaves the thing it promised not to
         // touch switched off.
@@ -292,8 +292,44 @@ fn rehearse(
     tier: Tier,
     selection: RepoSelection,
     warnings: &[String],
-) {
+) -> Result<()> {
     let term = &ctx.term;
+    let mut total = 0;
+    let mut selected = Vec::new();
+    for record in &inventory.records {
+        if !inventory.selected.contains(&record.rid) {
+            continue;
+        }
+        let bytes = directory_size(&ctx.home.repository_path(&record.rid));
+        total += bytes;
+        selected.push((record, bytes));
+    }
+
+    // A dry run is a report like every other, and `--json` used to be the one flag it ignored:
+    // a consumer asking what a backup would carry got the human table on stdout and no object
+    // at all, which is worse than an error because it parses as far as the first line.
+    if ctx.global.json {
+        let repos: Vec<serde_json::Value> = selected
+            .iter()
+            .map(|(record, bytes)| {
+                serde_json::json!({
+                    "rid": record.rid,
+                    "name": record.display_name(),
+                    "bytes": bytes,
+                    "private": record.is_private(),
+                })
+            })
+            .collect();
+        return term.print_json(&serde_json::json!({
+            "dryRun": true,
+            "tier": tier.as_str(),
+            "selection": selection.as_str(),
+            "repos": repos,
+            "bytes": total,
+            "warnings": warnings,
+        }));
+    }
+
     term.headline(&format!(
         "a {} archive, carrying {} repositories, would hold:",
         tier.as_str(),
@@ -301,21 +337,15 @@ fn rehearse(
     ));
     term.blank();
 
-    let mut total = 0;
-    for record in &inventory.records {
-        if !inventory.selected.contains(&record.rid) {
-            continue;
-        }
-        let bytes = directory_size(&ctx.home.repository_path(&record.rid));
-        total += bytes;
+    for (record, bytes) in &selected {
         term.print(&format!(
             "  {:<40} {:>9}{}",
             record.display_name(),
-            term::bytes(bytes),
+            term::bytes(*bytes),
             if record.is_private() { "  private" } else { "" }
         ));
     }
-    if inventory.selected.is_empty() {
+    if selected.is_empty() {
         term.print("  no repositories, only the identity and its paperwork");
     }
     term.blank();
@@ -328,6 +358,7 @@ fn rehearse(
         term.warn(warning);
     }
     term.hint("nothing was written; drop --dry-run to take it");
+    Ok(())
 }
 
 /// What a directory occupies, following no symlinks and crossing no filesystems it was not
