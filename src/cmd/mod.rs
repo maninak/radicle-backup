@@ -11,6 +11,7 @@ pub mod restore;
 pub mod schedule;
 pub mod show;
 pub mod verify;
+pub mod words;
 
 use std::path::{Path, PathBuf};
 
