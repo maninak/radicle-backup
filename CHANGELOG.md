@@ -47,6 +47,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - - Counts agree with their nouns in the shipped `restore.sh` and in `verify --deep` without git, so no line reads "1 repositories".
 - A `following` row with no alias no longer fails the whole read of the node database.
 - Write and parse errors name the file they are about.
+- An archive encrypted to recipients now says which key to pass when none of the given identities open it, instead of blaming a passphrase it never asked for.
 
 ### Security
 

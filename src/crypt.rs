@@ -117,8 +117,9 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
     let buffered = io::BufReader::new(input);
     let decryptor = match age::Decryptor::new_buffered(buffered) {
         Ok(decryptor) => decryptor,
-        // A plaintext archive is not an age file at all, so failing to read an age header is
-        // how we learn that, rather than something to report.
+        // Reached only once `looks_encrypted` has seen the age magic, so a header age
+        // cannot parse is damage rather than a plaintext archive. age's own parse error names
+        // internals nobody can act on, so this names the stream instead.
         Err(_) => return Err(Error::Age("not an age-encrypted stream".to_string())),
     };
 
@@ -148,7 +149,19 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
     }
     let borrowed: Vec<&dyn age::Identity> =
         identities.iter().map(std::convert::AsRef::as_ref).collect();
-    let reader = decryptor.decrypt(borrowed.into_iter())?;
+    // Not through the blanket conversion: it reads `NoMatchingKeys` as a wrong passphrase,
+    // which is right for the scrypt path above and nonsense here, where no passphrase was
+    // asked for. It sent people to retype something that does not exist instead of to the
+    // key file the archive was actually encrypted to.
+    let reader = decryptor
+        .decrypt(borrowed.into_iter())
+        .map_err(|e| match e {
+            age::DecryptError::NoMatchingKeys => Error::refused(
+                "none of the identities given open this archive",
+                "pass --identity with the age or ssh private key it was encrypted to",
+            ),
+            other => Error::from(other),
+        })?;
     Ok(Box::new(Authenticated(reader)))
 }
 
