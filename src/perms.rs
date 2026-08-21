@@ -150,6 +150,9 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
 
     let mut file = create_private(path)?;
-    file.write_all(bytes).map_err(Error::Bare)?;
-    file.flush().map_err(Error::Bare)
+    // Named, not bare: this lands private keys and archives, and "No space left on device"
+    // with no path attached is the message somebody reads while trying to work out which of
+    // their files did not survive.
+    file.write_all(bytes).map_err(|e| Error::io(path, e))?;
+    file.flush().map_err(|e| Error::io(path, e))
 }

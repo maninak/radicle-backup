@@ -42,6 +42,11 @@ pub enum Error {
     #[error("{path}: {reason}")]
     BadKey { path: PathBuf, reason: String },
 
+    /// A file this tool reads that is there and does not parse. Separate from a bare
+    /// `serde_json::Error`, whose "expected value at line 1 column 1" names no file at all.
+    #[error("{path}: {reason}")]
+    Malformed { path: PathBuf, reason: String },
+
     #[error("this is a {algorithm} key; Radicle identities are ed25519")]
     NotEd25519 { algorithm: String },
 

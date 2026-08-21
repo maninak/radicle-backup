@@ -117,7 +117,9 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
 
     let from = ctx.home.secret_key();
     let to = retired_path(&ctx.home.keys_dir());
-    std::fs::rename(&from, &to).map_err(|e| Error::io(&to, e))?;
+    // Named for the source: a rename fails on either path, and the one a reader can act on
+    // is the key that is still where it was.
+    std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e))?;
 
     let note = format!(
         "This identity was moved to another machine on {}.\n\

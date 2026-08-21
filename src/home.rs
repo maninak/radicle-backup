@@ -90,8 +90,9 @@ impl Home {
         self.node_dir().join("node.db")
     }
 
-    /// The socket a running node listens on. Its presence is how we know the node is up.
-    /// Only a unix node has one, and only `node_state` below asks for it.
+    /// The socket a running node listens on. The file survives a stopped node, so
+    /// `node_state` below connects to it rather than trusting that it is there. Only a unix
+    /// node has one, and only `node_state` asks for it.
     #[cfg(unix)]
     pub fn control_socket(&self) -> PathBuf {
         self.node_dir().join("control.sock")
@@ -134,7 +135,13 @@ impl Home {
             return Ok(None);
         }
         let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
-        let config: serde_json::Value = serde_json::from_str(&text)?;
+        // The path, because serde says only "expected value at line 1 column 1", and a home
+        // with a malformed `config.json` is otherwise a run that fails naming nothing.
+        let config: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| Error::Malformed {
+                path: path.clone(),
+                reason: format!("this is not valid JSON: {e}"),
+            })?;
         Ok(config
             .get("node")
             .and_then(|node| node.get("alias"))

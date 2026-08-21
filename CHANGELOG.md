@@ -46,6 +46,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - - `rad backup --output ... schedule` is told that the flag belongs after the verb, instead of that `schedule` does not create an archive, which reads as a denial of a flag it plainly has.
 - - Counts agree with their nouns in the shipped `restore.sh` and in `verify --deep` without git, so no line reads "1 repositories".
 - A `following` row with no alias no longer fails the whole read of the node database.
+- Write and parse errors name the file they are about.
 
 ### Security
 
