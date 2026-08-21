@@ -326,10 +326,10 @@ fn check_backup_locality(home: &std::path::Path, record: Option<&state::Record>)
 }
 
 fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Check {
-    const CHECK: &str = "private repositories";
+    const TOPIC: &str = "private repositories";
     let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
     if private.is_empty() {
-        return Check::new(CHECK, Verdict::Pass, "there are none to lose");
+        return Check::new(TOPIC, Verdict::Pass, "there are none to lose");
     }
 
     // A private repository is not automatically the only copy. Its owner can allow peers to
@@ -341,7 +341,7 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
         .collect();
     if missing.is_empty() {
         return Check::new(
-            CHECK,
+            TOPIC,
             Verdict::Pass,
             format!("all {} of them are in the newest archive", private.len()),
         );
@@ -373,7 +373,7 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
     } else {
         Verdict::Fail
     };
-    Check::new(CHECK, verdict, detail).with_remedy("rad backup --repos private")
+    Check::new(TOPIC, verdict, detail).with_remedy("rad backup --repos private")
 }
 
 fn check_delegate_quorum(inventory: &Inventory) -> Check {
@@ -473,7 +473,19 @@ mod tests {
             selected: Default::default(),
             warnings: Vec::new(),
         };
+        // The key check is built the long way rather than left out: a sweep that exempts
+        // one of the seven checks it exists to police is a sweep that reports a conformance
+        // it is not checking.
+        let seed = zeroize::Zeroizing::new([1u8; 32]);
+        let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
+        let path = std::env::temp_dir().join(format!("rad-backup-topics-{}", std::process::id()));
+        std::fs::write(&path, &*openssh).expect("scratch key is writable");
+        let secret = SecretKey::read(&path).expect("key is readable");
+        let key = check_key_protection(&secret);
+        let _ = std::fs::remove_file(path);
+
         vec![
+            key,
             check_backup_freshness(&state::Stored::Absent, now, &args),
             check_backup_encryption(None),
             check_backup_locality(std::path::Path::new("/nowhere"), None),
