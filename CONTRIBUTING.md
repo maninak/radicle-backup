@@ -13,10 +13,10 @@ Open an issue for anything that changes behaviour, adds a flag or touches the ar
 ## The bar
 
 ```sh
-just check    # cargo fmt --check, then the lints, then the tests: what CI runs, in that order
+just check    # cargo fmt --check, the SECURITY.md audit map, then the lints, then the tests: what CI runs, in that order
 ```
 
-CI runs those three on Linux, macOS and Windows, plus an MSRV check, a two-pass reproducibility check, `nix build --rebuild`, a Debian package built and linted, and the advisory, action-pin and dependency-age gates. Builds of the cross-compiled release targets run on a tag, not on a pull request. A pull request is ready when CI is green and the change carries a test that would have failed without it.
+CI runs those four on Linux, macOS and Windows, plus an MSRV check, a two-pass reproducibility check, `nix build --rebuild`, a Debian package built and linted, and the advisory, action-pin and dependency-age gates. Builds of the cross-compiled release targets run on every push to master and on a tag, not on a pull request. A pull request is ready when CI is green and the change carries a test that would have failed without it.
 
 **Every bug fix gets a test that would have caught the bug.** Prove it is not vacuous: flip what it asserts, watch it go red, put it back.
 

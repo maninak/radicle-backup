@@ -4,7 +4,7 @@ What ships, how it is built, and what is not wired up yet.
 
 | Channel | State | Built by |
 |---|---|---|
-| `.deb` (amd64, arm64) | Working | `just deb` locally, the `packages` job on a tag |
+| `.deb` (amd64, arm64) | Working | `just deb` locally, the `packages` job on every push to master and on a tag |
 | Signed apt repository | Working | `packaging/apt/publish.sh`, run by the `apt` job |
 | Tarballs (linux musl, macOS, x86_64 and aarch64) | Working | the `binaries` job |
 | Windows `.zip` (x86_64-msvc) | Working, with the caveats in the README | the `binaries` job |

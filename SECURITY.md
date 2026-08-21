@@ -8,7 +8,7 @@ Expect an acknowledgement within 72 hours and an assessment within a week. If a 
 
 ## How to audit this
 
-This program holds an ed25519 key that cannot be rotated, revoked or reissued. Everything that touches a secret lives in the files below: the first five are the core, and the last two are the recovery paths that also hold raw key material and must keep the same `Zeroizing` discipline.
+This program holds an ed25519 key that cannot be rotated, revoked or reissued. Everything that touches a secret lives in the files below: the first five are the core, the next two are the recovery paths that also hold raw key material and must keep the same `Zeroizing` discipline, and the last two are where a value out of an archive nobody has vouched for is checked before it reaches a command line.
 
 | Read this | To satisfy yourself that |
 |---|---|
@@ -19,12 +19,14 @@ This program holds an ed25519 key that cannot be rotated, revoked or reissued. E
 | `src/container.rs` | An archive from anywhere is hostile input: no absolute paths, no `..`, regular files only, no repository id that would not stay a single directory under `storage/`, and every entry digested against the manifest in both directions. |
 | `src/cmd/paper.rs` | The recovery sheet is the key in the clear: the mnemonic, the key file, and the HTML that carries them are all `Zeroizing`, and the one untrusted field (the alias) is HTML-escaped. |
 | `src/cmd/words.rs` | The 24 words typed to rebuild an identity arrive on a `Zeroizing` line and stay in `Zeroizing` buffers through to the key file, written at `0600`. |
+| `src/rad.rs` | An identifier taken from an archive is base58 and nothing else before it reaches `rad`, so a repository or node id out of a manifest cannot arrive in an argv position reading as a flag. |
+| `src/git.rs` | A `HEAD` taken from an archive names a ref before it reaches `git symbolic-ref`, which accepts no `--` and stores what it is handed without checking it, so neither a value read as a flag nor one that climbs out of the repository gets through. |
 
 Four invariants those files exist to hold:
 
 - Anything that could hold key material is **created** at `0600`, and working directories at `0700`, rather than chmodded afterwards: a key that is briefly world-readable has already been read. Windows has no mode bits, and the program says so the first time it writes such a file.
 - A passphrase is never in `argv`, never in a log, and never in a child process's environment. `RAD_PASSPHRASE` reaches `rad` alone, because `rad` is the only thing that signs with the key.
-- The one socket this program opens itself is the node's local control socket, which it uses to ask whether the node is running. Everything else goes through `rad`: the `rad sync` a restore runs to compare what it restored with the network, and the `rad node stop` and `rad node start` a restore or a move needs. No telemetry, no update check, no upload.
+- The one socket this program opens itself is the node's local control socket, which it uses to ask whether the node is running. Everything else goes through `rad`: the `rad sync` a restore runs to compare what it restored with the network, and the `rad node stop` and `rad node start` a restore or a `--stop-node` backup needs. A move stops no node: it refuses to run while one is up, and says so. No telemetry, no update check, no upload.
 - `unsafe` is forbidden crate-wide, `unwrap` is a denied lint, and CI fails on either.
 
 Two checks to run:

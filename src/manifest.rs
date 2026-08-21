@@ -24,7 +24,8 @@ pub const RESTORE_SCRIPT_ENTRY: &str = "restore.sh";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
-    /// The 524 bytes nothing can give back, plus the config that names them.
+    /// The 524 bytes nothing can give back, secret key and public half together, plus the
+    /// config that names them.
     Identity,
     /// Identity, plus the policies, aliases and inventory a person cannot retype.
     State,
