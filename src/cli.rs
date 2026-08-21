@@ -119,10 +119,26 @@ fn misplaced_create_flag(matches: &ArgMatches) -> Option<String> {
     let id = CREATE_ONLY
         .iter()
         .find(|id| matches.value_source(id) == Some(ValueSource::CommandLine))?;
+    let flag = id.replace('_', "-");
+    // The verb may declare the same flag itself, and the top-level copy is not the one
+    // dispatch reads, so the flag would be accepted and then quietly ignored. Saying where to
+    // put it beats telling somebody that `create` does not create an archive, or that
+    // `schedule` does not take the `--output` it plainly has.
+    if declares(verb, id) {
+        return Some(format!("`--{flag}` belongs after `{verb}`, not before it"));
+    }
     Some(format!(
-        "`--{}` shapes an archive, and `{verb}` does not create one",
-        id.replace('_', "-")
+        "`--{flag}` shapes an archive, and `{verb}` does not create one"
     ))
+}
+
+/// Whether this verb has an argument of its own by that name.
+fn declares(verb: &str, id: &str) -> bool {
+    use clap::CommandFactory as _;
+
+    Cli::command()
+        .find_subcommand(verb)
+        .is_some_and(|sub| sub.get_arguments().any(|arg| arg.get_id() == id))
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -241,7 +257,11 @@ pub struct Create {
     pub repos: Option<ReposArg>,
 
     /// Write the archive to stdout, for piping into restic, borg or ssh.
-    #[arg(long, conflicts_with = "output")]
+    ///
+    /// Refuses `--json` because both write to stdout, and a JSON report glued onto the end of
+    /// an age stream is an archive that decrypts, fails to decompress, and says so only on
+    /// the day somebody needs it back.
+    #[arg(long, conflicts_with = "output", conflicts_with = "json")]
     pub stdout: bool,
 
     /// Do not encrypt. The archive will hold your private key in the clear.
@@ -378,7 +398,12 @@ pub struct Doctor {
 #[derive(Parser, Debug, Clone)]
 pub struct Paper {
     /// Where to write the sheet. Defaults to stdout.
-    #[arg(long, short = 'o', value_name = "PATH", env = "RAD_BACKUP_DIR")]
+    ///
+    /// Deliberately not read from `RAD_BACKUP_DIR`, unlike the other `--output` here: that
+    /// variable names a directory to keep archives in, and honouring it here wrote the sheet
+    /// to a file named after somebody's archive directory, skipping the refusal that keeps a
+    /// key off a terminal because stdout was no longer the destination.
+    #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
 
     /// Print the key as 24 words instead of as its encrypted file.
@@ -585,6 +610,61 @@ mod tests {
             Some(ValueSource::DefaultValue)
         );
         assert_eq!(misplaced_create_flag(&matches), None);
+    }
+
+    #[test]
+    fn the_recovery_sheet_does_not_take_its_path_from_the_archive_directory() {
+        let command = Cli::command();
+        let paper = command
+            .find_subcommand("paper")
+            .expect("`paper` is a subcommand");
+        let output = paper
+            .get_arguments()
+            .find(|arg| arg.get_id() == "output")
+            .expect("`paper` has an --output");
+        // RAD_BACKUP_DIR names a directory to keep archives in. Read here it became the file
+        // path of a sheet holding the key as 24 words, and took the run off the stdout path
+        // where the refusal to print a key at a terminal lives.
+        assert_eq!(output.get_env(), None);
+    }
+
+    #[test]
+    fn the_archive_and_the_json_report_cannot_both_own_stdout() {
+        // Accepted, they interleaved: the JSON report went out after the archive bytes, so
+        // `rad-backup --stdout --json > x.age` produced a file age refuses at restore time.
+        assert!(Cli::try_parse_from(["rad-backup", "--stdout", "--json"]).is_err());
+    }
+
+    #[test]
+    fn a_create_flag_before_the_create_verb_is_told_where_it_belongs() {
+        let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "create"]);
+        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        // Not "`create` does not create an archive", which is what the general wording said
+        // here and which is nonsense. The flag cannot simply be allowed either: the
+        // subcommand's own defaulted copy is the one dispatch reads, so it would be ignored.
+        assert!(complaint.contains("belongs after `create`"), "{complaint}");
+    }
+
+    #[test]
+    fn a_flag_the_verb_itself_has_is_told_where_it_belongs_rather_than_denied() {
+        let matches = Cli::command().get_matches_from(["rad-backup", "--output", "/x", "schedule"]);
+        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        // `schedule --output` is a real flag. "`schedule` does not create one" is what the
+        // general wording said, and it reads as a denial of a flag the verb documents.
+        assert!(
+            complaint.contains("belongs after `schedule`"),
+            "{complaint}"
+        );
+    }
+
+    #[test]
+    fn a_flag_the_verb_does_not_have_is_denied_rather_than_relocated() {
+        let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "doctor"]);
+        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        assert!(
+            complaint.contains("`doctor` does not create one"),
+            "{complaint}"
+        );
     }
 
     #[test]

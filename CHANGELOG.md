@@ -12,6 +12,13 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore` no longer abandons the whole restore over one repository that will not come back: the rest are restored, the ones that did not are named, and the run exits `3`. The JSON report gains `notRestored`.
 - A repository that fails partway through being restored no longer leaves an empty bare repository in storage for the next inventory to count as a repository.
 - `restore` without `git` on PATH now says how many repositories it could not put back, instead of reporting success.
+- `create --stdout --json` is refused rather than writing the archive and the report into the same stream.
+- `rad backup --tier full create` is refused with the flag's place, not with `--tier` shapes an archive, and `create` does not create one.
+- - `rad backup --output ... schedule` is told that the flag belongs after the verb, instead of that `schedule` does not create an archive, which reads as a denial of a flag it plainly has.
+
+### Security
+
+- `paper --output` no longer takes its path from `RAD_BACKUP_DIR`. A recovery sheet carrying the secret key was being written into the directory backups go to, which is usually the directory that gets synced off the machine.
 
 ## [0.1.0] - 2026-08-16
 
