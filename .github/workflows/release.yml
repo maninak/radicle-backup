@@ -69,11 +69,11 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Every version in the lockfile, not just what the last commit moved. CI checks only what
-      # a push ADDS, which is right there and wrong here: a release ships the whole tree, and on
-      # a tag there is no meaningful "before" to diff against, so the incremental mode reports
-      # green having examined nothing. v0.1.0 shipped exactly that way, with fifteen crates
-      # younger than this floor and a passing check that had looked at zero of them.
+      # Every version in the lockfile, not just what the last commit moved. CI checks only
+      # what a push ADDS, which is right there and wrong here: a release ships the whole tree,
+      # and on a tag there is no meaningful "before" to diff against, so the incremental mode
+      # reports green having examined nothing. v0.1.0 shipped exactly that way, with fifteen
+      # crates younger than this floor and a passing check that had looked at zero of them.
       #
       # It gates the release rather than warning about it, because a version published days ago
       # is the shape a compromised one arrives in, and once a tag is out the artifacts are on

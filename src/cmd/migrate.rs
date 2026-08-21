@@ -42,7 +42,8 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     let outcome = backup::run(ctx, &create)?;
     // A move retires the key on this machine, so an archive that is missing repositories must
     // not be the one it is retired against. `backup` carries on past a repository it cannot
-    // bundle, which is right for a backup and wrong for the last copy before a machine is left.
+    // bundle, which is right for a backup and wrong for the last copy before a machine is
+    // left.
     if outcome.incomplete {
         return Err(Error::refused(
             "the archive this move would rely on is missing repositories that could not be bundled",

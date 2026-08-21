@@ -106,8 +106,8 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
 
     let outcome = dispatch(&ctx, cli);
 
-    // Every verb, not just `backup`. `db.rs` promises in its own doc comment that a database it
-    // could not open read-only is reported, and only `backup` was draining that list, so
+    // Every verb, not just `backup`. `db.rs` promises in its own doc comment that a database
+    // it could not open read-only is reported, and only `backup` was draining that list, so
     // `doctor`, `verify`, `diff` and `restore` all touched files they said they would only
     // read and said nothing. `backup` drains it first, to put the same fact in the manifest.
     for path in db::drain_writable_opens() {

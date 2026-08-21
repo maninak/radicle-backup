@@ -12,8 +12,8 @@ set -euo pipefail
 
 DIR="${1:?usage: verify.sh <directory of downloaded files>}"
 # Absolute before the `cd` below, because `dirname "$0"` is relative to where this was
-# invoked from and would then be resolved inside the download directory instead. Called as
-# `./packaging/release/verify.sh release`, that made every run exit 1 with "no allowed_signers".
+# invoked from and would then be resolved inside the download directory instead. Called
+# as `./packaging/release/verify.sh release`, every run exited 1 with "no allowed_signers".
 SIGNERS="${ALLOWED_SIGNERS:-$(cd "$(dirname "$0")" && pwd)/allowed_signers}"
 NAMESPACE="radicle.tools"
 
