@@ -755,6 +755,44 @@ fn a_dry_run_asked_for_json_answers_with_json() {
     );
 }
 
+/// Exit `3` is the whole scheduling contract: a timer that only reads the status has no
+/// other way to tell a complete backup from one that lost a repository on the way.
+#[test]
+fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
+    let fixture = Fixture::create("incomplete");
+    let backups = fixture.path("backups");
+
+    // Break the only repository in a way `git bundle` cannot work around: an `objects` that
+    // is a file rather than a directory. Deleting it would look like a repository that was
+    // never there, which is a different thing and is not an error.
+    let objects = fixture.home().join("storage").join(RID).join("objects");
+    std::fs::remove_dir_all(&objects).expect("the object directory is removable");
+    std::fs::write(&objects, b"not a directory").expect("something else goes in its place");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    let said = stderr(&out);
+
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a backup missing a repository must not exit 0: {said}"
+    );
+    // And the archive is still written, because everything else in the home is worth having.
+    let archive = only_archive(&backups);
+    assert!(archive.is_file(), "the archive should still exist: {said}");
+    assert!(said.contains(RID), "it has to name what it lost: {said}");
+}
+
 /// The shipped script and this tool are two implementations of one restore, kept in step by
 /// policy (guardrail: an archive never depends on this tool to be read). Nothing enforced that
 /// they stayed in step, so anything added to one side only, the way `repos/*.config` or the

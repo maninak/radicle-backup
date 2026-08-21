@@ -64,6 +64,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `--stop-node` asks for the archive passphrase before it stops the node, not while the node is down waiting for somebody to find it.
 - The `diff --json` report names moved repositories by rid, like every other field in it. It named them by display name, so the one list a consumer would act on was the one it could not look anything up with.
 - The manifest records the hostname on macOS and the BSDs, which have neither `/etc/hostname` nor `HOSTNAME` and so recorded nothing at all.
+- A repository `git` cannot read no longer stops the whole backup. It is named, carried into the manifest with no refs, and the archive is written and marked incomplete (exit `3`) instead of not written at all. The bundling stage already worked this way; the inventory that runs before it did not, so it never got the chance.
 
 ### Security
 

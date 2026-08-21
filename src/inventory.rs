@@ -88,22 +88,21 @@ pub fn collect(
     let mut records = Vec::with_capacity(described.len());
     let mut undescribed = BTreeSet::new();
     let mut first_reason = None;
+    let mut unreadable = BTreeSet::new();
+    let mut first_unreadable = None;
     for rid in described {
-        let (record, unavailable) = describe(home, git, rad, rid, node_id, &seeding, routing)?;
-        if let Some(why) = unavailable {
+        let (record, trouble) = describe(home, git, rad, rid, node_id, &seeding, routing)?;
+        if let Some(why) = trouble.undescribed {
             first_reason.get_or_insert(why);
             undescribed.insert(record.rid.clone());
+        }
+        if let Some(why) = trouble.unreadable {
+            first_unreadable.get_or_insert(why);
+            unreadable.insert(record.rid.clone());
         }
         records.push(record);
     }
     records.sort_by(|a, b| a.rid.cmp(&b.rid));
-    // One warning for all of them, not one each. A `rad` that has stopped answering fails for
-    // every repository at once, and a seed holding thousands of them would otherwise put
-    // thousands of lines into `manifest.warnings`, which is the same manifest that has an
-    // 8 MiB ceiling the writer refuses its own archive against.
-    if let Some(why) = first_reason {
-        warnings.push(undescribed_warning(&undescribed, &why));
-    }
 
     // The default selection is decided after the records exist, because "private" is a fact
     // about a repository that only the paperwork knows.
@@ -130,6 +129,20 @@ pub fn collect(
         _ => selected,
     };
 
+    // After the selection, because what either warning may promise depends on it: a `--tier
+    // identity` run carries no repositories at all, and telling somebody their unreadable one
+    // is "carried as though private" there is the same over-assurance the warning exists to
+    // prevent. One warning for all of them, not one each: a `rad` that has stopped answering
+    // fails for every repository at once, and a seed holding thousands would otherwise put
+    // thousands of lines into `manifest.warnings`, which is the same manifest the writer
+    // refuses its own archive over at 8 MiB.
+    if let Some(why) = first_unreadable {
+        warnings.push(unreadable_warning(&unreadable, &selected, &why));
+    }
+    if let Some(why) = first_reason {
+        warnings.push(undescribed_warning(&undescribed, &selected, &why));
+    }
+
     Ok(Inventory {
         records,
         selected,
@@ -138,24 +151,68 @@ pub fn collect(
 }
 
 /// The one warning that stands for every repository `rad` could not describe.
-///
-/// Names a few and counts the rest: the identifiers matter for a handful and stop being
-/// readable well before they stop being numerous, while the count is what says how much of the
-/// home this is about.
-fn undescribed_warning(undescribed: &BTreeSet<String>, why: &str) -> String {
-    const NAMED: usize = 5;
-    let named: Vec<&str> = undescribed.iter().take(NAMED).map(String::as_str).collect();
-    let rest = undescribed.len().saturating_sub(named.len());
-    let listed = match rest {
-        0 => named.join(", "),
-        _ => format!("{}, and {rest} more", named.join(", ")),
+fn undescribed_warning(
+    undescribed: &BTreeSet<String>,
+    selected: &BTreeSet<String>,
+    why: &str,
+) -> String {
+    let carried = carried_of(undescribed, selected);
+    let fate = match carried {
+        0 => "This run was not asked for them, so the archive holds none of them".to_string(),
+        n => format!(
+            "{n} of them {} carried as though private, because a repository whose visibility \
+             cannot be read must not be left out of an archive for looking public",
+            crate::term::agree(n)
+        ),
     };
     format!(
-        "`rad` could not describe {}: {listed} ({why}). They are carried as though they were \
-         private, because a repository whose visibility cannot be read must not be left out of \
-         an archive for looking public",
-        crate::term::count(undescribed.len(), "repository", "repositories")
+        "`rad` could not describe {}: {} ({why}). {fate}",
+        crate::term::count(undescribed.len(), "repository", "repositories"),
+        listed(undescribed)
     )
+}
+
+/// The one warning that stands for every repository `git` could not read.
+fn unreadable_warning(
+    unreadable: &BTreeSet<String>,
+    selected: &BTreeSet<String>,
+    why: &str,
+) -> String {
+    let carried = carried_of(unreadable, selected);
+    let fate = match carried {
+        0 => "This run was not asked for them, so nothing will try to bundle them".to_string(),
+        n => format!(
+            "{n} of them {} in this archive, and bundling {} will fail, so the archive is \
+             written and marked incomplete rather than not written at all",
+            crate::term::agree(n),
+            match n {
+                1 => "it",
+                _ => "them",
+            }
+        ),
+    };
+    format!(
+        "`git` could not read {}: {} ({why}). Each is listed in the inventory with no refs. \
+         {fate}",
+        crate::term::count(unreadable.len(), "repository", "repositories"),
+        listed(unreadable)
+    )
+}
+
+/// How many of these this run will actually carry.
+fn carried_of(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
+    troubled.intersection(selected).count()
+}
+
+/// A few named and the rest counted: identifiers stop being readable well before they stop
+/// being numerous, while the count is what says how much of the home this is about.
+fn listed(rids: &BTreeSet<String>) -> String {
+    const NAMED: usize = 5;
+    let named: Vec<&str> = rids.iter().take(NAMED).map(String::as_str).collect();
+    match rids.len().saturating_sub(named.len()) {
+        0 => named.join(", "),
+        rest => format!("{}, and {rest} more", named.join(", ")),
+    }
 }
 
 /// What a private-only archive carries: what the paperwork calls private, plus anything the
@@ -223,11 +280,23 @@ fn describe(
     node_id: &str,
     seeding: &BTreeMap<&str, &SeedingPolicy>,
     routing: &BTreeMap<String, u64>,
-) -> Result<(RepoRecord, Option<String>)> {
+) -> Result<(RepoRecord, Trouble)> {
     let path = home.repository_path(rid);
-    let refs = git.refs(&path)?;
+    // Not `?`. A repository `git` cannot read is exactly the situation a backup exists for,
+    // and failing here meant a home with one damaged repository could not be archived at all.
+    // `archive_repositories` already refuses to let one bad repository cost the others; this
+    // is the same rule one stage earlier, where it was missing, and where it ran first.
+    let (refs, unreadable) = match git.refs(&path) {
+        Ok(refs) => (refs, None),
+        Err(e) => (Vec::new(), Some(crate::rad::one_line(&e))),
+    };
     let sigrefs = sigrefs_by_peer(&refs);
-    let head = git.head_target(&path)?;
+    let head = match unreadable {
+        None => git.head_target(&path)?,
+        // Asking a repository whose refs would not list where its HEAD points fails the same
+        // way, for the same reason, and there is nothing more to learn from hearing it twice.
+        Some(_) => None,
+    };
 
     let policy = seeding.get(rid);
     let described = match rad {
@@ -268,8 +337,20 @@ fn describe(
             other_seeds: routing.get(rid).copied(),
             bundle: None,
         },
-        unavailable,
+        Trouble {
+            undescribed: unavailable,
+            unreadable,
+        },
     ))
+}
+
+/// What could not be learned about one repository, when something could not. Both halves are
+/// reasons rather than flags, because the line a person acts on is the one that says why.
+struct Trouble {
+    /// `rad` was asked about it and could not answer, so its visibility is unknown.
+    undescribed: Option<String>,
+    /// `git` could not read it, so what is recorded about it is nearly empty.
+    unreadable: Option<String>,
 }
 
 /// The signed refs each peer published, read out of the ref list we already have rather than
@@ -352,9 +433,25 @@ mod tests {
     }
 
     #[test]
+    fn one_warning_stands_for_every_repository_git_could_not_read() {
+        let many: BTreeSet<String> = (0..9).map(|n| format!("rad:z{n:02}")).collect();
+        let warning = unreadable_warning(&many, &many, "fatal: not a git repository");
+
+        // Same ceiling as the line above it: a storage directory that has gone would fail for
+        // every repository at once, and one line each would fill the manifest that the writer
+        // then refuses its own archive over at 8 MiB.
+        assert_eq!(warning.lines().count(), 1);
+        assert!(warning.contains("9 repositories"), "{warning}");
+        assert!(warning.contains("and 4 more"), "{warning}");
+        // And it says what happens next, because "could not read" alone does not tell anyone
+        // whether they still have an archive.
+        assert!(warning.contains("incomplete"), "{warning}");
+    }
+
+    #[test]
     fn one_warning_stands_for_every_repository_rad_could_not_describe() {
         let many: BTreeSet<String> = (0..12).map(|n| format!("rad:z{n:02}")).collect();
-        let warning = undescribed_warning(&many, "rad exited 1");
+        let warning = undescribed_warning(&many, &many, "rad exited 1");
 
         // A `rad` that has stopped answering fails for every repository at once. One line per
         // repository would put thousands of them in `manifest.warnings`, and that manifest is
@@ -368,9 +465,31 @@ mod tests {
     #[test]
     fn a_handful_of_undescribable_repositories_are_all_named() {
         let few = BTreeSet::from(["rad:zA".to_string(), "rad:zB".to_string()]);
-        let warning = undescribed_warning(&few, "rad exited 1");
+        let warning = undescribed_warning(&few, &few, "rad exited 1");
         assert!(warning.contains("rad:zA, rad:zB"), "{warning}");
         assert!(!warning.contains("more"), "{warning}");
+    }
+
+    #[test]
+    fn a_troubled_repository_this_run_does_not_carry_is_not_promised_a_place_in_the_archive() {
+        let troubled = BTreeSet::from(["rad:zA".to_string()]);
+        let nothing = BTreeSet::new();
+
+        // `--tier identity` carries no repositories at all, and `--repos seeded` carries only
+        // what is seeded. Saying "carried as though private" there is the same over-assurance
+        // about archive contents that this warning was added to prevent.
+        let undescribed = undescribed_warning(&troubled, &nothing, "rad exited 1");
+        assert!(undescribed.contains("holds none of them"), "{undescribed}");
+        assert!(!undescribed.contains("carried as though"), "{undescribed}");
+
+        // And nothing bundles a repository that was never selected, so nothing marks the
+        // archive incomplete over it either.
+        let unreadable = unreadable_warning(&troubled, &nothing, "fatal: not a git repository");
+        assert!(
+            unreadable.contains("nothing will try to bundle"),
+            "{unreadable}"
+        );
+        assert!(!unreadable.contains("incomplete"), "{unreadable}");
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub enum Listed {
 }
 
 /// An error as one line, because these end up inside a warning next to a repository id.
-fn one_line(error: &crate::error::Error) -> String {
+pub fn one_line(error: &crate::error::Error) -> String {
     error
         .to_string()
         .lines()
