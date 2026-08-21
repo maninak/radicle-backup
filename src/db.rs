@@ -171,42 +171,78 @@ pub fn alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
 
 /// Open for reading without taking a write lock on someone else's database.
 ///
-/// A database left with a write-ahead log by a stopped node cannot be recovered through a
-/// read-only connection, so that case falls back to a writable one. The fallback is reported
-/// by the caller rather than taken silently, because it means touching a file we said we
-/// would only read.
+/// A database with a write-ahead log cannot be read at all without the `-shm` index beside it,
+/// and SQLite makes that file even through a read-only connection: the flag stops writes to
+/// the database, not to the directory holding it. The file appears in the home whatever this
+/// function promises, so it is recorded here and reported by the caller, rather than found
+/// afterwards by the person whose home it is.
+///
+/// There used to be a fallback here to a writable connection, for "a log a read-only
+/// connection cannot recover". It never ran, and would not have helped if it had.
+/// `open_with_flags` is lazy, so a read-only open of a database whose log cannot be indexed
+/// succeeds and the first query is what fails; the fallback sat behind an `Err` arm that a
+/// write-ahead log never reaches. And the only case where the read genuinely fails is a
+/// directory this process may not write, where a writable connection cannot make the `-shm`
+/// any more than a read-only one can.
 fn open_read_only(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    match Connection::open_with_flags(path, flags) {
-        Ok(db) => Ok(db),
-        Err(read_only_error) => {
-            let db = Connection::open(path).map_err(|_| Error::Sqlite(read_only_error))?;
-            record_writable_open(path);
-            Ok(db)
-        }
+    let db = Connection::open_with_flags(path, flags).map_err(Error::Sqlite)?;
+    // After the open, because the open is what creates the file. An open that failed left
+    // nothing behind, and warning about it would send somebody looking for a file that is
+    // not there.
+    if has_log(path) {
+        record_touched(path);
     }
+    // Opening reads nothing, so this is the first call that actually goes through the log.
+    // Asked here so a database that cannot be read says which one it is, instead of surfacing
+    // later as a bare "unable to open database file" from whichever query happened to run.
+    db.query_row("select count(*) from sqlite_schema", [], |_| Ok(()))
+        .map_err(|e| Error::Malformed {
+            path: path.to_path_buf(),
+            reason: format!("this database could not be read: {e}"),
+        })?;
+    Ok(db)
 }
 
-/// Databases this run had to open writable after promising to read them.
+/// Whether a write-ahead log sits beside this database, which is what makes reading it write.
+fn has_log(path: &Path) -> bool {
+    let mut log = path.as_os_str().to_os_string();
+    log.push("-wal");
+    Path::new(&log).exists()
+}
+
+/// Files this run created inside a home it promised only to read.
 ///
 /// Process-wide rather than threaded back through four return types, because that is the shape
-/// of the fact: somewhere in this run, a file we said we would only read was opened for
-/// writing. The command layer drains this once and says so, which is what the doc comment
-/// above has always claimed happens.
-static OPENED_WRITABLE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+/// of the fact: somewhere in this run, reading left something behind. The command layer drains
+/// this once and says so.
+static TOUCHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-fn record_writable_open(path: &Path) {
-    if let Ok(mut opened) = OPENED_WRITABLE.lock() {
-        opened.push(path.to_path_buf());
+fn record_touched(path: &Path) {
+    if let Ok(mut touched) = TOUCHED.lock()
+        && !touched.iter().any(|seen| seen == path)
+    {
+        touched.push(path.to_path_buf());
     }
 }
 
 /// Take the list of such databases, leaving it empty.
-pub fn drain_writable_opens() -> Vec<PathBuf> {
-    OPENED_WRITABLE
+pub fn drain_touched() -> Vec<PathBuf> {
+    TOUCHED
         .lock()
-        .map(|mut opened| std::mem::take(&mut *opened))
+        .map(|mut touched| std::mem::take(&mut *touched))
         .unwrap_or_default()
+}
+
+/// What to say about one of them. In one place because it is both printed by the run and
+/// recorded in the manifest of a backup, and those two must not drift apart.
+pub fn touched_warning(path: &Path) -> String {
+    format!(
+        "reading {} created the `-shm` index beside it: a database with a write-ahead log \
+         cannot be read without one, and read-only stops writes to the database, not to the \
+         directory it sits in",
+        path.display()
+    )
 }
 
 #[cfg(test)]
@@ -232,6 +268,49 @@ mod tests {
              insert into following values ('z6MkCCC', null, 'allow');",
         )
         .expect("fixture schema applies");
+    }
+
+    #[test]
+    fn reading_a_database_with_a_log_beside_it_is_recorded_as_touching_the_home() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-wal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+
+        let quiet = dir.join("quiet.db");
+        Connection::open(&quiet)
+            .expect("a database is creatable")
+            .execute("create table t (a)", [])
+            .expect("a table is creatable");
+
+        // Held open, because closing checkpoints the log away and takes the `-wal` with it.
+        let noisy = dir.join("noisy.db");
+        let live = Connection::open(&noisy).expect("a database is creatable");
+        live.pragma_update(None, "journal_mode", "wal")
+            .expect("the journal mode is settable");
+        live.execute("create table t (a)", [])
+            .expect("a table is creatable");
+        assert!(
+            noisy.with_extension("db-wal").exists(),
+            "the log must be hot"
+        );
+
+        let _ = drain_touched();
+        open_read_only(&quiet).expect("a database with no log reads");
+        open_read_only(&noisy).expect("a database with a log reads");
+        let touched = drain_touched();
+
+        // Reading the one with a log creates its `-shm` in the home. That happened before and
+        // was reported as nothing at all, because the recording sat behind a fallback that a
+        // write-ahead log never reaches.
+        assert!(touched.contains(&noisy), "{touched:?}");
+        assert!(!touched.contains(&quiet), "{touched:?}");
+        assert!(
+            touched_warning(&noisy).contains("-shm"),
+            "the warning has to name what appeared"
+        );
+
+        drop(live);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

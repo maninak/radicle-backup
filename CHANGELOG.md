@@ -54,6 +54,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - The refusal over an oversized manifest names a remedy that exists: `--repos` selects a category, and never could cover "part of the home".
 - A restore writes the secret key, the public key and `config.json` beside their targets and renames them into place. A crash or a full disk part way through used to leave a home holding neither the old identity nor the new one, because the old file was unlinked before the first byte of the new one was written.
 - `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
+- Reading a node database that has a write-ahead log beside it creates a `-shm` file in the home, and the run now says so. It was reported as nothing at all, because the recording sat behind a writable-connection fallback that a write-ahead log never reaches. That fallback is gone: it could not run, and could not have helped.
+- A node database that cannot be read names itself, instead of surfacing as a bare `unable to open database file` from whichever query happened to run first.
 
 ### Security
 

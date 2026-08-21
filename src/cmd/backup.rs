@@ -248,15 +248,11 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
         SCRIPT_MODE,
     )?;
 
-    // Drained here rather than at each read, because a database opened writable is a fact
+    // Drained here rather than at each read, because a file created inside the home is a fact
     // about the whole run and the archive should carry it: a reader of this manifest deserves
-    // to know that taking it touched a file this tool says it only reads.
-    for path in crate::db::drain_writable_opens() {
-        let warning = format!(
-            "{} could not be opened read-only, so it was opened for writing to recover its \
-             write-ahead log",
-            path.display()
-        );
+    // to know that taking it wrote into a home this tool says it only reads.
+    for path in crate::db::drain_touched() {
+        let warning = crate::db::touched_warning(&path);
         ctx.term.warn(&warning);
         warnings.push(warning);
     }

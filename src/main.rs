@@ -106,16 +106,19 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
 
     let outcome = dispatch(&ctx, cli);
 
-    // Every verb, not just `backup`. `db.rs` promises in its own doc comment that a database
-    // it could not open read-only is reported, and only `backup` was draining that list, so
-    // `doctor`, `verify`, `diff` and `restore` all touched files they said they would only
-    // read and said nothing. `backup` drains it first, to put the same fact in the manifest.
-    for path in db::drain_writable_opens() {
-        ctx.term.warn(&format!(
-            "{} could not be opened read-only, so it was opened for writing to recover its \
-             write-ahead log",
-            path.display()
-        ));
+    // Every verb, not just `backup`. Reading a node database beside a write-ahead log leaves
+    // a file in the home, and only `backup` was draining that list, so `doctor`, `verify`,
+    // `diff` and `restore` all wrote into a home they said they would only read and said
+    // nothing. `backup` drains it first, to put the same fact in the manifest.
+    // Set off by a blank line, because this lands after whatever the verb printed last. Under
+    // `doctor` that is the tally, and a `!` line flush against it reads as a tenth check the
+    // tally forgot to count rather than as a note about the run.
+    let touched = db::drain_touched();
+    if !touched.is_empty() {
+        ctx.term.blank();
+    }
+    for path in touched {
+        ctx.term.warn(&db::touched_warning(&path));
     }
     outcome
 }

@@ -102,7 +102,7 @@ rad backup prune --keep 7               # delete the older ones, keeping the new
 
 **`verify` and `show` can be given no archive**, and then act on the newest archive of this identity they can find, saying on stderr which one that was. They look in `RAD_BACKUP_DIR`, then wherever the last archive actually went, then the working directory. Naming a path is always allowed and always wins. `restore` is the exception and always wants an explicit path, because restoring the wrong archive is not a mistake to default into.
 
-`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception announces itself: a database that cannot be opened read-only is opened writable to recover its write-ahead log, and the run says so.
+`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception announces itself: reading a node database that has a write-ahead log beside it leaves a `-shm` index file next to it in your home, and the run says which file.
 
 Every knob that is not a one-off is an environment variable, so a run is configured the way `rad` itself is. They are listed under [Configuration](#configuration).
 
