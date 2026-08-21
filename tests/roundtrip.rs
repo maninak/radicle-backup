@@ -872,7 +872,66 @@ fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
 /// they stayed in step, so anything added to one side only, the way `repos/*.config` or the
 /// HEAD restore could have been, would have gone unnoticed until somebody needed the other.
 #[test]
-#[cfg(unix)]
+fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
+    let fixture = Fixture::create("script-rid");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a plaintext archive");
+
+    let extracted = fixture.path("extracted");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let archive = std::fs::read(only_archive(&backups)).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
+    std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
+    let out = Command::new("tar")
+        .args(["-xf", "archive.tar"])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&out, "extracting the archive");
+
+    // A name no `rad` would mint, planted the way a hostile archive would carry it. The tool
+    // refuses such an archive outright; the script has to refuse the one bundle and go on,
+    // because it is the path that runs when the tool is not there to refuse anything.
+    std::fs::write(extracted.join("repos/a..b.bundle"), b"not a bundle")
+        .expect("the planted bundle is writable");
+
+    let target = fixture.path("by-script");
+    let out = Command::new("sh")
+        .args(["restore.sh", &target.to_string_lossy()])
+        .current_dir(&extracted)
+        .env("HOME", fixture.path("fake-home"))
+        .env("RAD_HOME", fixture.path("decoy-home"))
+        .output()
+        .expect("the restore script runs");
+    assert_success(&out, "restoring with a planted bundle present");
+    assert!(
+        stderr(&out).contains("is not a repository id"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !target.join("storage/a..b").exists(),
+        "the script made a repository out of a name that is not an id"
+    );
+
+    // And the real repository still came back, so this is a skip and not a bail-out.
+    assert!(target.join("storage").join(RID).is_dir());
+}
+
+#[test]
 fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
     let fixture = Fixture::create("parity");
     let backups = fixture.path("backups");

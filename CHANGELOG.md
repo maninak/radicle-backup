@@ -50,6 +50,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Security
 
 - `paper --output` no longer takes its path from `RAD_BACKUP_DIR`. A recovery sheet carrying the secret key was being written into the directory backups go to, which is usually the directory that gets synced off the machine.
+- - The shipped `restore.sh` skips a bundle whose name is not a repository id, rather than trusting the name it was handed. `rad backup` already refuses such an archive; the script is what runs when `rad backup` is not there.
 
 ## [0.1.0] - 2026-08-16
 

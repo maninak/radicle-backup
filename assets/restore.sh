@@ -48,6 +48,17 @@ restored=0
 for bundle in repos/*.bundle; do
 	[ -e "$bundle" ] || break
 	rid=$(basename "$bundle" .bundle)
+	# A real id is base58 and nothing else. `rad-backup` refuses an archive whose manifest
+	# says otherwise, and this script is what runs when `rad-backup` is not there. Today the
+	# glob above already keeps `..` out, because a leading dot does not match `*`; this says
+	# so on purpose, so that reading ids from manifest.json instead, the way HEAD is read
+	# below, cannot quietly drop it.
+	case "$rid" in
+	'' | *[!A-Za-z0-9]*)
+		echo "skipping $bundle: '$rid' is not a repository id" >&2
+		continue
+		;;
+	esac
 	target="$RAD_HOME/storage/$rid"
 
 	git init --bare --quiet "$target"
