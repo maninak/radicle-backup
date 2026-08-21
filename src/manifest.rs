@@ -243,6 +243,30 @@ impl RepoRecord {
 
 #[cfg(test)]
 mod tests {
+    /// The sample in `ARCHIVE-FORMAT.md` is the spec a stranger reads to open an archive by
+    /// hand. Nothing checked that it still parses as a `Manifest`, so a renamed field would
+    /// have left the document describing a format this tool no longer writes.
+    #[test]
+    fn the_sample_manifest_in_the_format_document_still_parses() {
+        let document = include_str!("../ARCHIVE-FORMAT.md");
+        let sample = document
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the format document shows a manifest");
+
+        let manifest: super::Manifest =
+            serde_json::from_str(sample).expect("the sample parses as a manifest");
+
+        // Read back, so a manifest that parsed into all-defaults cannot pass for one that
+        // matched.
+        assert_eq!(manifest.tool.name, "rad-backup");
+        assert_eq!(manifest.identity.alias.as_deref(), Some("alice"));
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.repos.len(), 1);
+        assert_eq!(manifest.repos[0].name.as_deref(), Some("notes"));
+    }
+
     use super::*;
 
     #[test]
