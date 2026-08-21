@@ -4,6 +4,10 @@
 //! the machine that the tool does not already need: `git`, and nothing else. The identity
 //! comes from a fixed mnemonic, which makes every run produce the same DID and makes a
 //! failure reproducible from the test name alone.
+//!
+//! Two things are stood in for, because a test cannot have them: `rad`, by a shell script the
+//! fixture writes (see `stub_rad`), and the network it would talk to. Everything else is the
+//! real thing, down to the shipped `restore.sh` being run by `sh`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
