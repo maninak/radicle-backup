@@ -755,6 +755,128 @@ fn a_dry_run_asked_for_json_answers_with_json() {
     );
 }
 
+/// The shipped script and this tool are two implementations of one restore, kept in step by
+/// policy (guardrail: an archive never depends on this tool to be read). Nothing enforced that
+/// they stayed in step, so anything added to one side only, the way `repos/*.config` or the
+/// HEAD restore could have been, would have gone unnoticed until somebody needed the other.
+#[test]
+#[cfg(unix)]
+fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
+    let fixture = Fixture::create("parity");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a plaintext archive");
+    let archive = only_archive(&backups);
+
+    let by_tool = fixture.path("by-tool");
+    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &by_tool);
+    assert_success(&out, "restoring with this tool");
+
+    let extracted = fixture.path("extracted");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let bytes = std::fs::read(&archive).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(bytes.as_slice(), &mut tarball).expect("the archive decompresses");
+    std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
+    let out = Command::new("tar")
+        .args(["-xf", "archive.tar"])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&out, "extracting the archive");
+
+    let by_script = fixture.path("by-script");
+    let out = Command::new("sh")
+        .args(["restore.sh", &by_script.to_string_lossy()])
+        .current_dir(&extracted)
+        .env("HOME", fixture.path("fake-home"))
+        .env("RAD_HOME", fixture.path("decoy-home"))
+        .output()
+        .expect("the restore script runs");
+    assert_success(&out, "restoring with the shipped script");
+
+    // Sqlite's own scratch files are not part of either restore: whichever side opens a
+    // database first makes them, and they say nothing about what was put back.
+    let names = |home: &Path| -> Vec<String> {
+        let mut found: Vec<String> = files_under(home)
+            .iter()
+            .filter_map(|path| path.strip_prefix(home).ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(
+        names(&by_tool),
+        names(&by_script),
+        "the two restores put back different sets of files"
+    );
+
+    for name in ["keys/radicle", "keys/radicle.pub", "config.json"] {
+        assert_eq!(
+            std::fs::read(by_tool.join(name)).expect("this tool restored it"),
+            std::fs::read(by_script.join(name)).expect("the script restored it"),
+            "{name} differs between the two restores"
+        );
+    }
+    assert_eq!(
+        mode(&by_tool.join("keys/radicle")) & 0o777,
+        mode(&by_script.join("keys/radicle")) & 0o777,
+        "the private key lands at different modes"
+    );
+
+    let storage = |home: &Path| {
+        home.join("storage")
+            .join(RID)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let refs_of = |home: &Path| {
+        let mut lines: Vec<String> = git(&["--git-dir", &storage(home), "for-each-ref"], home)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        lines.sort();
+        lines
+    };
+    assert_eq!(
+        refs_of(&by_tool),
+        refs_of(&by_script),
+        "the two restores rebuilt different refs"
+    );
+    assert_eq!(
+        git(
+            &["--git-dir", &storage(&by_tool), "symbolic-ref", "HEAD"],
+            &by_tool
+        ),
+        git(
+            &["--git-dir", &storage(&by_script), "symbolic-ref", "HEAD"],
+            &by_script
+        ),
+        "the two restores left HEAD pointing at different places"
+    );
+
+    let seeded = |home: &Path| -> i64 {
+        rusqlite::Connection::open(home.join("node/policies.db"))
+            .expect("the policy database opens")
+            .query_row("select count(*) from seeding", [], |row| row.get(0))
+            .expect("the seeding table survives")
+    };
+    assert_eq!(seeded(&by_tool), seeded(&by_script));
+}
+
 /// Every file under a directory, so a test can look at what a run left behind rather than at
 /// what it meant to leave behind.
 fn files_under(directory: &Path) -> Vec<PathBuf> {
