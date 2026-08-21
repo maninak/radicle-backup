@@ -917,7 +917,7 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
 
 #[test]
 fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
-    let fixture = Fixture::create("rehearsal");
+    let fixture = Fixture::create("dry-run");
     let backups = fixture.path("backups");
     let dir = backups.to_string_lossy().into_owned();
 
@@ -925,7 +925,7 @@ fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
         &["--dry-run", "--tier", "full", "--output", &dir],
         &fixture.home(),
     );
-    assert_success(&out, "rehearsing a backup");
+    assert_success(&out, "a dry run");
     assert!(
         stderr(&out).contains("nothing was written"),
         "a dry run must say that it wrote nothing: {}",
@@ -939,14 +939,14 @@ fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
 
 #[test]
 fn a_dry_run_asked_for_json_answers_with_json() {
-    let fixture = Fixture::create("rehearsal-json");
+    let fixture = Fixture::create("dry-run-json");
     let dir = fixture.path("backups").to_string_lossy().into_owned();
 
     let out = fixture.run(
         &["--dry-run", "--json", "--tier", "full", "--output", &dir],
         &fixture.home(),
     );
-    assert_success(&out, "rehearsing a backup as json");
+    assert_success(&out, "a dry run asked for json");
 
     // `--json` was honoured by every reporting path except this one, which printed the human
     // table on stdout. A consumer got something that parses as far as the first line.

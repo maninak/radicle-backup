@@ -183,11 +183,11 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
         }
     };
     let next = systemctl
-        .raw_output(&["--user", "show", TIMER, "-p", "NextElapseUSecRealtime"])?
+        .answer(&["--user", "show", TIMER, "-p", "NextElapseUSecRealtime"])?
         .and_then(|out| out.trim().split_once('=').map(|(_, when)| when.to_string()))
         .filter(|when| !when.is_empty());
     let last = systemctl
-        .raw_output(&["--user", "show", SERVICE, "-p", "Result"])?
+        .answer(&["--user", "show", SERVICE, "-p", "Result"])?
         .and_then(|out| out.trim().split_once('=').map(|(_, what)| what.to_string()))
         .filter(|what| !what.is_empty() && what != "success");
 

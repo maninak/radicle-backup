@@ -85,7 +85,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
 
     // Asked for before the node is stopped, not after. Asking afterwards left the node down
     // for as long as it took somebody to find their passphrase, and a run they then abandoned
-    // had stopped it for nothing. A rehearsal writes no archive, so it is never asked.
+    // had stopped it for nothing. A dry run writes no archive, so it is never asked.
     let encryption = match args.dry_run {
         true => None,
         false => Some(encryption_for(ctx, args)?),
@@ -110,8 +110,8 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
     warnings.extend(inventory.warnings.iter().cloned());
 
     if args.dry_run {
-        rehearse(ctx, &inventory, tier, selection, &warnings)?;
-        // `quiesce` already ran, so a rehearsal with `--stop-node` really did stop the node.
+        dry_run(ctx, &inventory, tier, selection, &warnings)?;
+        // `quiesce` already ran, so a dry run with `--stop-node` really did stop the node.
         // Put it back before returning, or `--dry-run` leaves the thing it promised not to
         // touch switched off.
         node.restart();
@@ -121,7 +121,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
         });
     }
 
-    let encryption = encryption.expect("a run that is not a rehearsal has returned by now");
+    let encryption = encryption.expect("a run that is not a dry run has returned by now");
     let now = jiff::Timestamp::now();
     let destination = destination(
         args,
@@ -302,7 +302,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
 /// The sizes are what the repositories occupy in storage, not what the bundles will weigh: a
 /// bundle is compressed and holds only reachable objects, so the real archive comes out
 /// smaller. An over-estimate is the safe direction for "will this fit".
-fn rehearse(
+fn dry_run(
     ctx: &Ctx,
     inventory: &Inventory,
     tier: Tier,

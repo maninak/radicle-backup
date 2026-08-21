@@ -61,7 +61,7 @@ impl Git {
 
     /// The object a ref points at, or `None` when the ref does not exist.
     pub fn ref_oid(&self, git_dir: &Path, name: &str) -> Result<Option<String>> {
-        let out = self.tool.raw_output(&[
+        let out = self.tool.answer(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "rev-parse".as_ref(),
@@ -77,7 +77,7 @@ impl Git {
     /// What `HEAD` is a symbolic ref to, which a bundle does not carry and a restore must set
     /// back by hand.
     pub fn head_target(&self, git_dir: &Path) -> Result<Option<String>> {
-        let out = self.tool.raw_output(&[
+        let out = self.tool.answer(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "symbolic-ref".as_ref(),

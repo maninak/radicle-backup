@@ -82,7 +82,11 @@ impl Tool {
     /// Run and capture stdout, treating a non-zero exit as "no answer" rather than as a
     /// failure. For queries whose absence is a legitimate result, such as a ref that does not
     /// exist.
-    pub fn raw_output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
+    ///
+    /// Named for what it returns rather than for the capture, because `raw` beside it is the
+    /// plumbing every one of these sits on and sharing that word said the wrong thing about
+    /// which of them is the low-level one.
+    pub fn answer<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
         let out = self.raw(args)?;
         if !out.status.success() {
             return Ok(None);
@@ -94,7 +98,7 @@ impl Tool {
     ///
     /// For programs that print their answer and then exit non-zero to express it, such as
     /// `systemctl is-enabled`, which writes "disabled" and exits 1. Reading those through
-    /// `raw_output` threw the word away and left the caller unable to tell a real answer from
+    /// `answer` threw the word away and left the caller unable to tell a real answer from
     /// a systemd that could not be reached at all.
     pub fn spoken<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Spoken> {
         let out = self.raw(args)?;
