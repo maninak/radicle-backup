@@ -34,18 +34,20 @@ pub struct Cli {
 }
 
 /// The flags that shape an archive, and so mean nothing to any other verb.
-const CREATE_ONLY: [&str; 10] = [
-    "output",
-    "tier",
-    "repos",
-    "stdout",
-    "plaintext",
-    "recipient",
-    "stop_node",
-    "with_node_db",
-    "keep",
-    "dry_run",
-];
+///
+/// Asked of clap rather than written out. It was a fixed-length array kept by hand, so every
+/// new `create` flag had to be remembered in a second place, and one that was not simply
+/// stopped being recognised here: the flag was accepted before the verb, quietly ignored, and
+/// nobody was told where it belonged.
+fn create_only() -> Vec<String> {
+    use clap::CommandFactory as _;
+
+    Create::command()
+        .get_arguments()
+        .map(|arg| arg.get_id().to_string())
+        .filter(|id| id != "help")
+        .collect()
+}
 
 /// Parse the command line, then enforce the one rule clap cannot state here.
 ///
@@ -116,7 +118,8 @@ struct Invocation {
 /// there for every run, and failing `doctor` because of it would be absurd.
 fn misplaced_create_flag(matches: &ArgMatches) -> Option<String> {
     let verb = matches.subcommand_name()?;
-    let id = CREATE_ONLY
+    let flags = create_only();
+    let id = flags
         .iter()
         .find(|id| matches.value_source(id) == Some(ValueSource::CommandLine))?;
     let flag = id.replace('_', "-");
@@ -645,6 +648,27 @@ mod tests {
         // Accepted, they interleaved: the JSON report went out after the archive bytes, so
         // `rad-backup --stdout --json > x.age` produced a file age refuses at restore time.
         assert!(Cli::try_parse_from(["rad-backup", "--stdout", "--json"]).is_err());
+    }
+
+    #[test]
+    fn the_archive_shaping_flags_are_the_ones_create_declares_and_no_others() {
+        let flags = create_only();
+
+        // Derived from `Create`, not from the top-level command: a global belongs before any
+        // verb, and reporting `--home doctor` as a misplaced archive flag would be worse than
+        // the drift this replaced.
+        for global in ["home", "json", "yes", "quiet", "passphrase_file"] {
+            assert!(
+                !flags.iter().any(|id| id == global),
+                "{global} in {flags:?}"
+            );
+        }
+        for shaping in ["tier", "repos", "recipient", "stdout", "dry_run"] {
+            assert!(
+                flags.iter().any(|id| id == shaping),
+                "{shaping} in {flags:?}"
+            );
+        }
     }
 
     #[test]
