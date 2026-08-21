@@ -1,8 +1,8 @@
 //! Showing what is inside an archive.
 
-use crate::archive::Reader;
 use crate::cli::Target;
 use crate::cmd::Ctx;
+use crate::container::Reader;
 use crate::error::Result;
 use crate::manifest::Manifest;
 use crate::term;

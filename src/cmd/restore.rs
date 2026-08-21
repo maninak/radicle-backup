@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
 
-use crate::archive::Reader;
 use crate::cli::Restore;
 use crate::cmd::{Ctx, Scratch};
+use crate::container::Reader;
 use crate::crypt;
 use crate::db::Policies;
 use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
@@ -936,7 +936,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_private_copy_lands_with_owner_only_permissions() {
-        use crate::archive::SECRET_MODE;
+        use crate::container::SECRET_MODE;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!("rad-backup-restore-{}", std::process::id()));

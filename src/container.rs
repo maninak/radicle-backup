@@ -1,5 +1,8 @@
 //! The archive container: a tar of plain files, compressed with zstd, then encrypted with age.
 //!
+//! Named for the container rather than for archives, because `archives.rs` beside it is a
+//! different subject: what this identity's archives are called and where they are found.
+//!
 //! Layers are ordinary formats in an ordinary order on purpose. Somebody with no copy of this
 //! tool, five years from now, can recover an identity with `age`, `tar` and `git` alone, and
 //! the instructions for doing that ride inside the archive.

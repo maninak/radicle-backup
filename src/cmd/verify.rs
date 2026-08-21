@@ -7,9 +7,9 @@
 
 use std::path::Path;
 
-use crate::archive::Reader;
 use crate::cli::Verify;
 use crate::cmd::{Ctx, Scratch};
+use crate::container::Reader;
 use crate::db;
 use crate::error::{EXIT_CHECKS_FAILED, Result};
 use crate::git::Git;
