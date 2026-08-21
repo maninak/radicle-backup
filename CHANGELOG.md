@@ -15,6 +15,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - `create --stdout --json` is refused rather than writing the archive and the report into the same stream.
 - `rad backup --tier full create` is refused with the flag's place, not with `--tier` shapes an archive, and `create` does not create one.
 - - `rad backup --output ... schedule` is told that the flag belongs after the verb, instead of that `schedule` does not create an archive, which reads as a denial of a flag it plainly has.
+- A `create` flag written before the verb is now told where it belongs.
+- The marker in a generated systemd unit said edits would not be replaced, which is the opposite of what the next `schedule` run does to a file carrying it. The environment file, which every run rewrites in full, no longer carries that marker at all.
+- `schedule` no longer accepts a `RAD_BACKUP_PASSPHRASE` exported in your shell as proof that the timer can get a passphrase: systemd starts the service from its own environment. One that systemd itself holds still counts, so a working timer is not refused.
+- A binary or output path containing a space now produces a unit systemd can run and a crontab line a shell can run.
+- `schedule --status` tells a timer that was never installed from a systemd that could not be asked, instead of reporting `disabled` on a headless machine whose timer runs every night.
 
 ### Security
 

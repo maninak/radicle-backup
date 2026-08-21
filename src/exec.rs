@@ -28,6 +28,12 @@ enum Secrets {
     KeyPassphrase,
 }
 
+/// What a program said, kept apart from whether it succeeded.
+pub struct Spoken {
+    pub stdout: String,
+    pub stderr: String,
+}
+
 /// A program we shell out to, with the environment it needs to see.
 pub struct Tool {
     program: String,
@@ -82,6 +88,20 @@ impl Tool {
             return Ok(None);
         }
         Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    }
+
+    /// Run and keep what the program said, whatever it exited with.
+    ///
+    /// For programs that print their answer and then exit non-zero to express it, such as
+    /// `systemctl is-enabled`, which writes "disabled" and exits 1. Reading those through
+    /// `raw_output` threw the word away and left the caller unable to tell a real answer from
+    /// a systemd that could not be reached at all.
+    pub fn spoken<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Spoken> {
+        let out = self.raw(args)?;
+        Ok(Spoken {
+            stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        })
     }
 
     /// Run and report only whether it succeeded. For probes where a non-zero exit is an
