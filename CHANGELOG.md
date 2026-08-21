@@ -56,6 +56,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
 - Reading a node database that has a write-ahead log beside it creates a `-shm` file in the home, and the run now says so. It was reported as nothing at all, because the recording sat behind a writable-connection fallback that a write-ahead log never reaches. That fallback is gone: it could not run, and could not have helped.
 - A node database that cannot be read names itself, instead of surfacing as a bare `unable to open database file` from whichever query happened to run first.
+- An archive whose manifest will not parse names the archive, instead of surfacing as serde's own `expected value at line 1 column 1` with no file attached.
 
 ### Security
 

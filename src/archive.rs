@@ -283,7 +283,15 @@ impl<'a> Reader<'a> {
                 }
                 let mut json = String::new();
                 entry.read_to_string(&mut json).map_err(Error::Bare)?;
-                manifest = Some(serde_json::from_str::<Manifest>(&json)?);
+                // Named, because serde alone says "expected value at line 1 column 1" and
+                // nothing else, and the file somebody is holding is the whole question when
+                // an archive will not open.
+                manifest = Some(serde_json::from_str::<Manifest>(&json).map_err(|e| {
+                    Error::NotAnArchive {
+                        path: path.to_path_buf(),
+                        reason: format!("{MANIFEST_ENTRY} is not a manifest this reads: {e}"),
+                    }
+                })?);
                 continue;
             }
 
@@ -609,6 +617,39 @@ mod tests {
         let mut encoder = zstd::Encoder::new(file, 1).expect("encoder opens");
         encoder.write_all(&tar).expect("the tar compresses");
         encoder.finish().expect("the encoder closes");
+    }
+
+    #[test]
+    fn an_archive_whose_manifest_will_not_parse_says_which_archive() {
+        let dir = scratch_dir("bad-manifest");
+        let path = dir.join("archive.tar.zst");
+
+        let junk = b"this is not a manifest";
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = header(junk.len() as u64, DOC_MODE);
+        builder
+            .append_data(&mut header, MANIFEST_ENTRY, junk.as_slice())
+            .expect("the entry appends");
+        let tar = builder.into_inner().expect("the tar closes");
+        let file = std::fs::File::create(&path).expect("archive is creatable");
+        let mut encoder = zstd::Encoder::new(file, 1).expect("encoder opens");
+        encoder.write_all(&tar).expect("the tar compresses");
+        encoder.finish().expect("the encoder closes");
+
+        let failed = Reader::open(&path, None, &[])
+            .expect("the outer layers still open")
+            .scan(&path);
+        let failed = match failed {
+            Ok(_) => panic!("a manifest that is not json must not scan"),
+            Err(e) => e,
+        };
+
+        // It used to surface as serde's own "expected value at line 1 column 1", which names
+        // no file at all. The archive somebody is holding is the whole question here.
+        let said = failed.to_string();
+        assert!(said.contains("archive.tar.zst"), "{said}");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
