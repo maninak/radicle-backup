@@ -265,12 +265,24 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
     writer.finish(&mut manifest)?;
     let path = destination.commit(&ctx.term)?;
 
-    if let Some(path) = &path {
-        write_sidecar(path, &manifest, &encryption, archived)?;
+    // Past this point the archive exists and is complete, so nothing below may fail the
+    // run: a full disk that stopped the sidecar being written used to exit 1 over a good
+    // archive, and skip both the state record and the report that names it. The same
+    // reasoning `remember` states for itself, applied to everything after the commit.
+    if let Some(path) = &path
+        && let Err(e) = write_sidecar(path, &manifest, &encryption, archived)
+    {
+        ctx.term.warn(&format!(
+            "the archive is written, but its note beside it is not: {e}"
+        ));
     }
     node.restart();
-    if let (Some(path), Some(keep)) = (&path, args.keep) {
-        prune(ctx, path, &manifest, keep)?;
+    if let (Some(path), Some(keep)) = (&path, args.keep)
+        && let Err(e) = prune(ctx, path, &manifest, keep)
+    {
+        ctx.term.warn(&format!(
+            "the archive is written, but older ones were not swept: {e}"
+        ));
     }
     remember(ctx, &manifest, path.as_deref(), &node_id, &encryption);
 
@@ -396,7 +408,6 @@ fn remember(
     }
 }
 
-/// What the node was doing, and what we did about it.
 /// A node this run may have stopped, and the promise to put it back.
 ///
 /// A guard rather than a pair of booleans and a call at the end, because `run` has about
@@ -483,7 +494,10 @@ fn quiesce<'a>(
         )
     })?;
     ctx.term.step("stopping the node");
-    rad.stop_node()?;
+    // The exit status, not just the spawn. A `rad node stop` that fails outright used to be
+    // discarded here, and the run then spent the whole timeout watching a socket that was
+    // never going to close before blaming the node for not stopping.
+    let stopped = rad.stop_node()?;
 
     // The guard exists from the moment the stop is asked for, not from the moment it is
     // confirmed. `rad node stop` can succeed and the socket still be up when the deadline
@@ -495,19 +509,38 @@ fn quiesce<'a>(
         stopped_by_backup: true,
     };
 
-    let deadline = Instant::now() + NODE_STOP_TIMEOUT;
-    while Instant::now() < deadline {
+    // A stop that failed outright is asked about once and no more: there is nothing in
+    // flight to wait for, and spending the whole timeout on it only delays the refusal by
+    // twenty seconds. A stop that was accepted gets the full deadline, because the node closes
+    // its socket when it is done serving and that is not instant.
+    let deadline = Instant::now()
+        + if stopped {
+            NODE_STOP_TIMEOUT
+        } else {
+            Duration::ZERO
+        };
+    loop {
         if ctx.home.node_state() == NodeState::Stopped {
             return Ok(node);
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         std::thread::sleep(NODE_STOP_POLL);
     }
     // It never went down, so there is nothing this run stopped and nothing to put back.
     node.stopped_by_backup = false;
-    Err(Error::refused(
-        "the node is still serving its control socket after being asked to stop",
-        "stop it by hand and run again, or run without --stop-node",
-    ))
+    Err(if stopped {
+        Error::refused(
+            "the node is still serving its control socket after being asked to stop",
+            "stop it by hand and run again, or run without --stop-node",
+        )
+    } else {
+        Error::refused(
+            "`rad node stop` failed, and the node is still serving its control socket",
+            "read what it said above, stop it by hand, or run without --stop-node",
+        )
+    })
 }
 
 fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
@@ -702,13 +735,13 @@ fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &
     Ok(())
 }
 
-/// Bundle each selected repository and record what went in.
 /// How many repositories reached the archive, and how many were selected but could not.
 struct Bundled {
     archived: usize,
     dropped: usize,
 }
 
+/// Bundle each selected repository and record what went in.
 fn archive_repositories(
     ctx: &Ctx,
     writer: &mut Writer,
