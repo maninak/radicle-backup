@@ -125,9 +125,11 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     install(ctx, &staging)?;
     let restored = restore_repositories(ctx, &staging, &manifest)?;
 
-    if args.replay_policies {
-        replay_policies(ctx, &staging)?;
-    }
+    let policies_missed = if args.replay_policies {
+        replay_policies(ctx, &staging)?
+    } else {
+        Vec::new()
+    };
 
     // The comparison is the LAST thing, and its failure must not cost the record of what was
     // restored. Written before the `?`, because the identity, the repositories and the
@@ -142,7 +144,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     remember(ctx, &manifest, &restored.repos, archive, encrypted);
     let standings = comparison?;
 
-    report(ctx, &manifest, &restored, &standings)
+    report(ctx, &manifest, &restored, &standings, &policies_missed)
 }
 
 /// Record the archive this home came from.
@@ -442,7 +444,20 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
         git.init_bare(&target)?;
         git.unbundle(&target, &bundle)?;
         if let Some(head) = &repo.head {
-            git.set_head(&target, head)?;
+            // A skip rather than a failure, and the same one the shipped script makes: the
+            // history is already unbundled at this point, and a pointer the manifest got
+            // wrong must not cost the refs it was supposed to point at.
+            if git::names_a_ref(head) {
+                git.set_head(&target, head)?;
+            } else {
+                // Not a failed check, unlike a policy that did not go back: `HEAD` is a
+                // pointer git rebuilds from the default branch, and no signed history rides
+                // on it, so a run that lost one is still a complete restore.
+                ctx.term.warn(&format!(
+                    "{}: `{head}` does not name a ref, so it came back without its HEAD",
+                    repo.display_name()
+                ));
+            }
         }
         let config = staging.join(git::config_entry(&repo.rid));
         if config.is_file() {
@@ -632,12 +647,12 @@ fn compare_with_network(
 }
 
 /// Re-apply seeding and following through `rad`, for a Radicle whose schema has moved on.
-fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<()> {
+fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     let path = staging.join("policies.json");
     if !path.is_file() {
         ctx.term
             .warn("this archive has no policies.json, so there was nothing to replay");
-        return Ok(());
+        return Ok(Vec::new());
     }
     let rad = Rad::new(ctx.home.path());
     if !rad.is_available() {
@@ -651,17 +666,72 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<()> {
     let policies: Policies = serde_json::from_str(&text)?;
     ctx.term.step("replaying policies through rad");
 
+    // `policies.json` comes out of the same unvouched-for archive as everything else, and a
+    // rid or a nid lands in an argv position where a leading `-` is a flag rather than an id.
+    // Skipped rather than fatal: one lost seeding decision the user can make again by hand is
+    // a smaller loss than abandoning the rest of the replay, and neither is silent.
+    let mut skipped = Vec::new();
+    let mut failed = Vec::new();
     for policy in policies.seeded() {
-        rad.seed(&policy.rid, &policy.scope)?;
+        replay(&policy.rid, &mut skipped, &mut failed, || {
+            rad.seed(&policy.rid, &policy.scope)
+        })?;
     }
     for policy in policies.blocked_repos() {
-        rad.block_repo(&policy.rid)?;
+        replay(&policy.rid, &mut skipped, &mut failed, || {
+            rad.block_repo(&policy.rid)
+        })?;
     }
     for policy in policies.followed() {
-        rad.follow(&policy.nid, policy.alias.as_deref())?;
+        replay(&policy.nid, &mut skipped, &mut failed, || {
+            rad.follow(&policy.nid, policy.alias.as_deref())
+        })?;
     }
     for policy in policies.blocked_peers() {
-        rad.block_peer(&policy.nid)?;
+        replay(&policy.nid, &mut skipped, &mut failed, || {
+            rad.block_peer(&policy.nid)
+        })?;
+    }
+
+    if !skipped.is_empty() {
+        ctx.term.warn(&format!(
+            "{} skipped, because the archive spells an identifier in a way `rad` would read \
+             as a flag: {}. Seed or follow those by hand",
+            crate::term::count(skipped.len(), "policy row", "policy rows"),
+            crate::term::shortlist(&skipped)
+        ));
+    }
+    if !failed.is_empty() {
+        // `rad` printed its own reason on stderr. Without this the run said nothing and exited
+        // 0, so a restore that put back every repository and none of the seeding policies read
+        // as a clean one.
+        ctx.term.warn(&format!(
+            "`rad` refused {}: {}. Those decisions are not in place",
+            crate::term::count(failed.len(), "policy row", "policy rows"),
+            crate::term::shortlist(&failed)
+        ));
+    }
+    skipped.extend(failed);
+    Ok(skipped)
+}
+
+/// Replay one policy row, unless its identifier is one `rad` would read as a flag.
+///
+/// The two outcomes are kept apart because they need different answers: a skipped row is this
+/// tool refusing a hostile archive, and a failed one is `rad` refusing a decision it was asked
+/// to put back.
+fn replay(
+    id: &str,
+    skipped: &mut Vec<String>,
+    failed: &mut Vec<String>,
+    put_back: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    if !crate::rad::is_identifier(id) {
+        skipped.push(id.to_string());
+        return Ok(());
+    }
+    if !put_back()? {
+        failed.push(id.to_string());
     }
     Ok(())
 }
@@ -671,6 +741,7 @@ fn report(
     manifest: &Manifest,
     restored: &Restored,
     standings: &BTreeMap<String, Standing>,
+    policies_missed: &[String],
 ) -> Result<std::process::ExitCode> {
     let dropped = &restored.dropped;
     let restored = &restored.repos;
@@ -768,17 +839,54 @@ fn report(
 
     // A repository the archive carried and the home did not get is a failed check, the same
     // as a divergence: the run did not deliver what it was asked for, and a scheduled restore
-    // that exited 0 over it would be the last anyone heard about it.
-    Ok(if diverged.is_empty() && dropped.is_empty() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::from(EXIT_CHECKS_FAILED)
-    })
+    // that exited 0 over it would be the last anyone heard about it. A seeding or following
+    // decision that did not go back counts for the same reason.
+    Ok(
+        if diverged.is_empty() && dropped.is_empty() && policies_missed.is_empty() {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::from(EXIT_CHECKS_FAILED)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_policy_row_naming_a_flag_is_skipped_without_rad_ever_being_asked() {
+        let (mut skipped, mut failed) = (Vec::new(), Vec::new());
+        let mut asked = false;
+        replay("--help", &mut skipped, &mut failed, || {
+            asked = true;
+            Ok(true)
+        })
+        .expect("a skipped row is not an error");
+
+        assert!(!asked, "`rad` was asked about an identifier that is a flag");
+        assert_eq!(skipped, vec!["--help".to_string()]);
+        assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn a_policy_row_rad_refuses_is_recorded_rather_than_dropped() {
+        // The bool is `rad`'s exit status. Discarding it was how a restore could put back
+        // every repository, none of the seeding decisions, and still exit 0.
+        let (mut skipped, mut failed) = (Vec::new(), Vec::new());
+        replay("rad:zAAA", &mut skipped, &mut failed, || Ok(false))
+            .expect("a refused row is reported, not raised");
+
+        assert_eq!(failed, vec!["rad:zAAA".to_string()]);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn a_policy_row_that_goes_back_is_recorded_nowhere() {
+        let (mut skipped, mut failed) = (Vec::new(), Vec::new());
+        replay("rad:zAAA", &mut skipped, &mut failed, || Ok(true)).expect("a good row replays");
+        assert!(skipped.is_empty() && failed.is_empty());
+    }
 
     /// An ancestry answer that also records whether it was ever asked for.
     fn asked(

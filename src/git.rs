@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::exec::Tool;
 
 /// A ref name and the object it points at.
@@ -164,7 +164,23 @@ impl Git {
         Ok(())
     }
 
+    /// Point `HEAD` at a ref.
+    ///
+    /// The target is refused unless it names a ref, because it comes out of a manifest nobody
+    /// has vouched for and `symbolic-ref` accepts no `--` to fence a value off from its own
+    /// flags. A manifest saying `head: "-d"` would otherwise reach git as a flag rather than
+    /// as the branch this repository is supposed to point at.
+    ///
+    /// Kept as an error for a caller that has nothing better to do with it, but a caller
+    /// restoring a repository is expected to ask `names_a_ref` first and carry on without the
+    /// pointer, which is what the shipped script does.
     pub fn set_head(&self, git_dir: &Path, target: &str) -> Result<()> {
+        if !names_a_ref(target) {
+            return Err(Error::refused(
+                format!("`{target}` does not name a ref, so HEAD was left alone"),
+                "the archive's manifest is wrong about this repository; report it",
+            ));
+        }
         self.tool.output(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
@@ -174,6 +190,32 @@ impl Git {
         ])?;
         Ok(())
     }
+}
+
+/// Whether a `HEAD` out of a manifest names a ref.
+///
+/// Separate from `set_head` so that refusing the value and losing the repository are separate
+/// decisions. The refs are the repository and `HEAD` is only a pointer into them, so a caller
+/// that has already unbundled the history should keep it and drop the pointer.
+///
+/// The `refs/` prefix alone is not enough. `git symbolic-ref` writes whatever it is given
+/// without validating it, so `refs/../../evil` is accepted and the next update of that ref
+/// writes a file outside the repository, in a Radicle home directly into `storage`. What is
+/// left is roughly git's own refname rules, which is what a real archive carries anyway.
+pub fn names_a_ref(target: &str) -> bool {
+    let Some(rest) = target.strip_prefix("refs/") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.split('/').all(|part| {
+            !part.is_empty()
+                // Covers `.` and `..`, so no component can climb out of the repository.
+                && !part.starts_with('.')
+                && !part.ends_with(".lock")
+                && part
+                    .chars()
+                    .all(|c| !c.is_ascii_control() && !" ~^:?*[\\".contains(c))
+        })
 }
 
 /// The bundle file name for a repository inside an archive. One place, so the writer and the
@@ -212,6 +254,41 @@ mod tests {
             config_entry("z3gqcJUoA1n9HaHKufZs5FCSGazv5"),
             "repos/z3gqcJUoA1n9HaHKufZs5FCSGazv5.config"
         );
+    }
+
+    #[test]
+    fn a_head_that_does_not_name_a_ref_is_refused_before_git_is_asked() {
+        // `symbolic-ref` takes no `--`, so this is the only thing standing between a hostile
+        // manifest and git reading the value as one of its own flags. No git needed: the
+        // refusal happens before the spawn, which is the property under test.
+        let git = Git::new();
+        let dir = Path::new("/nonexistent/repo.git");
+        assert!(git.set_head(dir, "-d").is_err());
+        assert!(git.set_head(dir, "--version").is_err());
+        assert!(git.set_head(dir, "master").is_err());
+        assert!(git.set_head(dir, "").is_err());
+    }
+
+    #[test]
+    fn a_head_under_refs_that_climbs_out_of_the_repository_is_refused() {
+        // `git symbolic-ref` stores this without complaint, and the next update of the ref
+        // writes the file it names: `refs/../../evil` lands beside the repository, which in
+        // a Radicle home is `storage` itself. Verified against git 2.34 before it was fixed.
+        assert!(!names_a_ref("refs/../../evil"));
+        assert!(!names_a_ref("refs/heads/../../../etc/x"));
+        assert!(!names_a_ref("refs/"));
+        assert!(!names_a_ref("refs/heads/"));
+        assert!(!names_a_ref("refs//heads/x"));
+        assert!(!names_a_ref("refs/heads/.hidden"));
+        assert!(!names_a_ref("refs/heads/x.lock"));
+        assert!(!names_a_ref("refs/heads/a b"));
+        assert!(!names_a_ref("refs/heads/a^b"));
+        // The names a real archive carries still pass, or the guard would cost every restore
+        // the pointer it was written to protect.
+        assert!(names_a_ref("refs/heads/master"));
+        assert!(names_a_ref("refs/heads/feature/nested"));
+        assert!(names_a_ref("refs/heads/v1.0"));
+        assert!(names_a_ref("refs/namespaces/z6Mk/refs/heads/master"));
     }
 
     #[test]

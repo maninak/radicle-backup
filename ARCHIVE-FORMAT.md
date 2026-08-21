@@ -122,6 +122,7 @@ git --git-dir ~/.radicle/storage/$rid symbolic-ref HEAD "$(jq -r '.repos[]|selec
 
 - **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words, because a newer format may change what an entry means, and a half-understood restore is worse than a refused one.
 - **New entries may be added** in a future version 1 archive. A reader must ignore an entry it does not recognise rather than treating it as corruption; the manifest is what decides whether the archive is complete.
+- **A reader trusts nothing in the manifest.** `rid` and `head` reach `git` and `rad` as command-line arguments, and neither takes a `--` that fences a value off from its own flags, so a `head` of `-d` is read as a flag. `git symbolic-ref` also stores whatever it is handed without checking it, so a `head` of `refs/../../evil` writes a file outside the repository the next time anything updates that ref. A reader must check that a repository id is base58 and that a `head` names a ref (a `refs/` prefix, no empty or dot-leading component, none of the characters git forbids in a refname) before either reaches a command line, and must skip the offending value rather than the repository it belongs to.
 - **Entry paths never change meaning.** If what belongs at `node/policies.db` ever stops being a policy database, it gets a new path and the format version goes up.
 - **The plaintext recovery path never goes away.** Any change that would make an archive unreadable without this tool is out of scope.
 

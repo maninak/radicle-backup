@@ -10,6 +10,18 @@ use std::path::Path;
 use crate::error::Result;
 use crate::exec::Tool;
 
+/// Whether a string may be handed to `rad` or `git` as an identifier.
+///
+/// Base58 and nothing else, which is what a repository id and a node id both are. The point is
+/// not that a wrong id would be rejected downstream anyway: it is that anything reaching an
+/// argv position must not be readable as a flag, and a value beginning with `-` is. Ids arrive
+/// from an archive that nobody has vouched for, so they are checked here rather than
+/// trusted to whatever `rad` version happens to be installed.
+pub fn is_identifier(value: &str) -> bool {
+    let bare = value.strip_prefix("rad:").unwrap_or(value);
+    !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// What `rad` was able to say about one repository.
 ///
 /// A failed call is not folded into "there is no paperwork", because the two are opposites
@@ -241,5 +253,22 @@ mod tests {
     fn the_same_identifier_seen_twice_is_reported_once() {
         let text = "rad:zAAA rad:zAAA rad:zBBB";
         assert_eq!(repository_ids(text), vec!["rad:zAAA", "rad:zBBB"]);
+    }
+
+    #[test]
+    fn an_identifier_that_would_reach_rad_as_a_flag_is_not_an_identifier() {
+        assert!(is_identifier("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5"));
+        assert!(is_identifier(
+            "z6MkiTBz1ymuepK3Q7DwjNhrsFYVvfa4qGwrfKMdDwbrCVvV"
+        ));
+
+        // The whole point of the rule. These reach `rad seed` or `rad follow` in an argv
+        // position out of an archive nobody vouched for, and a leading `-` there is a flag.
+        assert!(!is_identifier("--help"));
+        assert!(!is_identifier("-v"));
+        assert!(!is_identifier("rad:-v"));
+        assert!(!is_identifier(""));
+        assert!(!is_identifier("rad:"));
+        assert!(!is_identifier("../../.ssh"));
     }
 }

@@ -83,7 +83,7 @@ for bundle in repos/*.bundle; do
 done
 ```
 
-`restore.sh`, next to this file, is the same procedure with error handling. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
+`restore.sh`, next to this file, is the same procedure with error handling, and it additionally refuses a bundle whose name is not a repository id and a `HEAD` that does not name a ref. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
 
 ## 4. Before you write anything to a restored repository
 

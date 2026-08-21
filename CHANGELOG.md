@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore` no longer abandons the whole restore over one repository that fails: the rest are restored, the failed ones are named, and the run exits `3` with a `notRestored` list in its JSON report.
 - A repository whose restore fails partway no longer leaves an empty repository behind in storage, which later backups would have counted as real.
 - `restore` without `git` on PATH now says how many repositories it could not put back, instead of reporting success.
+- `restore --replay-policies` no longer discards what `rad` said about each policy: a seeding or following decision that did not go back is named and the run exits `3`. A restore that put back every repository and none of the policies used to exit `0` in silence.
 - `create --stdout --json` is refused rather than writing the archive and the report into the same stream.
 - A flag typed before its verb, as in `rad backup --tier full create` or `rad backup --output ... schedule`, is now answered with where the flag belongs, instead of a message that reads as a denial of a flag the verb plainly has.
 - The marker lines in a generated systemd unit now say what is true: a unit that keeps them is rewritten by the next `schedule` run, and deleting them is what preserves a hand edit. The environment file, which every run rewrites in full, no longer carries the marker.
@@ -49,6 +50,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - `paper` without `--output` no longer writes the sheet to a path taken from `RAD_BACKUP_DIR`. A recovery sheet carrying the secret key could land unasked where backups go, which is often a directory synced off the machine.
 - The shipped `restore.sh` skips a bundle whose name is not a repository id, rather than trusting the name it was handed. `rad backup` already refuses such an archive; the script is what runs when `rad backup` is not there.
+- A `head` in the manifest that does not name a ref is refused rather than passed to `git symbolic-ref`, which takes no `--` and would read a value like `-d` as one of its own flags. Both `restore` and the shipped `restore.sh` now check it, and the repository still comes back without its `HEAD`.
+- `restore --replay-policies` skips a seeding or following row whose identifier `rad` would read as a flag, and names what it skipped. Those values come out of the archive, and nothing had vouched for them before they reached a command line.
 
 ## [0.1.0] - 2026-08-16
 

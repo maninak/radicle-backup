@@ -407,8 +407,7 @@ fn is_portable_entry_name(entry_path: &str) -> bool {
 /// outside the home. A real id is `rad:` and base58, so anything else is refused here, once,
 /// rather than at each of restore, verify and sync.
 fn reject_hostile_rid(rid: &str, archive: &Path) -> Result<()> {
-    let bare = rid.strip_prefix("rad:").unwrap_or(rid);
-    if bare.is_empty() || !bare.chars().all(|c| c.is_ascii_alphanumeric()) {
+    if !crate::rad::is_identifier(rid) {
         return Err(Error::NotAnArchive {
             path: archive.to_path_buf(),
             reason: format!("`{rid}` is not a repository id"),

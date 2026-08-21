@@ -177,6 +177,23 @@ pub fn count(n: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+/// A few named and the rest counted: identifiers stop being readable well before they stop
+/// being numerous, while the count is what says how much of the home this is about.
+pub fn shortlist<'a>(ids: impl IntoIterator<Item = &'a String>) -> String {
+    const NAMED: usize = 5;
+    let all: Vec<&str> = ids.into_iter().map(String::as_str).collect();
+    let named = all
+        .iter()
+        .take(NAMED)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match all.len().saturating_sub(NAMED) {
+        0 => named,
+        rest => format!("{named}, and {rest} more"),
+    }
+}
+
 /// The verb that agrees with a count, so no line ever reads "1 of 3 are in no archive".
 pub fn agree(n: usize) -> &'static str {
     if n == 1 { "is" } else { "are" }

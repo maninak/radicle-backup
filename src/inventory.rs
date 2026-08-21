@@ -168,7 +168,7 @@ fn undescribed_warning(
     format!(
         "`rad` could not describe {}: {} ({why}). {fate}",
         crate::term::count(undescribed.len(), "repository", "repositories"),
-        shortlist(undescribed)
+        crate::term::shortlist(undescribed)
     )
 }
 
@@ -195,24 +195,13 @@ fn unreadable_warning(
         "`git` could not read {}: {} ({why}). Each is listed in the inventory with no refs. \
          {fate}",
         crate::term::count(unreadable.len(), "repository", "repositories"),
-        shortlist(unreadable)
+        crate::term::shortlist(unreadable)
     )
 }
 
 /// How many of these this run will actually carry.
 fn also_selected(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
     troubled.intersection(selected).count()
-}
-
-/// A few named and the rest counted: identifiers stop being readable well before they stop
-/// being numerous, while the count is what says how much of the home this is about.
-fn shortlist(rids: &BTreeSet<String>) -> String {
-    const NAMED: usize = 5;
-    let named: Vec<&str> = rids.iter().take(NAMED).map(String::as_str).collect();
-    match rids.len().saturating_sub(named.len()) {
-        0 => named.join(", "),
-        rest => format!("{}, and {rest} more", named.join(", ")),
-    }
 }
 
 /// What a private-only archive carries: what the paperwork calls private, plus anything the

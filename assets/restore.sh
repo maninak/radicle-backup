@@ -71,7 +71,18 @@ for bundle in repos/*.bundle; do
 	if command -v jq >/dev/null 2>&1; then
 		head=$(jq -r --arg rid "rad:$rid" \
 			'.repos[] | select(.rid==$rid) | .head // empty' manifest.json)
-		[ -n "$head" ] && git --git-dir "$target" symbolic-ref HEAD "$head"
+		# `symbolic-ref` takes no `--`, so a manifest saying `head: "-d"` would reach git
+		# as a flag rather than as a branch, and it stores whatever it is handed without
+		# checking, so `refs/../../evil` would later write a file outside the repository.
+		# The same check `rad-backup` makes, here for the same reason the id above is
+		# checked: this script runs when it is not there.
+		case "$head" in
+		'') ;;
+		*..*|*//*|*/|*' '*|*'~'*|*'^'*|*':'*|*'?'*|*'*'*|*'['*|*'\'*)
+			echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
+		refs/?*) git --git-dir "$target" symbolic-ref HEAD "$head" ;;
+		*) echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
+		esac
 	fi
 
 	restored=$((restored + 1))

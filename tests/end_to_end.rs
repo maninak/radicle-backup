@@ -1454,3 +1454,206 @@ fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
         sheet.len()
     );
 }
+
+/// A hostile manifest must not steer `git symbolic-ref` by way of the shipped script.
+///
+/// `symbolic-ref` accepts no `--`, so a `head` of `-d` is read as a flag rather than as the
+/// branch the repository is supposed to point at. `rad-backup` refuses such a manifest; this
+/// is the same refusal in the script that runs when `rad-backup` is not there.
+#[test]
+fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
+    if Command::new("jq").arg("--version").output().is_err() {
+        eprintln!("skipping: this check needs jq, which is what reads `head` in the script");
+        return;
+    }
+    let fixture = Fixture::create("script-head");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a plaintext archive");
+
+    let extracted = fixture.path("extracted");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let archive = std::fs::read(only_archive(&backups)).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
+    std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
+    let out = Command::new("tar")
+        .args(["-xf", "archive.tar"])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&out, "extracting the archive");
+
+    // Planted the way a hostile archive would carry it, on every repository the manifest
+    // names.
+    let manifest_path = extracted.join("manifest.json");
+    let text = std::fs::read_to_string(&manifest_path).expect("the manifest is readable");
+    let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the manifest parses");
+    let repos = manifest["repos"]
+        .as_array_mut()
+        .expect("the manifest names repositories");
+    assert!(
+        !repos.is_empty(),
+        "this check needs a repository to plant on"
+    );
+    for repo in repos.iter_mut() {
+        repo["head"] = serde_json::Value::String("-d".to_string());
+    }
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string(&manifest).expect("the manifest serialises"),
+    )
+    .expect("the manifest is writable");
+
+    let target = fixture.path("by-script");
+    let out = Command::new("sh")
+        .args(["restore.sh", &target.to_string_lossy()])
+        .current_dir(&extracted)
+        .env("HOME", fixture.path("fake-home"))
+        .env("RAD_HOME", fixture.path("decoy-home"))
+        .output()
+        .expect("the restore script runs");
+    assert_success(&out, "restoring with a hostile head planted");
+    assert!(
+        stderr(&out).contains("does not name a ref"),
+        "{}",
+        stderr(&out)
+    );
+    // A skip, not a bail-out: the refs are the repository, and HEAD is only a pointer into
+    // them, so refusing the pointer must not cost the history it points at.
+    assert!(stdout(&out).contains("1 repository"), "{}", stdout(&out));
+    assert!(
+        target
+            .join("storage/z3gqcJUoA1n9HaHKufZs5FCSGazv5/refs")
+            .exists(),
+        "the repository was dropped rather than restored without its HEAD"
+    );
+}
+
+/// This tool must make the same skip the shipped script makes, over the same planted `HEAD`.
+///
+/// It did not. `set_head` returned an error from inside the closure that puts a repository
+/// back, so a `head` of `-d` failed the whole `restore_one`, the freshly unbundled history was
+/// swept, and the repository landed in the dropped list. The refusal that was there to keep a
+/// hostile value away from `git symbolic-ref` was costing the repository it protected.
+#[test]
+fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
+    let fixture = Fixture::create("tool-head");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a plaintext archive");
+    let hostile = repack_with_a_planted_head(&fixture, &only_archive(&backups));
+
+    let restored = fixture.path("restored");
+    let out = fixture.run(&["restore", "--yes", &hostile.to_string_lossy()], &restored);
+    assert_success(&out, "restoring an archive whose manifest names a bad head");
+    assert!(
+        stderr(&out).contains("does not name a ref"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        restored.join("storage").join(RID).join("refs").exists(),
+        "the repository was dropped rather than restored without its HEAD"
+    );
+}
+
+/// Rebuild an archive with `-d` planted as every repository's `HEAD`, the way a hostile or a
+/// corrupt manifest would carry it.
+///
+/// Every file is named to `tar` one by one rather than by its directory, because the reader
+/// matches `manifest.json` by its exact entry name and a directory argument would add entries
+/// the original archive never had.
+fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
+    let extracted = fixture.path("planted-extract");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let bytes = std::fs::read(archive).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(bytes.as_slice(), &mut tarball).expect("the archive decompresses");
+    let opened = fixture.path("planted.tar");
+    std::fs::write(&opened, &tarball).expect("the tarball is writable");
+    let out = Command::new("tar")
+        .args(["-xf", &opened.to_string_lossy()])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&out, "extracting the archive");
+
+    let manifest_path = extracted.join("manifest.json");
+    let text = std::fs::read_to_string(&manifest_path).expect("the manifest is readable");
+    let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the manifest parses");
+    let repos = manifest["repos"]
+        .as_array_mut()
+        .expect("the manifest names repositories");
+    assert!(
+        !repos.is_empty(),
+        "this check needs a repository to plant on"
+    );
+    for repo in repos.iter_mut() {
+        repo["head"] = serde_json::Value::String("-d".to_string());
+    }
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string(&manifest).expect("the manifest serialises"),
+    )
+    .expect("the manifest is writable");
+
+    let mut entries = Vec::new();
+    collect_files(&extracted, &extracted, &mut entries);
+    entries.sort();
+    let rebuilt = fixture.path("planted-backups");
+    std::fs::create_dir_all(&rebuilt).expect("the archive directory is creatable");
+    let repacked = fixture.path("repacked.tar");
+    let mut args = vec!["-cf".to_string(), repacked.to_string_lossy().into_owned()];
+    args.extend(entries);
+    let out = Command::new("tar")
+        .args(&args)
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&out, "repacking the archive");
+
+    let name = archive.file_name().expect("the archive has a name");
+    let target = rebuilt.join(name);
+    let tar_bytes = std::fs::read(&repacked).expect("the repacked tar is readable");
+    let file = std::fs::File::create(&target).expect("the archive is creatable");
+    zstd::stream::copy_encode(tar_bytes.as_slice(), file, 3).expect("the archive compresses");
+    target
+}
+
+/// Every regular file under `dir`, named relative to `root`.
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("the directory is readable") {
+        let path = entry.expect("the entry is readable").path();
+        if path.is_dir() {
+            collect_files(root, &path, out);
+        } else {
+            let relative = path
+                .strip_prefix(root)
+                .expect("the entry is under the root");
+            out.push(relative.to_string_lossy().into_owned());
+        }
+    }
+}
