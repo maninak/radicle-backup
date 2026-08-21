@@ -16,9 +16,9 @@ This program holds an ed25519 key that cannot be rotated, revoked or reissued. E
 | `src/crypt.rs` | Archives are age, the passphrase comes from three places only, an empty one is refused, and a wrong one is told apart from a damaged file. |
 | `src/perms.rs` | "Owner only" is defined once, applied at creation rather than after it, and admits out loud when a platform cannot promise it. |
 | `src/exec.rs` | Nothing is run through a shell, and no child process inherits a passphrase it has no use for. |
-| `src/archive.rs` | An archive from anywhere is hostile input: no absolute paths, no `..`, regular files only, every entry digested against the manifest in both directions. |
+| `src/container.rs` | An archive from anywhere is hostile input: no absolute paths, no `..`, regular files only, no repository id that would not stay a single directory under `storage/`, and every entry digested against the manifest in both directions. |
 | `src/cmd/paper.rs` | The recovery sheet is the key in the clear: the mnemonic, the key file, and the HTML that carries them are all `Zeroizing`, and the one untrusted field (the alias) is HTML-escaped. |
-| `src/cmd/restore.rs` (`from_words`) | The 24 words typed to rebuild an identity arrive on a `Zeroizing` line and stay in `Zeroizing` buffers through to the key file, written at `0600`. |
+| `src/cmd/words.rs` | The 24 words typed to rebuild an identity arrive on a `Zeroizing` line and stay in `Zeroizing` buffers through to the key file, written at `0600`. |
 
 Four invariants those files exist to hold:
 
