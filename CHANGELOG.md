@@ -16,6 +16,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore` no longer abandons the whole restore over one repository that fails: the rest are restored, the failed ones are named, and the run exits `3` with a `notRestored` list in its JSON report.
 - A repository whose restore fails partway no longer leaves an empty repository behind in storage, which later backups would have counted as real.
 - `restore` without `git` on PATH now says how many repositories it could not put back, instead of reporting success.
+- `diff` against an archive taken with `--repos all` or `--repos seeded` no longer reports every repository that is not this peer's own as gone, on every run, and exits `0` when nothing has changed. A scheduled `diff` asked whether a backup can be skipped had been answering `3` since the tier existed.
 - `restore --replay-policies` no longer discards what `rad` said about each policy: a seeding or following decision that did not go back is named and the run exits `3`. A restore that put back every repository and none of the policies used to exit `0` in silence.
 - `create --stdout --json` is refused rather than writing the archive and the report into the same stream.
 - A flag typed before its verb, as in `rad backup --tier full create` or `rad backup --output ... schedule`, is now answered with where the flag belongs, instead of a message that reads as a denial of a flag the verb plainly has.

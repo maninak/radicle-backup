@@ -66,6 +66,21 @@ pub enum RepoSelection {
 }
 
 impl RepoSelection {
+    /// Read back what `as_str` wrote, for the records and manifests that store the selection
+    /// as a word. Anything unrecognised is `Unknown` rather than an error, on the same
+    /// principle as the `#[serde(other)]` above: a file written by a later version is read for
+    /// what can be read.
+    pub fn from_str(word: &str) -> Self {
+        match word {
+            "none" => Self::None,
+            "private" => Self::Private,
+            "mine" => Self::Mine,
+            "seeded" => Self::Seeded,
+            "all" => Self::All,
+            _ => Self::Unknown,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",

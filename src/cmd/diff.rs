@@ -17,6 +17,23 @@ use crate::rad::Rad;
 use crate::state;
 use crate::term;
 
+/// Describe the same set of repositories the archive described, so the two are comparable.
+///
+/// A `--repos all` or `--repos seeded` archive describes repositories that are not this peer's.
+/// Comparing that against a listing of only this peer's own reported every one of them as gone,
+/// on every run, forever: a scheduled `diff` meant to say "nothing changed, skip the backup"
+/// answered "repositories are missing" instead, and exited `3` doing it.
+///
+/// A selection this version does not know is read as `all`, because the two ways of being wrong
+/// are not equal: describing too much makes a repository look newly added, and describing too
+/// little makes one look lost.
+fn comparison_selection(recorded: &str) -> RepoSelection {
+    match RepoSelection::from_str(recorded) {
+        RepoSelection::Unknown => RepoSelection::All,
+        known => known,
+    }
+}
+
 pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     ctx.home.require()?;
     let identity = Identity::read(ctx.home.public_key())?;
@@ -45,7 +62,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         &ctx.home,
         &git,
         rad.as_ref(),
-        RepoSelection::None,
+        comparison_selection(&record.repo_selection),
         &node_id,
         &policies,
         &routing,
@@ -156,4 +173,28 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     } else {
         std::process::ExitCode::SUCCESS
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comparison_describes_what_the_archive_it_compares_against_described() {
+        // Not `None`. An archive taken with `--repos all` describes repositories this peer
+        // does not own, and a comparison blind to them called every one of them gone.
+        assert_eq!(comparison_selection("all"), RepoSelection::All);
+        assert_eq!(comparison_selection("seeded"), RepoSelection::Seeded);
+        assert_eq!(comparison_selection("mine"), RepoSelection::Mine);
+        assert_eq!(comparison_selection("private"), RepoSelection::Private);
+        assert_eq!(comparison_selection("none"), RepoSelection::None);
+    }
+
+    #[test]
+    fn a_selection_this_version_cannot_read_describes_everything_rather_than_nothing() {
+        // The safe direction: a repository that looks newly added is a curiosity, and one that
+        // looks lost sends somebody hunting for a backup they already have.
+        assert_eq!(comparison_selection("some-later-word"), RepoSelection::All);
+        assert_eq!(comparison_selection(""), RepoSelection::All);
+    }
 }

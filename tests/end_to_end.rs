@@ -1657,3 +1657,78 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
         }
     }
 }
+
+/// A `diff` against a `--repos all` archive must not report somebody else's repositories gone.
+///
+/// The archive describes every repository in storage; a comparison that only ever looked at
+/// this peer's own found the rest missing, said so, and exited `3`, every run, forever. A
+/// scheduled `diff` whose whole job is to answer "did anything change, or can the backup be
+/// skipped" therefore never answered "nothing changed" again.
+#[test]
+fn a_diff_against_an_archive_of_everything_does_not_report_a_foreign_repository_gone() {
+    let fixture = Fixture::create("diff-foreign");
+    let backups = fixture.path("backups");
+
+    // A bare repository in storage under a namespace that is not this peer's: what a seed
+    // holds for other people, and what `--repos all` carries while `mine` never names.
+    const FOREIGN: &str = "z2rGGGeuiMJUpZTUBUdyKzsBQU3xz";
+    let foreign = fixture.home().join("storage").join(FOREIGN);
+    git(
+        &["init", "--quiet", "--bare", &foreign.to_string_lossy()],
+        &fixture.path("."),
+    );
+    // Given history, because an archive of everything bundles it, and a bundle of nothing is
+    // an error rather than an empty bundle.
+    const FOREIGN_PEER: &str = "z6MkwLM8ubPRsUFMkgBjxhr2VqfoLYRhpXCTBBpJ7BjgWZgt";
+    let namespace = format!("refs/namespaces/{FOREIGN_PEER}");
+    let work = fixture.path("work");
+    git(
+        &[
+            "push",
+            "--quiet",
+            "--force",
+            &foreign.to_string_lossy(),
+            &format!("master:{namespace}/refs/heads/master"),
+        ],
+        &work,
+    );
+    git(
+        &[
+            "--git-dir",
+            &foreign.to_string_lossy(),
+            "symbolic-ref",
+            "HEAD",
+            &format!("{namespace}/refs/heads/master"),
+        ],
+        &work,
+    );
+
+    let out = fixture.run(
+        &[
+            "--repos",
+            "all",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking an archive of everything");
+
+    let out = fixture.run(&["diff", "--json"], &fixture.home());
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&out)).expect("the diff report is json");
+    assert_eq!(
+        report["repositoriesGone"],
+        serde_json::json!([]),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        out.status.success(),
+        "diff exited {:?} over a repository that never left storage: {}",
+        out.status.code(),
+        stdout(&out)
+    );
+}
