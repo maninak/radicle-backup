@@ -6,61 +6,61 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
-- `doctor` gained `signed refs propagation`: it names the repositories whose newest signed refs exist on this disk and nowhere else. Distinct from `other seeds` beside it, which asks whether a repository exists anywhere else at all: a repository forty seeds carry can still have this morning's commits on one machine.
-- `doctor` gained `key copies`: a home restored from an ordinary backup is warned that the machine the backup came from still holds the same key, which is how two nodes end up signing under one peer id. A home moved here with `rad backup move` passes, because a move retires the source key. Read from the archive, so it can only be answered for a home restored by this version or later.
-- `schedule --recipient` and `schedule --plaintext`: a scheduled backup can now encrypt to an age or ssh key, or skip encryption for a store that encrypts it, with no passphrase file needed.
+- `doctor` now warns when another machine may still be holding your key. Restoring an ordinary backup leaves the key on the machine the backup came from, and two machines running one key fork your own history. `rad backup move` retires the old key, so a home moved here is fine. The check is called `key copies`, and it can only answer for a home restored by this version or later.
+- `doctor` now names the public repositories with changes no other node has yet, so you can see what a dead disk would take with it. The check is called `signed refs propagation`.
+- `schedule --recipient` and `schedule --plaintext`: a scheduled backup can encrypt to an age or ssh key, or skip encryption when the destination already encrypts. Neither needs a passphrase file.
 
 ### Changed
 
-- `doctor`'s `seeding elsewhere` check is now called `other seeds`. The old name asserted the good state, so a failing line read `seeding elsewhere: 1 public repository is announced by no other node`, which argues with itself. Topics are the key `--json` consumers match on, so a probe keyed to the old string needs updating once.
+- `doctor`'s `seeding elsewhere` check is now called `other seeds`, so the name reads the same whether the check passes or fails. If you match on topic names in `--json`, this one changed.
 
 ### Fixed
 
-- `doctor` no longer tells you an unencrypted archive `holds your private key in the clear` when the key file inside it carries its own passphrase. That check reads whether the archive was encrypted and knows nothing about the key, so it now says the archive can be read by anyone holding it, which is true either way.
-- `doctor`'s remedy for an unprotected key now names the key's real path instead of `$RAD_HOME/keys/radicle`, which was not a runnable command for anyone who never set `RAD_HOME`.
-- `--dry-run --json` now prints a JSON report, like every other command's `--json`, instead of the human-readable table.
-- Output a machine consumes (JSON reports, listings, recovery sheets) now fails the run when it cannot be written, instead of exiting `0` over a truncated report. A pipe closed on purpose, as `... | head` does, still counts as success.
-- A repository whose visibility `rad` could not report is now treated as private and named in a warning, instead of being taken for public and left out of `--repos private`.
-- `restore` no longer abandons the whole restore over one repository that fails: the rest are restored, the failed ones are named, and the run exits `3` with a `notRestored` list in its JSON report.
-- A repository whose restore fails partway no longer leaves an empty repository behind in storage, which later backups would have counted as real.
+- A crash or a full disk partway through a restore can no longer leave a home holding neither the old identity nor the new one. The key files and `config.json` are written beside their targets and renamed into place.
+- `restore` no longer gives up on the whole home because one repository failed. The rest are restored, the failures are named, and the run exits `3`.
+- A repository whose restore fails partway no longer leaves an empty repository behind, which later backups would have counted as real.
 - `restore` without `git` on PATH now says how many repositories it could not put back, instead of reporting success.
-- `diff` against an archive taken with `--repos all` or `--repos seeded` no longer reports every repository that is not this peer's own as gone, on every run, and exits `0` when nothing has changed. A scheduled `diff` asked whether a backup can be skipped had been answering `3` since the tier existed.
-- `restore --replay-policies` no longer discards what `rad` said about each policy: a seeding or following decision that did not go back is named and the run exits `3`. A restore that put back every repository and none of the policies used to exit `0` in silence.
-- `create --stdout --json` is refused rather than writing the archive and the report into the same stream.
-- A flag typed before its verb, as in `rad backup --tier full create` or `rad backup --output ... schedule`, is now answered with where the flag belongs, instead of a message that reads as a denial of a flag the verb plainly has.
-- The marker lines in a generated systemd unit now say what is true: a unit that keeps them is rewritten by the next `schedule` run, and deleting them is what preserves a hand edit. The environment file, which every run rewrites in full, no longer carries the marker.
-- `schedule` no longer accepts a `RAD_BACKUP_PASSPHRASE` exported in your shell as proof that the timer can get a passphrase: systemd starts the service from its own environment. One that systemd itself holds still counts, so a working timer is not refused.
-- A binary or output path containing a space now produces a unit systemd can run and a crontab line a shell can run.
-- A recipient holding a character systemd or a shell treats specially (a `$` or `%`, a quote, a backslash) now reaches the scheduled run exactly as it was given, in both the systemd unit and the printed crontab line.
-- `schedule --status` now says when systemd could not be asked at all (as over ssh to a headless machine), instead of reporting a running timer as `disabled`.
-- A backup no longer fails after the archive is already written: a `.README.txt` note that could not be placed beside it, or older archives that could not be pruned, are warnings now rather than an exit `1` over a good archive.
-- `--stop-node` now reports when `rad node stop` itself failed, and gives up at once instead of waiting out the whole timeout on a node that was never going to stop.
-- `verify --deep` without `git` on PATH now names the bundles it could not open, instead of passing.
+- `restore` checks that the node is still stopped immediately before it writes, not only before it reads the archive. Unpacking a large archive leaves plenty of time for a node to start.
+- `restore --force` over another identity now keeps the public half of the displaced key beside the private half it files away. Only the private half survived before; the public half can be recomputed from it, so nothing was ever lost.
+- `restore --replay-policies` no longer throws away what `rad` said about each policy. A seeding or following decision that did not go back is named, and the run exits `3`. A restore that put back every repository and not one policy used to exit `0` in silence.
+- The copy-paste block in `RESTORE.md` that puts your identity back now refuses to run over a home that already holds a key. It used to print a warning and overwrite the key on the next line.
+- `restore.sh` inside an archive no longer claims to have restored policies that its tier never carried.
+- A backup no longer fails after the archive is already written. A `.README.txt` that could not be placed beside it, or old archives that could not be pruned, are warnings now instead of an exit `1` over a good archive.
+- A repository `git` cannot read no longer stops the whole backup. It is named, carried into the manifest with no refs, and the archive is written and marked incomplete (exit `3`).
+- A repository whose visibility `rad` could not report is now treated as private and named in a warning. It used to be taken for public, which left it out of `--repos private`.
 - A followed peer with no alias no longer fails the backup's read of the policies database.
-- Write and parse errors name the file they are about.
-- Failing to open a recipient-encrypted archive now points at `--identity` and the kind of key it was encrypted to, instead of blaming a passphrase that was never involved.
-- The copy-paste block in `RESTORE.md` that puts the identity back now refuses to run over a home that already holds a key, instead of printing a warning and overwriting the key on the next line.
-- `restore.sh` inside an archive no longer claims to have restored policies that a tier without them never carried.
-- The refusal over a home too large for one archive now suggests `--repos private` or `--repos mine`, which narrow what is carried; it used to suggest splitting the home across several `--repos` runs, which the flag cannot do.
-- A crash or a full disk partway through a restore can no longer leave a home holding neither the old identity nor the new one: the key files and `config.json` are now written beside their targets and renamed into place.
-- `restore --force` over another identity now keeps the public half of the displaced key beside the retired private half. Before, only the private half survived; a public key derives back from it, so nothing was ever beyond recovery.
-- `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
-- Reading a node database that has a write-ahead log beside it creates a `-shm` index file in the home, and the run now names that file instead of staying silent.
-- A node database that cannot be read is now named in the error, instead of a bare `unable to open database file` with no path.
-- An archive whose manifest will not parse is now named in the error, instead of a bare `expected value at line 1 column 1` with no file attached.
 - `--stop-node` asks for the archive passphrase before it stops the node, not while the node is down waiting for somebody to find it.
-- `diff --json` now names moved repositories by rid, like every other list in the report, instead of by display name.
+- `--stop-node` now reports when `rad node stop` itself failed, and gives up at once instead of waiting out the whole timeout on a node that was never going to stop.
+- The refusal over a home too large for one archive now suggests `--repos private` or `--repos mine`, which do narrow what is carried. It used to suggest splitting the home across several `--repos` runs, which the flag cannot do.
+- `diff` against an archive taken with `--repos all` or `--repos seeded` no longer reports every repository that is not your own as gone, on every run. It exits `0` when nothing has changed, so a scheduled `diff` can decide whether tonight's backup is needed.
+- `doctor` no longer says an unencrypted archive holds your private key in the clear when the key inside carries its own passphrase. It now says the archive can be read by anyone who holds it, which is true either way.
+- `doctor`'s remedy for an unprotected key names the key's real path, instead of `$RAD_HOME/keys/radicle`, which was not a runnable command for anyone who never set `RAD_HOME`.
+- `verify --deep` without `git` on PATH says how many bundles it could not open, instead of passing.
+- The warnings about a repository `rad` could not describe or `git` could not read no longer promise it a place in the archive when the run was never going to carry it.
+- Output a machine consumes (JSON reports, listings, recovery sheets) now fails the run when it cannot be written, instead of exiting `0` over a truncated report. A pipe closed on purpose, as `... | head` does, still counts as success.
+- `--dry-run --json` prints a JSON report, like every other `--json`, instead of the human-readable table.
+- `create --stdout --json` is refused, instead of writing the archive and the report into the same stream.
+- `diff --json` names moved repositories by rid, like every other list in the report, instead of by display name.
+- `schedule` no longer accepts a `RAD_BACKUP_PASSPHRASE` exported in your shell as proof that the timer can get a passphrase, because systemd starts the service from its own environment. One that systemd itself holds still counts, so a working timer is not refused.
+- A binary or output path containing a space now produces a unit systemd can run and a crontab line a shell can run.
+- A recipient holding a character systemd or a shell treats specially (a `$` or `%`, a quote, a backslash) now reaches the scheduled run exactly as you typed it, in both the systemd unit and the printed crontab line.
+- `schedule --status` says when systemd could not be asked at all, as over ssh to a headless machine, instead of reporting a running timer as `disabled`.
+- The marker lines in a generated systemd unit now say what is true: a unit that keeps them is rewritten by the next `schedule` run, and deleting them is what preserves a hand edit. The environment file, which every run rewrites in full, no longer carries the marker.
+- A flag typed before its verb, as in `rad backup --tier full create`, now gets a message saying where the flag belongs, instead of an error that reads as if the flag does not exist.
+- Failing to open a recipient-encrypted archive points at `--identity` and the kind of key it was encrypted to, instead of blaming a passphrase that was never involved.
+- Write and parse errors name the file they are about.
+- A node database that cannot be read is named in the error, instead of a bare `unable to open database file` with no path.
+- An archive whose manifest will not parse is named in the error, instead of a bare `expected value at line 1 column 1` with no file attached.
+- Reading a node database that has a write-ahead log beside it leaves a `-shm` file in the home, and the run now says so instead of staying silent.
 - The manifest records the hostname on macOS and the BSDs, which have neither `/etc/hostname` nor `HOSTNAME` and so recorded nothing at all.
-- A repository `git` cannot read no longer stops the whole backup: it is named, carried into the manifest with no refs, and the archive is written and marked incomplete (exit `3`) instead of not written at all.
-- The warnings about a repository `rad` could not describe or `git` could not read no longer promise it a place in the archive when the run's tier or `--repos` choice never selects it.
-- Counts agree with their nouns in the shipped `restore.sh` and in `verify --deep` without git, so no line reads "1 repositories".
+- Counts agree with their nouns, so no line reads "1 repositories".
 
 ### Security
 
-- `paper` without `--output` no longer writes the sheet to a path taken from `RAD_BACKUP_DIR`. A recovery sheet carrying the secret key could land unasked where backups go, which is often a directory synced off the machine.
-- The shipped `restore.sh` skips a bundle whose name is not a repository id, rather than trusting the name it was handed. `rad backup` already refuses such an archive; the script is what runs when `rad backup` is not there.
-- A `head` in the manifest that does not name a ref is refused rather than passed to `git symbolic-ref`, which takes no `--` and would read a value like `-d` as one of its own flags. Both `restore` and the shipped `restore.sh` now check it, and the repository still comes back without its `HEAD`.
+- `paper` without `--output` no longer writes the sheet to a path taken from `RAD_BACKUP_DIR`. A recovery sheet carries the secret key, and could land unasked where backups go, which is often a directory synced off the machine.
+- A `head` in the manifest is refused unless it really names a ref, rather than being handed to `git symbolic-ref`. A value like `-d` would otherwise reach git as one of its own flags, and `git symbolic-ref` stores whatever it is given without checking, so a value like `refs/../../evil` would write a file next to the repository the next time anything updated that ref. Both `restore` and the shipped `restore.sh` check it now, and the repository still comes back, without its `HEAD`.
 - `restore --replay-policies` skips a seeding or following row whose identifier `rad` would read as a flag, and names what it skipped. Those values come out of the archive, and nothing had vouched for them before they reached a command line.
+- The shipped `restore.sh` skips a bundle whose name is not a repository id, rather than trusting the name it was handed. `rad backup` already refuses such an archive; the script is what runs when `rad backup` is not there.
 
 ## [0.1.0] - 2026-08-16
 
