@@ -577,6 +577,80 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     assert_eq!(before, after, "a refused restore still touched the key");
 }
 
+/// Restoring over a home that holds a DIFFERENT identity must file the old key, not delete
+/// it: the key is the identity, and there is no way back from overwriting one.
+#[test]
+fn restoring_over_another_identity_keeps_the_key_it_displaces() {
+    let fixture = Fixture::create("displaced");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "identity",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking an identity archive");
+    let archive = only_archive(&backups);
+
+    // A home holding somebody else's key, which `--force` is about to restore over.
+    let occupied = fixture.path("occupied");
+    std::fs::create_dir_all(occupied.join("keys")).expect("the home is creatable");
+    let stranger = b"a key belonging to another identity";
+    std::fs::write(occupied.join("keys/radicle"), stranger).expect("the key is writable");
+    std::fs::write(
+        occupied.join("keys/radicle.pub"),
+        b"ssh-ed25519 AAAA stranger",
+    )
+    .expect("the public half is writable");
+
+    let out = fixture.run(
+        &["restore", "--force", "--yes", &archive.to_string_lossy()],
+        &occupied,
+    );
+    assert_success(&out, "restoring over another identity");
+
+    let retired = occupied.join("keys/radicle.retired");
+    assert!(
+        retired.is_file(),
+        "the displaced key must be kept: {}",
+        stderr(&out)
+    );
+    assert_eq!(
+        std::fs::read(&retired).expect("the retired key is readable"),
+        stranger,
+        "the retired file is not the key that was displaced"
+    );
+    // The public half too, and under the name the note beside it gives. `with_extension`
+    // turned `radicle.retired` into `radicle.pub`, so the rename that was meant to keep it
+    // renamed the file onto itself, succeeded, and left the restore to overwrite it seconds
+    // later. Nothing failed, and the note pointed at a file that was never written.
+    let retired_public = occupied.join("keys/radicle.retired.pub");
+    assert_eq!(
+        std::fs::read(&retired_public).expect("the retired public half is readable"),
+        b"ssh-ed25519 AAAA stranger",
+        "the retired public half is not the one that was displaced"
+    );
+    let note =
+        std::fs::read_to_string(occupied.join("keys/DISPLACED.txt")).expect("the note is readable");
+    assert!(note.contains("radicle.retired.pub"), "{note}");
+
+    // And the restore really did land, so this is not a refusal dressed up as a success.
+    assert_eq!(
+        std::fs::read(occupied.join("keys/radicle")).expect("the restored key is readable"),
+        std::fs::read(fixture.home().join("keys/radicle")).expect("the archived key is readable")
+    );
+    assert_eq!(
+        std::fs::read(occupied.join("keys/radicle.pub")).expect("the restored half is readable"),
+        std::fs::read(fixture.home().join("keys/radicle.pub")).expect("the archived half reads")
+    );
+}
+
 #[test]
 fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
     let fixture = Fixture::create("restored-state");

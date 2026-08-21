@@ -262,16 +262,24 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
     // The public half goes with it. Without it the retired file is a private key nobody can
     // identify, and `install` overwrites keys/radicle.pub moments later.
     let public = ctx.home.public_key();
+    let mut kept = None;
     if public.exists() {
-        let public_to = to.with_extension("pub");
-        if let Err(error) = std::fs::rename(&public, &public_to) {
-            ctx.term.warn(&format!(
+        // Appended, never `with_extension`, which REPLACES one: `radicle.retired` became
+        // `radicle.pub`, so this renamed the file onto itself, reported success, and left
+        // `install` to overwrite the displaced public half seconds later. `radicle.retired.2`
+        // became `radicle.retired.pub`, colliding with the first retirement's.
+        let mut public_to = to.as_os_str().to_os_string();
+        public_to.push(".pub");
+        let public_to = std::path::PathBuf::from(public_to);
+        match std::fs::rename(&public, &public_to) {
+            Ok(()) => kept = Some(public_to),
+            Err(error) => ctx.term.warn(&format!(
                 "{}: the public half of the displaced key could not be kept ({error})",
                 public.display()
-            ));
+            )),
         }
     }
-    write_displaced_note(ctx, &to, here.as_deref())?;
+    write_displaced_note(ctx, &to, here.as_deref(), kept.as_deref())?;
     ctx.term
         .step(&format!("kept the displaced key as {}", to.display()));
     Ok(())
@@ -279,16 +287,28 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
 
 /// Say, on disk, what the file beside this note is. Whoever finds it may be doing so years
 /// later, on a machine they have forgotten restoring anything on.
-fn write_displaced_note(ctx: &Ctx, retired: &Path, was: Option<&str>) -> Result<()> {
+fn write_displaced_note(
+    ctx: &Ctx,
+    retired: &Path,
+    was: Option<&str>,
+    public: Option<&Path>,
+) -> Result<()> {
     let name = retired
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
+    // Named only when it is really there. Whoever reads this is looking for files, and one
+    // that does not exist sends them hunting; the public half is re-derivable from the
+    // private one with `ssh-keygen -y` anyway, so saying nothing costs them nothing.
+    let half = match public.and_then(Path::file_name) {
+        Some(name) => format!(", and its public half as {}", name.to_string_lossy()),
+        None => String::new(),
+    };
     let note = format!(
         "A restore on {} put another identity into this home.\n\
          \n\
-         The key that used to be at keys/radicle is now beside this note as {name}, with its\n\
-         public half as {name}.pub. It was {}.\n\
+         The key that used to be at keys/radicle is now beside this note as {name}{half}.\n\
+         It was {}.\n\
          \n\
          It still works. Put it back only into a home of its own, and never start a node with\n\
          it while another machine is running one under the same peer id.\n",

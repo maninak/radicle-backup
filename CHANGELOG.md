@@ -18,14 +18,11 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore` without `git` on PATH now says how many repositories it could not put back, instead of reporting success.
 - `create --stdout --json` is refused rather than writing the archive and the report into the same stream.
 - `rad backup --tier full create` is refused with the flag's place, not with `--tier` shapes an archive, and `create` does not create one.
-- - `rad backup --output ... schedule` is told that the flag belongs after the verb, instead of that `schedule` does not create an archive, which reads as a denial of a flag it plainly has.
-- A `create` flag written before the verb is now told where it belongs.
 - The marker in a generated systemd unit said edits would not be replaced, which is the opposite of what the next `schedule` run does to a file carrying it. The environment file, which every run rewrites in full, no longer carries that marker at all.
 - `schedule` no longer accepts a `RAD_BACKUP_PASSPHRASE` exported in your shell as proof that the timer can get a passphrase: systemd starts the service from its own environment. One that systemd itself holds still counts, so a working timer is not refused.
 - A binary or output path containing a space now produces a unit systemd can run and a crontab line a shell can run.
 - `schedule --status` tells a timer that was never installed from a systemd that could not be asked, instead of reporting `disabled` on a headless machine whose timer runs every night.
 - A backup no longer fails after the archive is already complete: a sidecar that could not be written, or older archives that could not be swept, are warnings now rather than an exit `1` over a good archive.
-- `--stop-node` says so when `rad node stop` itself failed, and refuses at once rather than spending the whole timeout waiting for a stop that was never asked for.
 - `--stop-node` says so when `rad node stop` itself failed, and refuses at once rather than spending the whole timeout watching a socket that was never going to close.
 - `verify --deep` without `git` on PATH now names the bundles it could not open, instead of passing.
 - A `following` row with no alias no longer fails the whole read of `policies.db`.
@@ -34,7 +31,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - Pasting section 1 of `RESTORE.md` over a home that already holds a key now refuses instead of warning and then overwriting the identity on the next line.
 - `restore.sh` inside an archive no longer claims to have restored policies that a tier without them never carried.
 - The refusal over an oversized manifest names a remedy that can be followed. It asked for several archives with `--repos`, each covering part of the home, and `--repos` picks a category rather than a slice of one.
-- `restore.sh` inside an archive no longer tells the reader to check policies that a tier without them never carried.
 - A restore writes the secret key, the public key and `config.json` beside their targets and renames them into place. A crash or a full disk part way through used to leave a home holding neither the old identity nor the new one, because the old file was unlinked before the first byte of the new one was written.
 - `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
 - Reading a node database that has a write-ahead log beside it creates a `-shm` file in the home, and the run now says so. It was reported as nothing at all, because the recording sat behind a writable-connection fallback that a write-ahead log never reaches. That fallback is gone: it could not run, and could not have helped.
@@ -44,27 +40,12 @@ All notable changes to this project are documented here. The format follows [Kee
 - The `diff --json` report names moved repositories by rid, like every other field in it. It named them by display name, so the one list a consumer would act on was the one it could not look anything up with.
 - The manifest records the hostname on macOS and the BSDs, which have neither `/etc/hostname` nor `HOSTNAME` and so recorded nothing at all.
 - A repository `git` cannot read no longer stops the whole backup. It is named, carried into the manifest with no refs, and the archive is written and marked incomplete (exit `3`) instead of not written at all. The bundling stage already worked this way; the inventory that runs before it did not, so it never got the chance.
-- - A `restore --force` over another identity keeps the public half of the key it displaces. That rename put the file back onto itself, reported success, and left the restore to overwrite it seconds later, while the note filed beside the retired key named a file that was never written. The private half was always kept and a public key derives back from it, so nothing was beyond recovery.
-- - The warnings about a repository `rad` could not describe or `git` could not read say what this run actually carries. Both promised a place in the archive to repositories that a `--tier identity` or `--repos seeded` run never selects.
-- - A recipient holding a `$` or a `%` reaches the scheduled run as it was given. systemd substitutes both inside `ExecStart=`, quotes or no quotes, and an ssh recipient ends in a free-text comment.
-- - The crontab line printed where there is no systemd is quoted for a shell rather than for systemd. A recipient holding a quote produced a line `sh` refused outright, and one holding a backslash was changed without saying so.
-- - `rad backup --output ... schedule` is told that the flag belongs after the verb, instead of that `schedule` does not create an archive, which reads as a denial of a flag it plainly has.
-- - Counts agree with their nouns in the shipped `restore.sh` and in `verify --deep` without git, so no line reads "1 repositories".
-- A `following` row with no alias no longer fails the whole read of the node database.
-- Write and parse errors name the file they are about.
-- An archive encrypted to recipients now says which key to pass when none of the given identities open it, instead of blaming a passphrase it never asked for.
-- Pasting section 1 of `RESTORE.md` over a home that already holds a key now refuses instead of warning and then overwriting the identity on the next line.
-- `restore.sh` inside an archive no longer tells the reader to check policies that a tier without them never carried.
-- The refusal over an oversized manifest names a remedy that exists: `--repos` selects a category, and never could cover "part of the home".
-- A restore writes the secret key, the public key and `config.json` beside their targets and renames them into place. A crash or a full disk part way through used to leave a home holding neither the old identity nor the new one, because the old file was unlinked before the first byte of the new one was written.
-- `restore` checks again that the node is not running immediately before it writes, not only before it reads the archive: unpacking a large archive leaves time for a node to start in between.
-- Reading a node database that has a write-ahead log beside it creates a `-shm` file in the home, and the run now says so. It was reported as nothing at all, because the recording sat behind a writable-connection fallback that a write-ahead log never reaches. That fallback is gone: it could not run, and could not have helped.
-- A node database that cannot be read names itself, instead of surfacing as a bare `unable to open database file` from whichever query happened to run first.
-- An archive whose manifest will not parse names the archive, instead of surfacing as serde's own `expected value at line 1 column 1` with no file attached.
-- `--stop-node` asks for the archive passphrase before it stops the node, not while the node is down waiting for somebody to find it.
-- The `diff --json` report names moved repositories by rid, like every other field in it. It named them by display name, so the one list a consumer would act on was the one it could not look anything up with.
-- The manifest records the hostname on macOS and the BSDs, which have neither `/etc/hostname` nor `HOSTNAME` and so recorded nothing at all.
-- A repository `git` cannot read no longer stops the whole backup. It is named, carried into the manifest with no refs, and the archive is written and marked incomplete (exit `3`) instead of not written at all. The bundling stage already worked this way; the inventory that runs before it did not, so it never got the chance.
+- A `restore --force` over another identity keeps the public half of the key it displaces. That rename put the file back onto itself, reported success, and left the restore to overwrite it seconds later, while the note filed beside the retired key named a file that was never written. The private half was always kept and a public key derives back from it, so nothing was beyond recovery.
+- The warnings about a repository `rad` could not describe or `git` could not read say what this run actually carries. Both promised a place in the archive to repositories that a `--tier identity` or `--repos seeded` run never selects.
+- A recipient holding a `$` or a `%` reaches the scheduled run as it was given. systemd substitutes both inside `ExecStart=`, quotes or no quotes, and an ssh recipient ends in a free-text comment.
+- The crontab line printed where there is no systemd is quoted for a shell rather than for systemd. A recipient holding a quote produced a line `sh` refused outright, and one holding a backslash was changed without saying so.
+- `rad backup --output ... schedule` is told that the flag belongs after the verb, instead of that `schedule` does not create an archive, which reads as a denial of a flag it plainly has.
+- Counts agree with their nouns in the shipped `restore.sh` and in `verify --deep` without git, so no line reads "1 repositories".
 
 ### Security
 
