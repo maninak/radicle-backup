@@ -653,6 +653,67 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_id_that_would_not_stay_under_storage_is_refused() {
+        let archive = Path::new("/tmp/whatever.tar.zst");
+        assert!(reject_hostile_rid("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5", archive).is_ok());
+        assert!(reject_hostile_rid("z3gqcJUoA1n9HaHKufZs5FCSGazv5", archive).is_ok());
+
+        // `Home::repository_path` joins the id onto the home, and `Path::join` throws the base
+        // away for an absolute component. Every one of these is a write somewhere the person
+        // restoring did not name.
+        assert!(reject_hostile_rid("rad:../../../.ssh", archive).is_err());
+        assert!(reject_hostile_rid("..", archive).is_err());
+        assert!(reject_hostile_rid("/etc/cron.d", archive).is_err());
+        assert!(reject_hostile_rid("rad:a/b", archive).is_err());
+        assert!(reject_hostile_rid("rad:a\\b", archive).is_err());
+        assert!(reject_hostile_rid("", archive).is_err());
+        assert!(reject_hostile_rid("rad:", archive).is_err());
+    }
+
+    #[test]
+    fn an_archive_naming_a_repository_outside_the_home_is_refused_before_it_is_opened() {
+        let dir = scratch_dir("hostile-rid");
+        let path = dir.join("archive.tar.zst");
+
+        // Hand-built, because this tool will not write one: the id goes into the JSON the way
+        // a hostile writer would put it there, and the refusal has to happen on the reading
+        // side or not at all.
+        let mut json = serde_json::to_value(manifest()).expect("a manifest serialises");
+        json["repos"] = serde_json::json!([{
+            "rid": "rad:../../../../tmp/pwned",
+            "delegate": false,
+            "refs": 0,
+        }]);
+        let json = serde_json::to_vec(&json).expect("the manifest serialises");
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = header(json.len() as u64, DOC_MODE);
+        builder
+            .append_data(&mut header, MANIFEST_ENTRY, json.as_slice())
+            .expect("the entry appends");
+        let tar = builder.into_inner().expect("the tar closes");
+        let file = std::fs::File::create(&path).expect("archive is creatable");
+        let mut encoder = zstd::Encoder::new(file, 1).expect("encoder opens");
+        encoder.write_all(&tar).expect("the tar compresses");
+        encoder.finish().expect("the encoder closes");
+
+        // Refused by `scan`, which is what every verb calls before it writes anything: the
+        // entry names are checked elsewhere, and this is the second, separate place an
+        // archive gets to state a path.
+        let refused = Reader::open(&path, None, &[])
+            .expect("the outer layers still open")
+            .scan(&path);
+        let refused = match refused {
+            Ok(_) => panic!("an archive naming a repository outside the home must not scan"),
+            Err(e) => e,
+        };
+        let said = refused.to_string();
+        assert!(said.contains("is not a repository id"), "{said}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_symlink_entry_becomes_a_plain_file_and_never_a_link_out_of_the_staging_directory() {
         let dir = scratch_dir("symlink");
         let path = dir.join("archive.tar.zst");
