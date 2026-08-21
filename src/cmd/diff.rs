@@ -61,7 +61,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
 
     // A repository has moved on when the signed refs of this peer point somewhere else than
     // they did. That is the only change that can cost work, so it is the one worth naming.
-    let changed: Vec<&str> = inventory
+    let moved: Vec<&crate::manifest::RepoRecord> = inventory
         .records
         .iter()
         .filter(|repo| {
@@ -72,21 +72,27 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
                 _ => false,
             }
         })
-        .map(|repo| repo.display_name())
         .collect();
+    // Two spellings of the same list: rids for the report a machine reads, names for the
+    // lines a person reads.
+    let moved_rids: Vec<&String> = moved.iter().map(|repo| &repo.rid).collect();
+    let changed: Vec<&str> = moved.iter().map(|repo| repo.display_name()).collect();
 
     let policy_drift = policies.seeded().count() != record.seeded
         || policies.followed().count() != record.followed;
     let drifted = !added.is_empty() || !removed.is_empty() || !changed.is_empty() || policy_drift;
 
     if ctx.global.json {
+        // By rid, and by rid only. This report named the added and gone repositories by rid
+        // and the moved ones by display name, so the one field a consumer would act on was
+        // the one it could not look anything up with.
         ctx.term.print_json(&serde_json::json!({
             "since": record.created,
             "archive": record.archive,
             "changed": drifted,
             "repositoriesAdded": added,
             "repositoriesGone": removed,
-            "repositoriesMoved": changed,
+            "repositoriesMoved": moved_rids,
             "policiesChanged": policy_drift,
         }))?;
     } else {
@@ -107,7 +113,12 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
                 term::count(added.len(), "repository", "repositories")
             ));
             for rid in &added {
-                term.hint(rid);
+                // By name here and by rid in the report above, for the same reason each way
+                // round: a person cannot recognise a rid, and a machine cannot look anything
+                // up with a name. A repository that is new is in the inventory, so its name
+                // is known; one that has gone is not, which is why the line below only counts
+                // them.
+                term.hint(&inventory.display_name(rid));
             }
         }
         if !changed.is_empty() {
