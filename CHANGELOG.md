@@ -9,6 +9,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - `--dry-run --json` answers with the report every other command's `--json` gives, instead of printing the human table on stdout and no object at all.
 - Output a machine consumes (JSON reports, listings, recovery sheets) now fails the run when it cannot be written, instead of exiting `0` over a truncated report. A pipe closed on purpose, as `... | head` does, still counts as success.
 - A `rad` that fails to answer is no longer read as a `rad` with nothing to say. A repository whose visibility could not be read is carried as though it were private and named in a warning, rather than taken for public and left out of `--repos private`.
+- `restore` no longer abandons the whole restore over one repository that will not come back: the rest are restored, the ones that did not are named, and the run exits `3`. The JSON report gains `notRestored`.
+- A repository that fails partway through being restored no longer leaves an empty bare repository in storage for the next inventory to count as a repository.
+- `restore` without `git` on PATH now says how many repositories it could not put back, instead of reporting success.
 
 ## [0.1.0] - 2026-08-16
 

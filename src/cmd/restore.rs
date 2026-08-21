@@ -83,6 +83,10 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         ));
     }
 
+    // Read while the archive is certainly still there, because `remember` below records it
+    // and a second probe after a multi-gigabyte unpack can find the file moved or the medium
+    // ejected. Guessing "unencrypted" there made `doctor` fail an archive that is encrypted.
+    let encrypted = crypt::looks_encrypted(archive)?;
     let passphrase = if crypt::needs_passphrase(archive)? {
         Some(crypt::read_passphrase(
             crypt::PASSPHRASE_ENV,
@@ -144,9 +148,9 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         term.warn("--no-reconcile: nothing was compared with the network");
         Ok(BTreeMap::new())
     } else {
-        reconcile(ctx, &manifest, &restored)
+        reconcile(ctx, &manifest, &restored.repos)
     };
-    remember(ctx, &manifest, &restored, archive);
+    remember(ctx, &manifest, &restored.repos, archive, encrypted);
     let standings = comparison?;
 
     report(ctx, &manifest, &restored, &standings)
@@ -157,8 +161,13 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
 /// Without this, a machine that has only ever restored believes it has no backup at all:
 /// `doctor` fails a check that is not true and `diff` has nothing to compare against, on the
 /// one day the user most wants to hear that they are covered.
-fn remember(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord], archive: &Path) {
-    let encrypted = crypt::looks_encrypted(archive).unwrap_or(false);
+fn remember(
+    ctx: &Ctx,
+    manifest: &Manifest,
+    restored: &[RepoRecord],
+    archive: &Path,
+    encrypted: bool,
+) {
     let mut record = state::Record::of(
         manifest,
         Some(archive),
@@ -325,26 +334,53 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     Ok(())
 }
 
+/// What came back out of the bundles, and what did not.
+struct Restored {
+    repos: Vec<RepoRecord>,
+    /// Repositories the archive carried that are not in the home now. Carried separately
+    /// rather than inferred from the count, because a restore that quietly dropped one would
+    /// otherwise report success over a home missing the work it was taken for.
+    dropped: Vec<String>,
+}
+
 /// Rebuild each archived repository from its bundle.
-fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<Vec<RepoRecord>> {
+///
+/// One repository that will not open does not end the restore. `backup` already carries on
+/// past a repository it cannot bundle, and the asymmetry was worse here: a bundle that fails
+/// `fetch.fsckObjects` (old history with a malformed object bundles fine and refuses to
+/// unbundle) abandoned every repository after it, and took the state record and the report
+/// with it.
+fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<Restored> {
     let carried: Vec<&RepoRecord> = manifest
         .repos
         .iter()
         .filter(|repo| repo.bundle.is_some())
         .collect();
     if carried.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Restored {
+            repos: Vec::new(),
+            dropped: Vec::new(),
+        });
     }
 
     let git = Git::new();
     if !git.is_available() {
         ctx.term
-            .warn("git is not on PATH, so the archived repositories were left unpacked");
-        ctx.term.detail(&format!(
-            "they are plain git bundles; see RESTORE.md in {}",
-            staging.display()
-        ));
-        return Ok(Vec::new());
+            .warn("git is not on PATH, so no repositories were restored");
+        // Deliberately not offering the staging directory: it lives in the scratch this run
+        // deletes on its way out, so the bundles named there are gone before the shell prompt
+        // comes back. The archive still holds them, and the same restore run again with git
+        // installed is the whole remedy.
+        ctx.term
+            .detail("the identity and its policies are in place");
+        ctx.term.detail(
+            "install git and run this same restore again, or follow RESTORE.md inside \
+                     the archive itself",
+        );
+        return Ok(Restored {
+            repos: Vec::new(),
+            dropped: carried.iter().map(|repo| repo.rid.clone()).collect(),
+        });
     }
 
     let storage = ctx.home.storage();
@@ -355,10 +391,34 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
     ));
 
     let mut restored = Vec::new();
+    let mut dropped = Vec::new();
     for repo in carried {
-        let bundle = staging.join(git::bundle_entry(&repo.rid));
-        let target = ctx.home.repository_path(&repo.rid);
+        match restore_one(ctx, &git, staging, repo) {
+            Ok(()) => restored.push(repo.clone()),
+            Err(e) => {
+                ctx.term
+                    .fail(&format!("{} could not be restored", repo.display_name()));
+                ctx.term.detail(&e.to_string());
+                dropped.push(repo.rid.clone());
+            }
+        }
+    }
+    Ok(Restored {
+        repos: restored,
+        dropped,
+    })
+}
 
+/// Put one repository back, so that the caller can decide what a failure costs.
+fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Result<()> {
+    let bundle = staging.join(git::bundle_entry(&repo.rid));
+    let target = ctx.home.repository_path(&repo.rid);
+    // Whether the repository was already there decides what a failure may clean up. Under
+    // `--force` the home can hold a copy this run did not create, and deleting that on a
+    // failed unbundle would destroy the thing the restore was meant to protect.
+    let existed = target.exists();
+
+    let put_back = || -> Result<()> {
         git.init_bare(&target)?;
         git.unbundle(&target, &bundle)?;
         if let Some(head) = &repo.head {
@@ -368,9 +428,28 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
         if config.is_file() {
             copy_plain(&config, &target.join("config"))?;
         }
-        restored.push(repo.clone());
+        Ok(())
+    };
+
+    match put_back() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // An empty bare repository is not nothing: the next inventory counts it, the next
+            // archive carries it, and `rad` reads it as a repository with no history at all.
+            if !existed
+                && let Err(swept) = std::fs::remove_dir_all(&target)
+                // Nothing to sweep when the failure was `git init` itself, and saying so about
+                // a directory that was never made only adds noise to an already bad moment.
+                && swept.kind() != std::io::ErrorKind::NotFound
+            {
+                ctx.term.detail(&format!(
+                    "the half-made {} could not be removed either: {swept}",
+                    target.display()
+                ));
+            }
+            Err(e)
+        }
     }
-    Ok(restored)
 }
 
 /// Compare each restored repository with what the network holds.
@@ -614,9 +693,11 @@ fn from_words(ctx: &Ctx) -> Result<()> {
 fn report(
     ctx: &Ctx,
     manifest: &Manifest,
-    restored: &[RepoRecord],
+    restored: &Restored,
     standings: &BTreeMap<String, Standing>,
 ) -> Result<std::process::ExitCode> {
+    let dropped = &restored.dropped;
+    let restored = &restored.repos;
     let diverged: Vec<&String> = standings
         .iter()
         .filter(|(_, standing)| **standing == Standing::Diverged)
@@ -645,6 +726,7 @@ fn report(
                 .collect::<Vec<_>>(),
             "diverged": diverged,
             "notChecked": unchecked,
+            "notRestored": dropped,
         }))?;
     } else {
         let term = &ctx.term;
@@ -678,6 +760,17 @@ fn report(
                 term.hint(&format!("rad sync {rid} --announce"));
             }
         }
+        if !dropped.is_empty() {
+            term.blank();
+            term.fail(&format!(
+                "{} the archive carried could not be restored:",
+                term::count(dropped.len(), "repository", "repositories")
+            ));
+            for rid in dropped {
+                term.detail(rid);
+            }
+            term.detail("the archive still holds them; nothing about it was changed");
+        }
         if !diverged.is_empty() {
             term.blank();
             term.fail("these repositories have diverged from the network:");
@@ -697,7 +790,10 @@ fn report(
         term.detail("start the node with `rad node start`");
     }
 
-    Ok(if diverged.is_empty() {
+    // A repository the archive carried and the home did not get is a failed check, the same
+    // as a divergence: the run did not deliver what it was asked for, and a scheduled restore
+    // that exited 0 over it would be the last anyone heard about it.
+    Ok(if diverged.is_empty() && dropped.is_empty() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::from(EXIT_CHECKS_FAILED)

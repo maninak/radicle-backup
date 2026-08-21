@@ -281,6 +281,63 @@ fn only_archive(directory: &Path) -> PathBuf {
 }
 
 #[test]
+fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_success() {
+    let fixture = Fixture::create("restore-without-git");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a full backup");
+    let archive = only_archive(&backups);
+
+    let restored = fixture.path("restored");
+    let out = fixture
+        .command(&["restore", "--yes", &archive.to_string_lossy()], &restored)
+        .env("GIT", "/nonexistent/git")
+        .output()
+        .expect("rad-backup runs");
+    let said = stderr(&out);
+
+    // The identity is genuinely back, so this is not a failed restore.
+    assert!(
+        restored.join("keys/radicle").is_file(),
+        "the identity should still be restored: {said}"
+    );
+    // But every repository the archive carried is missing, and a run that exits 0 over that
+    // is a scheduled restore nobody ever hears about again.
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a restore that dropped every repository must not exit 0: {said}"
+    );
+    assert!(
+        said.contains("no repositories were restored"),
+        "it has to say so plainly: {said}"
+    );
+    assert!(
+        said.contains(RID),
+        "the repositories it could not restore must be named: {said}"
+    );
+    // It used to point at the staging directory inside the scratch this run deletes on its
+    // way out, so the bundles it named were gone before the shell prompt came back.
+    let scratch_hint = said
+        .lines()
+        .find(|line| line.contains(".rad-backup") || line.contains("staging"));
+    assert_eq!(
+        scratch_hint, None,
+        "it must not offer a path this run is about to delete: {said}"
+    );
+}
+
+#[test]
 fn a_full_archive_restores_an_identity_its_policies_and_its_repositories_byte_for_byte() {
     let fixture = Fixture::create("roundtrip");
     let backups = fixture.path("backups");
