@@ -110,7 +110,7 @@ fn sync_directory(term: &Term, directory: Option<&Path>) {
     }
 }
 
-pub(super) fn destination(
+pub(super) fn choose(
     args: &Create,
     identity: &Identity,
     alias: Option<&str>,
@@ -188,7 +188,7 @@ mod tests {
             output: Some(PathBuf::from("/tmp")),
             ..blank_create()
         };
-        let destination = destination(
+        let destination = choose(
             &into_directory,
             &identity,
             Some("maninak"),
@@ -237,14 +237,14 @@ mod tests {
 
         // A terminal keeps the bytes in scrollback, so the archive never goes there.
         // `matches!` rather than `expect_err`, which would want Debug on Destination.
-        let refused = destination(&args, &identity, None, &now, &Encryption::None, true);
+        let refused = choose(&args, &identity, None, &now, &Encryption::None, true);
         assert!(
             matches!(refused, Err(Error::Refused { .. })),
             "a terminal should be refused"
         );
 
         // A pipe or a redirect is the whole point of --stdout and must keep working.
-        let allowed = destination(&args, &identity, None, &now, &Encryption::None, false)
+        let allowed = choose(&args, &identity, None, &now, &Encryption::None, false)
             .expect("a pipe is a destination");
         assert!(matches!(allowed, Destination::Stdout));
     }
@@ -260,7 +260,7 @@ mod tests {
             stdout: true,
             ..blank_create()
         };
-        let destination = destination(&args, &identity, None, &now, &Encryption::None, false)
+        let destination = choose(&args, &identity, None, &now, &Encryption::None, false)
             .expect("stdout is a destination");
         assert!(matches!(destination, Destination::Stdout));
         assert!(destination.directory().is_none());

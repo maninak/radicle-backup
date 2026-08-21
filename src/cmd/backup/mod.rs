@@ -29,7 +29,7 @@ use crate::term;
 mod destination;
 mod node;
 
-use destination::destination;
+use destination::choose;
 use node::quiesce;
 
 const RESTORE_DOC: &str = include_str!("../../../assets/RESTORE.md");
@@ -123,7 +123,7 @@ pub fn run(ctx: &Ctx, args: &Create) -> Result<Outcome> {
 
     let encryption = encryption.expect("a run that is not a dry run has returned by now");
     let now = jiff::Timestamp::now();
-    let destination = destination(
+    let destination = choose(
         args,
         &identity,
         home.alias()?.as_deref(),

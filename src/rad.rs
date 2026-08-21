@@ -29,17 +29,6 @@ pub enum Listed {
     Unavailable { why: String },
 }
 
-/// An error as one line, because these end up inside a warning next to a repository id.
-pub fn one_line(error: &crate::error::Error) -> String {
-    error
-        .to_string()
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
 /// Which repositories to ask `rad ls` about.
 #[derive(Debug, Clone, Copy)]
 pub enum Listing {
@@ -96,7 +85,7 @@ impl Rad {
     pub fn describe_repo(&self, rid: &str) -> Result<Described> {
         let json = match self.tool.output(&["inspect", rid, "--identity"]) {
             Ok(json) => json,
-            Err(e) => return Ok(Described::Unavailable { why: one_line(&e) }),
+            Err(e) => return Ok(Described::Unavailable { why: e.one_line() }),
         };
         match serde_json::from_str::<serde_json::Value>(&json) {
             Ok(document) => Ok(Described::Identity(RepoIdentity::from_document(&document))),
@@ -114,7 +103,7 @@ impl Rad {
         };
         match self.tool.output(args) {
             Ok(out) => Ok(Listed::Ids(repository_ids(&out))),
-            Err(e) => Ok(Listed::Unavailable { why: one_line(&e) }),
+            Err(e) => Ok(Listed::Unavailable { why: e.one_line() }),
         }
     }
 

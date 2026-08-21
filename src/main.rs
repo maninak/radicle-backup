@@ -32,7 +32,7 @@ use crate::error::Result;
 use crate::home::Home;
 use crate::term::{Term, Verbosity};
 
-fn backup_code(outcome: cmd::backup::Outcome) -> ExitCode {
+fn backup_exit_code(outcome: cmd::backup::Outcome) -> ExitCode {
     if outcome.incomplete {
         ExitCode::from(crate::error::EXIT_CHECKS_FAILED)
     } else {
@@ -128,8 +128,8 @@ fn dispatch(ctx: &Ctx, cli: &Cli) -> Result<ExitCode> {
         // Exit 3 when a run wrote an archive but lost a repository doing it, the same code
         // `doctor` and `diff` use for "it worked and you should look". A timer that only reads
         // the exit status could not otherwise tell a complete backup from a gutted one.
-        None => cmd::backup::run(ctx, &cli.create).map(backup_code),
-        Some(Command::Create(args)) => cmd::backup::run(ctx, args).map(backup_code),
+        None => cmd::backup::run(ctx, &cli.create).map(backup_exit_code),
+        Some(Command::Create(args)) => cmd::backup::run(ctx, args).map(backup_exit_code),
         Some(Command::Restore(args)) => cmd::restore::run(ctx, args),
         Some(Command::Verify(args)) => cmd::verify::run(ctx, args),
         Some(Command::Ls(args)) => cmd::ls::run(ctx, args).map(|()| ExitCode::SUCCESS),

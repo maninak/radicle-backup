@@ -297,7 +297,7 @@ fn check_backup_locality(home: &std::path::Path, record: Option<&state::Record>)
         )
         .with_remedy("if you moved it somewhere safe, this is fine; if not, take another");
     }
-    match state::same_device(path, home) {
+    match crate::perms::same_device(path, home) {
         // A warning and not a failure, because the same filesystem does not mean the same
         // fate: a directory synced by MEGA, Dropbox, Drive or Syncthing is already off this
         // machine, and this tool has no way to know whether one is watching. Failing a posture

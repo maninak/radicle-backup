@@ -16,7 +16,7 @@ const SUFFIXES: [&str; 2] = [".tar.zst.age", ".tar.zst"];
 
 /// How much of a node id an archive name carries. Long enough that two identities on one
 /// machine cannot collide, short enough to leave a file name readable.
-pub const SHORT_ID: usize = 12;
+pub const SHORT_ID_LEN: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Archive {
@@ -42,7 +42,7 @@ impl Archive {
 /// The alias is deliberately not part of the match. An identity that renames itself keeps the
 /// same node id, and archives taken under the old name are still that identity's archives.
 pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
-    let short: String = node_id.chars().take(SHORT_ID).collect();
+    let short: String = node_id.chars().take(SHORT_ID_LEN).collect();
     let marker = format!("-{short}-");
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -101,7 +101,7 @@ pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: 
         .map(sanitise)
         .filter(|alias| !alias.is_empty())
         .unwrap_or_else(|| "radicle".to_string());
-    let short: String = node_id.chars().take(SHORT_ID).collect();
+    let short: String = node_id.chars().take(SHORT_ID_LEN).collect();
     let extension = if encrypted { "tar.zst.age" } else { "tar.zst" };
     format!("{alias}-{short}-{stamp}.{extension}")
 }
@@ -253,7 +253,8 @@ mod tests {
         touch(&dir, &name);
 
         // The writer used to spell the length of the short node id by hand while this reader
-        // matched on SHORT_ID. They agreed only by coincidence, and moving the constant would
+        // matched on SHORT_ID_LEN. They agreed only by coincidence, and moving the
+        // constant would
         // have made every new archive invisible to `ls`, `prune` and `--keep` at once.
         let found = in_dir(&dir, NODE).expect("the directory is readable");
         assert_eq!(found.iter().map(Archive::name).collect::<Vec<_>>(), [name]);

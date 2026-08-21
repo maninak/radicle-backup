@@ -156,7 +156,7 @@ fn undescribed_warning(
     selected: &BTreeSet<String>,
     why: &str,
 ) -> String {
-    let carried = carried_of(undescribed, selected);
+    let carried = also_selected(undescribed, selected);
     let fate = match carried {
         0 => "This run was not asked for them, so the archive holds none of them".to_string(),
         n => format!(
@@ -168,7 +168,7 @@ fn undescribed_warning(
     format!(
         "`rad` could not describe {}: {} ({why}). {fate}",
         crate::term::count(undescribed.len(), "repository", "repositories"),
-        listed(undescribed)
+        shortlist(undescribed)
     )
 }
 
@@ -178,7 +178,7 @@ fn unreadable_warning(
     selected: &BTreeSet<String>,
     why: &str,
 ) -> String {
-    let carried = carried_of(unreadable, selected);
+    let carried = also_selected(unreadable, selected);
     let fate = match carried {
         0 => "This run was not asked for them, so nothing will try to bundle them".to_string(),
         n => format!(
@@ -195,18 +195,18 @@ fn unreadable_warning(
         "`git` could not read {}: {} ({why}). Each is listed in the inventory with no refs. \
          {fate}",
         crate::term::count(unreadable.len(), "repository", "repositories"),
-        listed(unreadable)
+        shortlist(unreadable)
     )
 }
 
 /// How many of these this run will actually carry.
-fn carried_of(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
+fn also_selected(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
     troubled.intersection(selected).count()
 }
 
 /// A few named and the rest counted: identifiers stop being readable well before they stop
 /// being numerous, while the count is what says how much of the home this is about.
-fn listed(rids: &BTreeSet<String>) -> String {
+fn shortlist(rids: &BTreeSet<String>) -> String {
     const NAMED: usize = 5;
     let named: Vec<&str> = rids.iter().take(NAMED).map(String::as_str).collect();
     match rids.len().saturating_sub(named.len()) {
@@ -288,7 +288,7 @@ fn describe(
     // is the same rule one stage earlier, where it was missing, and where it ran first.
     let (refs, unreadable) = match git.refs(&path) {
         Ok(refs) => (refs, None),
-        Err(e) => (Vec::new(), Some(crate::rad::one_line(&e))),
+        Err(e) => (Vec::new(), Some(e.one_line())),
     };
     let sigrefs = sigrefs_by_peer(&refs);
     let head = match unreadable {

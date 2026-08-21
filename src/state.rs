@@ -182,8 +182,6 @@ pub fn write(record: &Record) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub use crate::perms::same_device;
-
 #[cfg(test)]
 mod tests {
     use super::*;

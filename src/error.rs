@@ -84,6 +84,17 @@ pub enum Error {
 }
 
 impl Error {
+    /// This error as one line, for the places that carry it as a `why` inside a warning next
+    /// to a repository id rather than printing it on its own.
+    pub fn one_line(&self) -> String {
+        self.to_string()
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
     pub fn io(path: impl AsRef<Path>, source: io::Error) -> Self {
         Self::Io {
             path: path.as_ref().to_path_buf(),
