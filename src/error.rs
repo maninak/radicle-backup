@@ -20,8 +20,13 @@ pub enum Error {
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 
+    /// An io error with no file to attach it to, which is rare: almost every one this tool
+    /// meets is about a path somebody is holding. Deliberately not `#[from]`, so that `?` on
+    /// an `io::Error` does not compile and the pathless spelling has to be asked for by name.
+    /// Without that, `Io { path, source }` above is the variant somebody has to remember, and
+    /// the message that names no file is what a tired afternoon produces.
     #[error("{0}")]
-    Bare(#[from] io::Error),
+    Bare(io::Error),
 
     #[error("could not run `{program}`: {source}\nis it installed and on PATH?")]
     Spawn { program: String, source: io::Error },

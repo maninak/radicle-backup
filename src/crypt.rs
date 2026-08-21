@@ -76,7 +76,11 @@ impl<'a> Sink<'a> {
                 age::Encryptor::with_recipients(borrowed.into_iter())?
             }
         };
-        Ok(Self::Encrypted(Box::new(encryptor.wrap_output(output)?)))
+        // Pathless on purpose: `output` is whatever sink the caller opened, and the failure
+        // here is age setting up its own stream rather than anything about a file.
+        Ok(Self::Encrypted(Box::new(
+            encryptor.wrap_output(output).map_err(Error::Bare)?,
+        )))
     }
 
     /// Close the encryption layer. Skipping this writes a truncated archive that will not
