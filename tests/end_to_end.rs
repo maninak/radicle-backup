@@ -1606,6 +1606,89 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
 }
 
 #[cfg(unix)]
+// Unix only: it runs the shipped script's own `case` through a POSIX shell.
+#[cfg(unix)]
+/// The two readers of an archive must refuse the same `HEAD` values.
+///
+/// The real `case` is lifted out of `assets/restore.sh` rather than restated, so a change to
+/// one reader that is not made to the other fails here. The table is the one in
+/// `git::tests::a_head_under_refs_that_climbs_out_of_the_repository_is_refused`, repeated
+/// because a bin-only crate has no library for this suite to call into.
+#[test]
+fn the_shipped_script_refuses_every_head_this_tool_refuses() {
+    let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/restore.sh"))
+        .expect("the shipped script is readable");
+    let start = script
+        .find("case \"$head\" in")
+        .expect("the shipped script still decides about HEAD with a case");
+    let tail = &script[start..];
+    let end = start
+        + tail
+            .find("\n\t\tesac")
+            .expect("the case about HEAD is still closed by an esac")
+        + "\n\t\tesac".len();
+    let harness = script[start..end]
+        .replace(
+            "git --git-dir \"$target\" symbolic-ref HEAD \"$head\"",
+            "echo ACCEPT",
+        )
+        .replace(
+            "echo \"skipping HEAD for $rid: '$head' does not name a ref\" >&2",
+            "echo SKIP",
+        );
+    assert!(
+        harness.contains("echo ACCEPT") && harness.contains("echo SKIP"),
+        "the case no longer has the branches this substitutes, so it is not being tested: \
+         {harness}"
+    );
+
+    let refused = [
+        "refs/../../evil",
+        "refs/heads/../../../etc/x",
+        "refs/",
+        "refs/heads/",
+        "refs//heads/x",
+        "refs/heads/.hidden",
+        "refs/heads/x.lock",
+        "refs/heads/a b",
+        "refs/heads/a^b",
+        "-d",
+        "--version",
+        "master",
+        "refs/heads/a\nb",
+    ];
+    let accepted = [
+        "refs/heads/master",
+        "refs/heads/feature/nested",
+        "refs/heads/v1.0",
+        "refs/namespaces/z6Mk/refs/heads/master",
+    ];
+
+    let verdict = |head: &str| -> String {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&harness)
+            .env("head", head)
+            .output()
+            .expect("sh runs");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    for head in refused {
+        assert_eq!(
+            verdict(head),
+            "SKIP",
+            "the shipped script accepts a head this tool refuses: {head:?}"
+        );
+    }
+    for head in accepted {
+        assert_eq!(
+            verdict(head),
+            "ACCEPT",
+            "the shipped script refuses a head this tool accepts: {head:?}"
+        );
+    }
+}
+
 /// Rebuild an archive with `-d` planted as every repository's `HEAD`, the way a hostile or a
 /// corrupt manifest would carry it.
 ///

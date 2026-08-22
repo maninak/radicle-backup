@@ -78,9 +78,13 @@ for bundle in repos/*.bundle; do
 		# checking, so `refs/../../evil` would later write a file outside the repository.
 		# The same check `rad-backup` makes, here for the same reason the id above is
 		# checked: this script runs when it is not there.
+		# The same set `rad-backup` refuses, so that both readers of an archive put the
+		# same thing back: a `refs/` prefix, and no component that is empty, starts with
+		# a dot, ends in `.lock`, or holds a character git forbids in a refname.
 		case "$head" in
 		'') ;;
-		*..*|*//*|*/|*' '*|*'~'*|*'^'*|*':'*|*'?'*|*'*'*|*'['*|*'\'*)
+		*[![:print:]]* | *..* | */.* | *//* | */ | *.lock | *.lock/* \
+		| *' '* | *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *'\'*)
 			echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
 		refs/?*) git --git-dir "$target" symbolic-ref HEAD "$head" ;;
 		*) echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;

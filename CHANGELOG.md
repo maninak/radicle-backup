@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
+- `nix build` works again. The flake runs the test suite as part of the build, and one test needs `jq` to read a manifest the way the shipped script does, which the build environment did not have, so v0.2.0 would not build from the flake at all.
+- The `restore.sh` inside an archive refuses the same `HEAD` values `rad backup` refuses. It used to let through a few that git itself rejects, such as a name whose component starts with a dot or ends in `.lock`, so the two readers of one archive could put back different things.
 - The `restore.sh` inside an archive says when `jq` is missing, instead of putting every repository back without its `HEAD` and saying nothing about it.
 
 ## [0.2.0] - 2026-08-21
