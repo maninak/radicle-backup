@@ -1605,15 +1605,14 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
     );
 }
 
-#[cfg(unix)]
-// Unix only: it runs the shipped script's own `case` through a POSIX shell.
-#[cfg(unix)]
 /// The two readers of an archive must refuse the same `HEAD` values.
 ///
 /// The real `case` is lifted out of `assets/restore.sh` rather than restated, so a change to
 /// one reader that is not made to the other fails here. The table is the one in
 /// `git::tests::a_head_under_refs_that_climbs_out_of_the_repository_is_refused`, repeated
 /// because a bin-only crate has no library for this suite to call into.
+// Unix only: it runs the shipped script's own `case` through a POSIX shell.
+#[cfg(unix)]
 #[test]
 fn the_shipped_script_refuses_every_head_this_tool_refuses() {
     let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/restore.sh"))
@@ -1656,36 +1655,60 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
         "--version",
         "master",
         "refs/heads/a\nb",
+        "refs/heads/a\tb",
     ];
     let accepted = [
         "refs/heads/master",
         "refs/heads/feature/nested",
         "refs/heads/v1.0",
         "refs/namespaces/z6Mk/refs/heads/master",
+        // A branch named in a language with accents is a ref like any other, and a shell
+        // whose character classes work per byte must not quietly drop its HEAD.
+        "refs/heads/caf\u{e9}",
     ];
 
-    let verdict = |head: &str| -> String {
-        let out = Command::new("sh")
+    // Every shell on the machine, not just `/bin/sh`: the patterns lean on bracket
+    // expressions and character classes, and this is the archive's reader of last resort, so
+    // it has to decide the same way wherever somebody runs it. Spawning is the check for
+    // whether one is installed, because `--version` is not portable across them (dash has
+    // none) and a missing shell fails to spawn at all.
+    let shells: Vec<&str> = ["sh", "dash", "bash", "busybox"]
+        .into_iter()
+        .filter(|shell| Command::new(shell).arg("--version").output().is_ok())
+        .collect();
+    assert!(
+        shells.contains(&"sh"),
+        "no POSIX shell to run the archive's own reader with"
+    );
+
+    let verdict = |shell: &str, head: &str| -> String {
+        let mut command = Command::new(shell);
+        if shell == "busybox" {
+            command.arg("ash");
+        }
+        let out = command
             .arg("-c")
             .arg(&harness)
             .env("head", head)
             .output()
-            .expect("sh runs");
+            .unwrap_or_else(|e| panic!("{shell} runs: {e}"));
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
-    for head in refused {
-        assert_eq!(
-            verdict(head),
-            "SKIP",
-            "the shipped script accepts a head this tool refuses: {head:?}"
-        );
-    }
-    for head in accepted {
-        assert_eq!(
-            verdict(head),
-            "ACCEPT",
-            "the shipped script refuses a head this tool accepts: {head:?}"
-        );
+    for shell in &shells {
+        for head in refused {
+            assert_eq!(
+                verdict(shell, head),
+                "SKIP",
+                "under {shell}, the shipped script accepts a head this tool refuses: {head:?}"
+            );
+        }
+        for head in accepted {
+            assert_eq!(
+                verdict(shell, head),
+                "ACCEPT",
+                "under {shell}, the shipped script refuses a head this tool accepts: {head:?}"
+            );
+        }
     }
 }
 

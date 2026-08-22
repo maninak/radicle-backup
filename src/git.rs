@@ -289,6 +289,9 @@ mod tests {
         assert!(names_a_ref("refs/heads/feature/nested"));
         assert!(names_a_ref("refs/heads/v1.0"));
         assert!(names_a_ref("refs/namespaces/z6Mk/refs/heads/master"));
+        // Only ASCII control characters are refused, so a branch named in a language with
+        // accents keeps its HEAD.
+        assert!(names_a_ref("refs/heads/caf\u{e9}"));
     }
 
     #[test]

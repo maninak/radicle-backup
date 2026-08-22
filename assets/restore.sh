@@ -83,7 +83,7 @@ for bundle in repos/*.bundle; do
 		# a dot, ends in `.lock`, or holds a character git forbids in a refname.
 		case "$head" in
 		'') ;;
-		*[![:print:]]* | *..* | */.* | *//* | */ | *.lock | *.lock/* \
+		*[[:cntrl:]]* | *..* | */.* | *//* | */ | *.lock | *.lock/* \
 		| *' '* | *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *'\'*)
 			echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
 		refs/?*) git --git-dir "$target" symbolic-ref HEAD "$head" ;;
