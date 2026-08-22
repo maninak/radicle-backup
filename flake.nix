@@ -41,8 +41,11 @@
             # host and nothing that can differ between hosts.
             nativeBuildInputs = [ pkgs.installShellFiles ];
 
-            # The suite drives the built binary against a real git.
-            nativeCheckInputs = [ pkgs.git ];
+            # The suite drives the built binary against a real git, and `jq` because the
+            # shipped `restore.sh` reads the manifest with it: without one the script puts
+            # every repository back with no HEAD, and the test comparing it against this
+            # tool fails on a difference that is the build environment's, not the code's.
+            nativeCheckInputs = [ pkgs.git pkgs.jq ];
 
             postInstall = ''
               ln -s rad-backup $out/bin/rad-restore

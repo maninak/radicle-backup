@@ -68,7 +68,9 @@ for bundle in repos/*.bundle; do
 		fetch --quiet --force "$(pwd)/$bundle" 'refs/*:refs/*'
 	[ -f "repos/$rid.config" ] && cp "repos/$rid.config" "$target/config"
 
-	if command -v jq >/dev/null 2>&1; then
+	if ! command -v jq >/dev/null 2>&1; then
+		echo "jq is not installed, so $rid came back without its HEAD" >&2
+	else
 		head=$(jq -r --arg rid "rad:$rid" \
 			'.repos[] | select(.rid==$rid) | .head // empty' manifest.json)
 		# `symbolic-ref` takes no `--`, so a manifest saying `head: "-d"` would reach git

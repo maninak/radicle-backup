@@ -998,6 +998,8 @@ fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
     assert!(said.contains(RID), "it has to name what it lost: {said}");
 }
 
+// Unix only: it runs the shipped POSIX script, which Windows has no shell for.
+#[cfg(unix)]
 /// The shipped script and this tool are two implementations of one restore, kept in step by
 /// policy (guardrail: an archive never depends on this tool to be read). Nothing enforced that
 /// they stayed in step, so anything added to one side only, the way `repos/*.config` or the
@@ -1062,8 +1064,20 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
     assert!(target.join("storage").join(RID).is_dir());
 }
 
+// Unix only: it runs the shipped POSIX script and compares the mode bits it sets,
+// neither of which Windows has.
+#[cfg(unix)]
 #[test]
 fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
+    // Stated rather than assumed: the script reads `head` out of the manifest with `jq`, and
+    // without one it puts every repository back with no HEAD. That difference then surfaces
+    // at the HEAD comparison far below as though the two readers disagreed, which they do
+    // not. Nix hit exactly this, its check environment having no jq.
+    assert!(
+        Command::new("jq").arg("--version").output().is_ok(),
+        "this compares what the shipped script restores against this tool, and the script \
+         needs jq to read the manifest; install jq and run it again"
+    );
     let fixture = Fixture::create("parity");
     let backups = fixture.path("backups");
 
@@ -1399,6 +1413,8 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     );
 }
 
+// Unix only: it runs the copy-paste block from `RESTORE.md` through a POSIX shell.
+#[cfg(unix)]
 // `Command::output()` gives the child a pipe, which is the case this guards: the sheet is
 // the key in the clear, so `paper` refuses a terminal but must keep working when piped.
 // Written as "refuse whenever --output is absent" the guard would take piping away, and
@@ -1455,6 +1471,8 @@ fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
     );
 }
 
+// Unix only: it runs the shipped POSIX script, which Windows has no shell for.
+#[cfg(unix)]
 /// A hostile manifest must not steer `git symbolic-ref` by way of the shipped script.
 ///
 /// `symbolic-ref` accepts no `--`, so a `head` of `-d` is read as a flag rather than as the
@@ -1541,6 +1559,9 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     );
 }
 
+// Unix only: it rebuilds the archive by shelling out to `tar`, and the entry names have to
+// stay `/`-separated for the reader to match them, which a Windows path does not give.
+#[cfg(unix)]
 /// This tool must make the same skip the shipped script makes, over the same planted `HEAD`.
 ///
 /// It did not. `set_head` returned an error from inside the closure that puts a repository
@@ -1580,6 +1601,7 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
     );
 }
 
+#[cfg(unix)]
 /// Rebuild an archive with `-d` planted as every repository's `HEAD`, the way a hostile or a
 /// corrupt manifest would carry it.
 ///
@@ -1643,6 +1665,7 @@ fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
     target
 }
 
+#[cfg(unix)]
 /// Every regular file under `dir`, named relative to `root`.
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
     for entry in std::fs::read_dir(dir).expect("the directory is readable") {
