@@ -1718,6 +1718,8 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
 /// Every file is named to `tar` one by one rather than by its directory, because the reader
 /// matches `manifest.json` by its exact entry name and a directory argument would add entries
 /// the original archive never had.
+// Unix only: its one caller is, and it reaches `collect_files`, which is too.
+#[cfg(unix)]
 fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
     let extracted = fixture.path("planted-extract");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
