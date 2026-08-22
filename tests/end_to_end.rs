@@ -1608,9 +1608,9 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
 /// The two readers of an archive must refuse the same `HEAD` values.
 ///
 /// The real `case` is lifted out of `assets/restore.sh` rather than restated, so a change to
-/// one reader that is not made to the other fails here. The table is the one in
-/// `git::tests::a_head_under_refs_that_climbs_out_of_the_repository_is_refused`, repeated
-/// because a bin-only crate has no library for this suite to call into.
+/// one reader that is not made to the other fails here. The table repeats
+/// `git::tests::a_head_under_refs_that_climbs_out_of_the_repository_is_refused` and adds the
+/// cases only a shell can get wrong, because a bin-only crate has no library to call into.
 // Unix only: it runs the shipped script's own `case` through a POSIX shell.
 #[cfg(unix)]
 #[test]
@@ -1680,6 +1680,22 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
         shells.contains(&"sh"),
         "no POSIX shell to run the archive's own reader with"
     );
+    // A shell that is not installed drops out of the list, and a check that quietly covers
+    // less than it claims is the thing this test exists to prevent. Say what was covered,
+    // and on CI, where the workflow installs all four, a short list is a failure rather
+    // than a fact about the machine.
+    eprintln!(
+        "the shipped script was checked under: {}",
+        shells.join(", ")
+    );
+    if std::env::var_os("CI").is_some() && cfg!(target_os = "linux") {
+        for wanted in ["sh", "dash", "bash", "busybox"] {
+            assert!(
+                shells.contains(&wanted),
+                "CI is meant to run this under {wanted}, which is not installed"
+            );
+        }
+    }
 
     let verdict = |shell: &str, head: &str| -> String {
         let mut command = Command::new(shell);

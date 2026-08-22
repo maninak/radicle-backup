@@ -39,6 +39,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The restore-script parity test runs the archive's own `case` under every shell it
+      # finds. Only `dash` ships on the runner, and `busybox ash` is the one with its own
+      # pattern matcher, so without this the leg that fix exists for never runs.
+      - name: Shells the shipped script must agree under
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y busybox
       - name: Formatting
         run: cargo fmt --check
       # Here as well as in `just check`, because CI runs the cargo commands directly rather
@@ -67,6 +73,24 @@ jobs:
       # versions while the build pulls and runs a crate published this morning.
       - name: Lints
         run: cargo clippy --all-targets --locked
+      # `just nonunix`, spelled out for the same reason the audit map above is: CI runs the
+      # commands rather than the recipe. Linux only, because it is a simulation of what the
+      # windows job compiles for real.
+      - name: Non-unix gates
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          file=tests/end_to_end.rs
+          saved=$(mktemp)
+          cp "$file" "$saved"
+          trap 'cp "$saved" "$file"; rm -f "$saved"' EXIT
+          gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' "$file" || true)
+          if [ "$gates" -eq 0 ]; then
+            echo "::error::no '#[cfg(unix)]' gates matched in $file, so nothing was checked"
+            exit 1
+          fi
+          sed 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' "$saved" > "$file"
+          cargo clippy --all-targets --locked
       # The integration suite drives the real binary against a real git, which is what makes
       # it worth running on every platform rather than only where it was written. Windows is
       # where the "this cannot be restricted to one user" path is the live one, so a green run

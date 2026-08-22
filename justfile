@@ -5,7 +5,7 @@ default:
 
 # What CI runs on every push, in the order that fails fastest. CI spells the cargo steps
 # out itself rather than calling this, so a gate added here has to be added there too.
-check: fmt-check audit-map lint test
+check: fmt-check audit-map lint nonunix test
 
 # Every file SECURITY.md sends a reviewer to still exists.
 #
@@ -31,6 +31,37 @@ audit-map:
     	missing=1
     fi
     exit "$missing"
+
+# Compile the suite the way a target that is not unix sees it.
+#
+# A helper without `#[cfg(unix)]` that calls one which has it builds here and fails on
+# Windows, and that has now reached CI three times. There is no local windows build to catch
+# it with, because zstd's C code wants `lib.exe`, so this turns the gates off and compiles
+# that instead. Roughly a second, because only the one test crate is recompiled.
+#
+# The file is rewritten in place and put back by the trap, so a failing compile or a Ctrl-C
+# leaves the working tree as it found it.
+nonunix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    file=tests/end_to_end.rs
+    saved=$(mktemp)
+    cp "$file" "$saved"
+    trap 'cp "$saved" "$file"; rm -f "$saved"' EXIT
+    # Zero gates means the pattern stopped matching, not that there is nothing to check.
+    gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' "$file" || true)
+    if [ "$gates" -eq 0 ]; then
+    	echo "no '#[cfg(unix)]' gates matched in $file, so nothing was checked" >&2
+    	exit 1
+    fi
+    # Indented gates count: a method inside an `impl` carries one, and leaving it while its
+    # caller goes reports the caller's absence as dead code, which is this check inventing a
+    # failure windows would never see.
+    #
+    # Reading the saved copy and writing the file, rather than `sed -i`, which spells its
+    # backup suffix differently on GNU and BSD and so breaks on the macOS checkouts.
+    sed 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' "$saved" > "$file"
+    RUSTFLAGS="-D warnings" cargo clippy --all-targets --locked
 
 fmt:
     cargo fmt
