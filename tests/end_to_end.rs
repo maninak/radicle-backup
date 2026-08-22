@@ -385,8 +385,12 @@ fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_suc
     );
     // It used to point at the staging directory inside the scratch this run deletes on its
     // way out, so the bundles it named were gone before the shell prompt came back.
+    // The Windows-only warning about permissions names the scratch directory too, and it is
+    // not sending anybody there: it says what the platform could not promise about a file it
+    // just wrote. Only the lines that offer the reader somewhere to look are under test.
     let scratch_hint = said
         .lines()
+        .filter(|line| !line.contains("cannot restrict a file to one user"))
         .find(|line| line.contains(".rad-backup") || line.contains("staging"));
     assert_eq!(
         scratch_hint, None,
