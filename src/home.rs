@@ -11,6 +11,14 @@ use crate::error::{Error, Result};
 ///
 /// The socket file survives a stopped node, so its presence proves nothing and connecting is
 /// the only honest test.
+// Off unix there is no control socket, so `probe_node_state` has one answer and nothing
+// constructs the other two. The type stays one type on every platform, because a per-platform
+// enum would put a `cfg` on every match in the tree. `expect` rather than `allow`, so the day
+// a Windows node does answer, the attribute fails the build instead of sitting on live code.
+#[cfg_attr(
+    not(unix),
+    expect(dead_code, reason = "no control socket to answer on")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeState {
     Running,
@@ -31,6 +39,7 @@ pub enum NodeState {
 impl NodeState {
     /// Whether a node is known to be running. False for `Unknown`, so a caller that only wants
     /// to warn does not warn on a doubt.
+    #[cfg_attr(not(unix), expect(dead_code, reason = "nothing here can answer yes"))]
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Running)
     }

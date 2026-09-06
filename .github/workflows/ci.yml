@@ -173,24 +173,36 @@ jobs:
         run: cargo clippy --all-targets --locked
       # `just nonunix`, spelled out for the same reason the audit map above is: CI runs the
       # commands rather than the recipe. Linux only, because it is a simulation of what the
-      # windows job compiles for real.
+      # windows job compiles for real. Every tracked `.rs` file: reading only the integration
+      # suite left `src/` out, and `src/home.rs` alone carries eight of the gates.
       - name: Non-unix gates
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          file=tests/end_to_end.rs
-          saved=$(mktemp)
-          cp "$file" "$saved"
-          trap 'cp "$saved" "$file"; rm -f "$saved"' EXIT
-          gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' "$file" || true)
+          files=$(git ls-files 'src/' 'tests/' | grep '\.rs$')
+          if [ -z "$files" ]; then
+            echo "::error::no rust files were listed, so nothing was compiled"
+            exit 1
+          fi
+          saved=$(mktemp -d)
+          trap 'for file in $files; do cp "$saved/$(echo "$file" | tr / _)" "$file"; done; rm -rf "$saved"' EXIT
+          gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' $files | awk -F: '{total += $2} END {print total+0}')
           if [ "$gates" -eq 0 ]; then
-            echo "::error::no '#[cfg(unix)]' gates matched in $file, so nothing was checked"
+            echo "::error::no '#[cfg(unix)]' gates matched, so nothing was checked"
             exit 1
           fi
           # The second expression drops `#[cfg(not(unix))]` so its item compiles unconditionally:
-          # switching only the unix half of a platform pair off would take both arms away.
-          sed -e 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' \
-            -e '/^[[:space:]]*#\[cfg(not(unix))\]$/d' "$saved" > "$file"
+          # switching only the unix half of a platform pair off would take both arms away. The
+          # third makes every `not(unix)` still standing come out true, which is what applies a
+          # `#[cfg_attr(not(unix), ...)]` over an item this simulation has just switched off.
+          # A token and not a line, because `rustfmt` wraps a long attribute over four lines.
+          for file in $files; do
+            cp "$file" "$saved/$(echo "$file" | tr / _)"
+            sed -e 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' \
+              -e '/^[[:space:]]*#\[cfg(not(unix))\]$/d' \
+              -e 's/not(unix)/all()/g' \
+              "$saved/$(echo "$file" | tr / _)" > "$file"
+          done
           cargo clippy --all-targets --locked
       # The integration suite drives the real binary against a real git, which is what makes
       # it worth running on every platform rather than only where it was written. Windows is

@@ -25,7 +25,10 @@ use crate::term;
 /// How long to wait for a node this command started to answer on its control socket, and how
 /// often to look. The same shape as `backup`'s stop deadline, for the same reason: the command
 /// that starts a daemon does not wait for it.
+// Both only reach `wait_for_node`, which is the unix half of a platform pair.
+#[cfg(unix)]
 const NODE_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+#[cfg(unix)]
 const NODE_START_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// How a restored repository stands next to what other nodes hold of its signed refs.
