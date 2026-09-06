@@ -1,4 +1,7 @@
-# Shared by every gate in this directory.
+# shellcheck shell=sh
+#
+# Shared by every gate in this directory. Sourced rather than run, so it carries a `shell`
+# directive where the others carry a shebang.
 #
 # A gate reports through `complain`, which prefixes each line with `::error::` under GitHub
 # Actions so the failure is raised as an annotation on the job, and prints it plainly

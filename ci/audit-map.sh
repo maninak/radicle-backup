@@ -5,49 +5,75 @@
 # The audit map is the one document that promises "here is where the secrets are handled",
 # and a rename breaks it silently: renaming `archive.rs` to `container.rs` left a reviewer
 # following the map to a file that was not there, which is worse than no map at all.
+#
+# Two passes, because the document says where to look in two ways. The table is parsed as a
+# table, so the count of rows read is the count of rows there are; everything else in the file
+# is scanned for path-shaped words, which is what reaches the commands in the fenced block at
+# the bottom. Neither pass can see the other direction, a new file in `src/` that handles a
+# secret and has no row here at all: telling that apart from the fifty files that legitimately
+# have none is a judgement, so it stays a reviewer's. Revisit if the map ever gains a marker
+# on the source side that a gate could read.
 
 set -eu
 
 # shellcheck source=ci/lib.sh
 . "$(dirname "$0")/lib.sh"
 
+map=SECURITY.md
 missing=0
-checked=0
-# Every backticked path in the file, not just the first of a row and not just the ones under
-# `src/`: the anchored form checked one path per line, so a row naming two files was half
-# unchecked, and a `src/`-only pattern walked past `ARCHIVE-FORMAT.md`, which SECURITY.md also
-# sends a reader to. A file extension is what makes a backticked word a path here: `storage/`
-# is a directory inside a restored home rather than a file in this repository, and everything
-# else in backticks is a function or a flag and is nobody's file either.
-for path in $(grep -oE '`[A-Za-z0-9_./-]+`' SECURITY.md | tr -d '`' |
-	grep -E '\.(md|rs|sh|toml|nix|lock|yml)$' || [ $? -eq 1 ]); do
-	if [ ! -e "$path" ]; then
-		echo "SECURITY.md sends a reviewer to $path, which is not there" | complain
-		missing=1
-	fi
-	checked=$((checked + 1))
-done
 
-# The map is a markdown table, and every row of it opens with the file that row is about. The
-# loop above reads the whole document, prose included, so it cannot say whether the TABLE was
-# read: comparing what it found against the row count is what makes the number mean something.
-# A floor of one passed a run where the pattern had stopped matching all but a single row,
-# which is a gate reporting on a map it did not read.
-#
-# What this cannot see is the other direction: a new file in `src/` that handles a secret and
-# has no row here at all. Telling that apart from the fifty files that legitimately have none
-# is a judgement, so it stays a reviewer's. Revisit if the map ever gains a marker on the
-# source side that a gate could read.
-rows=$(grep -cE '^\|[^|]*\|' SECURITY.md || [ $? -eq 1 ])
-rows=$((rows - 2)) # the header and the `|---|---|` under it
-named=$(grep -cE '^\| `[A-Za-z0-9_./-]+\.[a-z]+`' SECURITY.md || [ $? -eq 1 ])
-if [ "$rows" -le 0 ] || [ "$named" -eq 0 ]; then
-	echo "the audit map in SECURITY.md matched no rows, so nothing was checked" | complain
+# The first cell of every row of the audit map, which is the file that row is about. Read as
+# the table it is rather than by counting `|` lines in the whole document: a second table
+# anywhere in the file threw the count off and the failure blamed the map.
+rows=$(awk -F'|' '
+	/^\| *Read this *\|/ { inside = 1; next }
+	inside && /^\|[[:space:]]*-+/ { next }
+	inside && !/^\|/ { exit }
+	inside { gsub(/[` ]/, "", $2); if ($2 != "") print $2 }
+' "$map")
+if [ -z "$rows" ]; then
+	echo "the audit map in $map matched no rows, so nothing was checked. Its table opens" \
+		"with a '| Read this |' header, and this reads the first cell of every row under it." |
+		complain
 	exit 1
 fi
-if [ "$named" -ne "$rows" ]; then
-	echo "the audit map has $rows rows and $named of them open with a file this gate could" \
-		"read, so part of the map went unchecked while this reported on the rest" | complain
+for path in $rows; do
+	if [ ! -e "$path" ]; then
+		echo "the audit map sends a reviewer to $path, which is not there" | complain
+		missing=1
+	fi
+done
+
+# Every other path in the document: a backticked word with a file extension, and a word
+# starting with `./`, which is how the fenced block at the bottom spells the two commands it
+# tells a reviewer to run. An extension is what makes a backticked word a path: `storage/` is
+# a directory inside a restored home rather than a file here, and everything else in backticks
+# is a function or a flag and is nobody's file either.
+#
+# shellcheck disable=SC2016 # the `$` in these patterns is grep's anchor, not a variable
+elsewhere=$(
+	grep -oE '`[A-Za-z0-9_./-]+`' "$map" | tr -d '`' |
+		grep -E '\.(md|rs|sh|toml|nix|lock|yml)$' || [ $? -eq 1 ]
+	grep -oE '(^|[[:space:]])\./[A-Za-z0-9_./-]+' "$map" | tr -d ' ' | sed 's|^\./||' ||
+		[ $? -eq 1 ]
+)
+read_out=0
+for path in $elsewhere; do
+	if [ ! -e "$path" ]; then
+		echo "$map sends a reviewer to $path, which is not there" | complain
+		missing=1
+	fi
+	read_out=$((read_out + 1))
+done
+
+# The pass above is the one that can go quiet: change what it thinks a path looks like and it
+# reads nothing while the table pass still reports on the rows. Every row's file is backticked
+# and carries an extension, so it must find at least as many paths as there are rows.
+table_rows=$(printf '%s\n' "$rows" | grep -c '' || [ $? -eq 1 ])
+if [ "$read_out" -lt "$table_rows" ]; then
+	echo "$read_out paths were read out of $map and its table alone has $table_rows rows, so" \
+		"the scan over the rest of the document went quiet while this reported on the table" |
+		complain
 	missing=1
 fi
 exit "$missing"

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+# shellcheck disable=SC2006 # every backtick below is inside the Ruby formula this writes, in
+# prose a `brew info` reader sees, and none of them is a command substitution.
 #
 # Render the Homebrew formula for a released version.
 #

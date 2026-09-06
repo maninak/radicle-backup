@@ -83,6 +83,8 @@ enforce() {
 # `|val|` cannot be told from a bitwise or without parsing.
 placeholders='out|err|res|ret|val|tmp|data|thing|item|result'
 rule_named_for_nothing() {
+	# shellcheck disable=SC2086 # the file list is split on purpose, here and in every rule:
+	# `rust_sources` refuses a tracked path with whitespace in it, which is what makes it safe.
 	grep -En "let ((mut )?\(?(mut )?($placeholders)( |:|=|,|\)|;)\
 |\([^)]*, (mut )?($placeholders)[,)])\
 |(if|while) let [A-Za-z_:]*\(+(mut )?($placeholders)[,)]\
@@ -114,6 +116,7 @@ enforce rule_named_for_nothing \
 claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
 visibility='(pub(\([^)]*\))? )?'
 rule_bool_without_a_claim() {
+	# shellcheck disable=SC2086 # split on purpose; see rule three
 	grep -En "^[[:space:]]+${visibility}[a-z_]+: bool,$" $1 |
 		grep -v '^src/cli.rs:' |
 		grep -vE ":[[:space:]]+${visibility}([a-z_]+_)?${claims}_" |
@@ -144,6 +147,9 @@ enforce rule_bool_without_a_claim \
 # all, and the function under it inherited the previous one's name and the previous one's
 # exemption: a `read_`-prefixed neighbour above it made it invisible.
 rule_env_reader_sounding_pure() {
+	# The file list is split on purpose, here and in every rule: `rust_sources` refuses a
+	# tracked path with whitespace in it, which is what makes that safe.
+	# shellcheck disable=SC2086
 	for file in $1; do
 		awk -v file="$file" '
 			/^[[:space:]]*#\[test\]$/ { under_test = 1 }

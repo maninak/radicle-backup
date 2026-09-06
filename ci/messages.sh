@@ -42,6 +42,8 @@ sources=$(rust_sources "no message was checked")
 # `|| [ $? -eq 1 ]` and not `|| true`: grep exits 1 for "no match" and 2 for "could not read
 # that file", and `true` maps both to a clean tree. A file in the index but not in the working
 # tree, which is any half-applied patch, is enough to make this gate read nothing and pass.
+# shellcheck disable=SC2086 # the file list is split on purpose; `rust_sources` refuses a
+# tracked path with whitespace in it, which is what makes that safe.
 gaps=$(grep -En "$gap" $sources || [ $? -eq 1 ])
 if [ -n "$gaps" ]; then
 	echo "$gaps" | sed 's/$/: a run of spaces in a message, so a line continuation was dropped/' | complain

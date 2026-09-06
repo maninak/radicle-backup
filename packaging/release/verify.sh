@@ -24,6 +24,8 @@ cd "$DIR"
 
 # Who signed it, and is that somebody this project names? This is the whole point: a checksum
 # file anyone can rewrite proves nothing on its own.
+# shellcheck disable=SC2013 # one signer per word is the shape of an allowed_signers file,
+# and a key blob cannot hold whitespace, so words and lines are the same list here.
 for signer in $(awk '{print $1}' "$SIGNERS" | sort -u); do
   if ssh-keygen -Y verify -f "$SIGNERS" -I "$signer" -n "$NAMESPACE" \
        -s sha256sums.txt.sig < sha256sums.txt > /dev/null 2>&1; then

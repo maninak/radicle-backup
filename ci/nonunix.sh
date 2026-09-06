@@ -20,8 +20,13 @@
 # Files are rewritten in place and put back by the trap, so a failing compile, a Ctrl-C or any
 # signal bash can trap leaves the working tree as it found it. A `kill -9` cannot be trapped,
 # so the copies go to a named directory under `target/` rather than to an anonymous `mktemp`
-# one: after a kill the tree is still rewritten, and `NONUNIX_ORIGINALS` below is where the
+# one: after a kill the tree is still rewritten, and `target/nonunix-originals` is where the
 # originals are. Recovering them is a `cp` per file, or `git checkout --` for what is tracked.
+#
+# A directory already there is exactly that: a killed run's originals. It is never cleared to
+# make room, because the run that cleared it would then save the MANGLED files as the new
+# originals and the trap would put those back for good, which is uncommitted work destroyed by
+# a gate and reported as a pass.
 
 set -euo pipefail
 
@@ -36,6 +41,8 @@ echo "originals are copied to $saved while this runs"
 # `/dev/null` in the file list so `grep -c` prints a name with every count: given one file
 # and no second operand it prints the bare number, `awk -F:` sums the empty second field,
 # and a one-file tree reads as zero gates.
+# shellcheck disable=SC2086 # the file list is split on purpose, here and below; the same
+# holds for every `$files` in this script.
 gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' /dev/null $files | awk -F: '{total += $2} END {print total+0}')
 if [ "$gates" -eq 0 ]; then
 	echo "no '#[cfg(unix)]' gates matched, so nothing was checked" | complain
@@ -47,7 +54,14 @@ fi
 # then restored both from the survivor. That is uncommitted work destroyed by a gate, reported
 # as a pass. The copies are made before the trap is installed, so a failure here cannot fire a
 # restore over files that were never rewritten.
-rm -rf "$saved"
+if [ -e "$saved" ]; then
+	echo "$saved is already there, which means a run of this gate was killed before it could" \
+		"put the tree back. Those are your originals and this tree is the rewritten one:" \
+		"compare them, copy back what you want, and remove that directory before running" \
+		"this again. For tracked files 'git checkout -- src tests' is the same thing." |
+		complain
+	exit 1
+fi
 for file in $files; do
 	mkdir -p "$saved/$(dirname "$file")"
 	cp "$file" "$saved/$file"
@@ -85,6 +99,7 @@ done
 # expression position and `#[cfg(target_family = "unix")]` all survive them, stay true here,
 # and leave this compiling something the windows job does not. Refusing is the honest answer,
 # because the alternative is a gate that reports a platform it did not simulate.
+# shellcheck disable=SC2086
 missed=$(grep -nE '(#\[cfg|cfg!|cfg_attr)[^]]*[^a-z_]unix' $files |
 	grep -v 'cfg(all(unix, any()))' || [ $? -eq 1 ])
 if [ -n "$missed" ]; then
