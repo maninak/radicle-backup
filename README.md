@@ -234,8 +234,10 @@ So after restoring, and before handing control back, every restored repository i
 | no other node has reported holding anything else | Nobody has announced signed refs of yours that are missing here | Nothing to do, but see below |
 | holds work the network has not seen | The archive is ahead, as after a crash | Kept; push when ready |
 | another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here | **Named, and the restore exits `3`** |
-| could not be compared | The fetch failed, or no node has said what it holds since the archive was taken | Named; fetch again before you write |
+| could not be compared | The fetch failed, or no node has said what it holds since the archive was taken | Named; leave the node running and look again |
 | nothing to compare it with | Delegated to you alone and announced to nobody, so no node will ever hold it | Nothing to do |
+
+A refs announcement is a separate message from a fetch, so after the fetches the run waits up to twenty seconds for other nodes to say what they hold, ending the moment every repository has an answer. Only what a node said more than an hour after the archive was taken counts: the record a restored home starts with is the archive's own, every row in it agrees with the archive by construction, and the hour is heartwood's own tolerance for a peer whose clock runs ahead. So an archive taken minutes ago reports `could not be compared` for everything, which is the truth about it.
 
 There is no "in step with the network" row, because this tool cannot establish it. A node's record of a peer is rewritten only when that peer announces a *different* head, so disagreement announces itself and agreement is silent. The check catches the hazard; it does not certify its absence. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
 
