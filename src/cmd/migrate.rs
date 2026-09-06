@@ -39,7 +39,13 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         keep: None,
         dry_run: false,
     };
-    let outcome = backup::run(ctx, &create, backup::Purpose::Move)?;
+    // Decided here rather than inside `backup`, because it is what the archive claims about
+    // this machine's future, and this is where that future is chosen.
+    let purpose = match args.keep_source {
+        true => backup::Purpose::MoveKeepingSource,
+        false => backup::Purpose::Move,
+    };
+    let outcome = backup::run(ctx, &create, purpose)?;
     // A move retires the key on this machine, so an archive that is missing repositories must
     // not be the one it is retired against. `backup` carries on past a repository it cannot
     // bundle, which is right for a backup and wrong for the last copy before a machine is
@@ -110,9 +116,16 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
         archive.display()
     );
     if !ctx.term.confirm(&question)? {
+        // The archive is already written, and it says this machine retires its key, because
+        // that is what the command was asked to do. Saying so is the whole of the remedy: a
+        // home restored from it will be told the source is safe, and it is not.
         return Err(Error::refused(
-            "nothing was retired, so this machine still holds the identity",
-            "pass --keep-source if that is what you meant, and never start both nodes",
+            format!(
+                "nothing was retired, so this machine still holds the identity, and {} says \
+                 otherwise to whoever restores it",
+                archive.display()
+            ),
+            "delete that archive and run the move again with --keep-source, or answer yes",
         ));
     }
 

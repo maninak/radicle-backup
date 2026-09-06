@@ -206,6 +206,15 @@ pub fn agree(n: usize) -> &'static str {
     if n == 1 { "is" } else { "are" }
 }
 
+/// Whole days between two instants, negative when `from` is ahead of `to`.
+///
+/// One place, because an archive's age is read off two different stamps (the one inside the
+/// state file and the one in the file name) and two roundings would make the same archive
+/// stale in one report and fresh in the other.
+pub fn days_between(from: jiff::Timestamp, to: jiff::Timestamp) -> i64 {
+    to.duration_since(from).as_secs().div_euclid(60 * 60 * 24)
+}
+
 /// Render a duration in whole days, for "this backup is 40 days old" style reporting.
 pub fn days_ago(days: i64) -> String {
     match days {

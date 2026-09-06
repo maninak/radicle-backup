@@ -111,11 +111,7 @@ impl Record {
     /// Days between the archive and now, or `None` when the stamp does not parse.
     pub fn age_in_days(&self, now: jiff::Timestamp) -> Option<i64> {
         let created: jiff::Timestamp = self.created.parse().ok()?;
-        Some(
-            now.duration_since(created)
-                .as_secs()
-                .div_euclid(60 * 60 * 24),
-        )
+        Some(crate::term::days_between(created, now))
     }
 }
 

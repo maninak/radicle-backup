@@ -814,11 +814,17 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
 
     // Asserted on the detail rather than the topic, because the topic prints whatever the
     // verdict is: matching it would pass just as happily on "no archive has ever been taken".
+    // The file name too, since the check now reads the directory instead of trusting the
+    // state record, and naming the archive it actually found is the difference.
     let out = fixture.run(&["doctor"], &restored);
+    let said = stderr(&out);
+    let name = archive
+        .file_name()
+        .expect("the archive has a name")
+        .to_string_lossy();
     assert!(
-        stderr(&out).contains("archive was taken"),
-        "a restored home should know its archive: {}",
-        stderr(&out)
+        said.contains("was taken") && said.contains(name.as_ref()),
+        "a restored home should name the archive it came from: {said}"
     );
 }
 

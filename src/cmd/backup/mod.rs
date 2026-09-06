@@ -64,6 +64,12 @@ pub enum Purpose {
     /// A move. This machine's key is retired once the archive is verified, so the home
     /// restored from it is meant to be the only one holding the identity.
     Move,
+    /// A move under `--keep-source`, where this machine keeps its key. The archive says so,
+    /// because the home restored from it has to be warned about the copy left behind: written
+    /// as a plain `Move` it told the far end "a move retires the key on the machine it came
+    /// from" about a machine that still had it, which is the exact fork this tool exists to
+    /// prevent, announced as safe.
+    MoveKeepingSource,
 }
 
 pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {

@@ -259,6 +259,17 @@ impl RepoRecord {
         matches!(self.visibility.as_deref(), Some("private"))
     }
 
+    /// Whether this repository's identity document was actually read.
+    ///
+    /// `visibility`, `delegates` and `allowed` all come out of that one document, so a record
+    /// without a visibility has none of them: its delegate list is empty because nothing was
+    /// asked, not because there is nobody. Anything reporting on those fields has to tell an
+    /// unasked question from a negative answer, or it says "there are no private repositories"
+    /// about a home it never looked inside.
+    pub fn identity_was_read(&self) -> bool {
+        self.visibility.is_some()
+    }
+
     /// Whether anything but this machine could hand this repository back: another node has
     /// announced it, or its owner allowed a peer to hold it.
     pub fn has_another_holder(&self) -> bool {

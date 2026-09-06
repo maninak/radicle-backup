@@ -39,6 +39,16 @@ impl Inventory {
             .unwrap_or_else(|| rid.to_string())
     }
 
+    /// How many repositories nothing could read the identity document of, so their visibility
+    /// and delegate list are unknown rather than absent. Every one of them when `rad` was not
+    /// there at all.
+    pub fn identities_not_read(&self) -> usize {
+        self.described
+            .iter()
+            .filter(|record| !record.identity_was_read())
+            .count()
+    }
+
     /// Repositories this identity is the only delegate of. Losing the key ends their
     /// governance, which is the one loss a backup cannot undo.
     pub fn sole_delegate(&self) -> impl Iterator<Item = &RepoRecord> {

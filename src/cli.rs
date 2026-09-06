@@ -423,9 +423,13 @@ pub struct Restore {
 
 #[derive(Parser, Debug, Clone)]
 pub struct Doctor {
-    /// Where archives of this identity are kept, for judging how old the newest one is.
-    #[arg(long, value_name = "PATH")]
-    pub backup_dir: Option<PathBuf>,
+    /// Where to look. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
+    ///
+    /// `--backup-dir` still works: it was this flag's only name until the checks started
+    /// reading the archive itself, and a script that schedules `doctor` should not break for
+    /// having been written first.
+    #[arg(long, short = 'd', alias = "backup-dir", value_name = "PATH")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]

@@ -15,6 +15,14 @@ All notable changes to this project are documented here. The format follows [Kee
 - That same note offered a command that would have destroyed the archive it sits beside. `age -d -i <key file> archive.tar.zst.age` is not a template to a shell: `<key` redirects input, and `>archive.tar.zst.age` truncates the archive to nothing. It now says `KEYFILE`, and no command the note offers carries a redirect.
 - A key age cannot read no longer ends a run that has a usable key beside it. Passing every key in `~/.ssh` is ordinary, and one `id_ecdsa` next to the right `id_ed25519` refused the whole restore. Unusable keys are now named as a footnote on the failure that follows, and only a run with no usable key at all stops.
 - A key that failed to unlock is now named on its own. The message used to list every key a passphrase had been supplied for, so a key that unlocked perfectly well appeared as part of the fault, and it blamed the passphrase for a failure that is equally a key type age cannot use. It now names the one key, says both possibilities, and says which keys were never reached.
+- `doctor` now reads the archive rather than its own record of the last run. It reported "no archive has ever been taken for this identity" at machines with working nightly backups, because the timer runs as another user or the home came back through `restore.sh`, and it called an archive encrypted when the newest one on disk was written with `--plaintext`.
+- `doctor` now says whether the newest archive can still be opened, trying the key given with `--identity` against it. An archive whose key is gone was reported as a working backup.
+- `doctor`'s `key copies` check no longer passes a home it knows nothing about. `sudo rad-backup restore` writes its record into root's state directory and `restore.sh` writes none at all, so the two people most likely to be holding a second copy of their key were the ones told they were not.
+- `rad backup move --keep-source` no longer writes an archive claiming the source machine retires its key. The home restored from it was told the machine it came from was safe, which is the exact fork this tool exists to prevent, announced as a pass.
+
+### Changed
+
+- `doctor --backup-dir` is now `doctor --dir`, matching `ls` and `prune`, and it is now where the checks actually look rather than a path printed in a remedy. `--backup-dir` still works.
 
 ## [0.2.1] - 2026-08-22
 

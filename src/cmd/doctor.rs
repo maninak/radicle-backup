@@ -61,6 +61,34 @@ impl Check {
         self.remedy = Some(remedy.into());
         self
     }
+
+    /// Hold a check to what it actually looked at, when some repositories' identity documents
+    /// could not be read.
+    ///
+    /// Visibility and delegates live in those documents, and a record that has none of them
+    /// looks exactly like a public repository nobody delegates. So a pass over an incomplete
+    /// reading is not a pass: "there are no private repositories to lose" is what a home with
+    /// no `rad` on PATH used to be told about every private repository it had. A finding stays
+    /// a finding, because the ones that were read are still findings, but its count is a floor
+    /// and the sentence has to say so.
+    fn qualified_by_unread(mut self, unread: usize) -> Self {
+        if unread == 0 {
+            return self;
+        }
+        self.detail = format!(
+            "{}; {} could not be described, so this is what could be seen and not the whole home",
+            self.detail,
+            term::count(unread, "repository", "repositories")
+        );
+        if self.verdict == Verdict::Pass {
+            self.verdict = Verdict::Unknown;
+        }
+        self.remedy.get_or_insert_with(|| {
+            "put `rad` on PATH, or check that `rad inspect` answers here, then run again"
+                .to_string()
+        });
+        self
+    }
 }
 
 pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
@@ -171,6 +199,13 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         &policies,
         &routing,
     )?;
+    // The inventory pass says out loud what it could not read, and every one of those lines
+    // is why a check below has to answer "not known" instead of "none". Dropping them left
+    // the reader with a report that had gone quiet about the very thing that weakened it.
+    for warning in &inventory.warnings {
+        ctx.term.warn(warning);
+    }
+    let unread = inventory.identities_not_read();
     let stored = state::read(&identity.did())?;
     if let Some(complaint) = stored.complaint() {
         ctx.term.warn(&complaint);
@@ -178,14 +213,29 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let record = stored.record();
     let now = jiff::Timestamp::now();
 
+    // The archive on disk, found once and answered from twice: how old it is, and whether it
+    // is encrypted. Reading it from the state file instead is how both checks came to report
+    // on a run that happened rather than on the file that is there.
+    let directory = crate::cmd::archive_dir(args.dir.as_deref(), record);
+    let newest = crate::archives::newest(&directory, &node_id)?;
+
     let mut checks = vec![check_key_protection(&secret, &home.secret_key())];
-    checks.push(check_backup_freshness(&stored, now, args));
-    checks.push(check_backup_encryption(record));
-    checks.push(check_backup_locality(home.path(), record));
-    checks.push(check_private_coverage(&inventory, record));
-    checks.push(check_delegate_quorum(&inventory));
-    checks.push(check_replication(&inventory, &routing));
-    checks.push(check_sole_holder(record));
+    checks.push(check_backup_freshness(
+        &stored,
+        newest.as_ref(),
+        &directory,
+        now,
+    ));
+    checks.push(check_backup_encryption(
+        &ctx.identities(),
+        newest.as_ref(),
+        record,
+    )?);
+    checks.push(check_backup_locality(home.path(), newest.as_ref(), record));
+    checks.push(check_private_coverage(&inventory, record).qualified_by_unread(unread));
+    checks.push(check_delegate_quorum(&inventory).qualified_by_unread(unread));
+    checks.push(check_replication(&inventory, &routing).qualified_by_unread(unread));
+    checks.push(check_sole_holder(&stored));
     checks.push(check_propagation(
         &inventory,
         &db::synced_heads(&home.node_db(), &node_id)?,
@@ -214,99 +264,235 @@ fn check_key_protection(secret: &SecretKey, key_path: &std::path::Path) -> Check
     }
 }
 
-fn check_backup_freshness(stored: &state::Stored, now: jiff::Timestamp, args: &Doctor) -> Check {
+/// The newest archive there is evidence of, and what that evidence was.
+struct Newest {
+    /// Its age in whole days. `None` when the stamp it carries does not parse, which is not a
+    /// failure: the archive is there, its own claim about when just cannot be read.
+    days: Option<i64>,
+    /// What the age was read off, so the sentence names something the reader can go and look
+    /// at rather than an age from nowhere.
+    named: String,
+    /// Said beside the age when the two sources disagree, so that a pass can never leave the
+    /// impression that a file is somewhere it is not.
+    caveat: Option<String>,
+}
+
+/// How recently an archive of this identity was taken.
+///
+/// Two sources, because neither alone is the answer. The state file remembers what this user
+/// on this machine last wrote, which is nothing at all when the timer runs as another user,
+/// when the state directory has been wiped, or when the home came back through `restore.sh`.
+/// The directory holds what is actually there, which is nothing once the last archive has been
+/// pruned or carried off. Reading only the first is how "no archive has ever been taken for
+/// this identity" was printed at a machine with a working nightly backup.
+fn check_backup_freshness(
+    stored: &state::Stored,
+    newest: Option<&crate::archives::Archive>,
+    directory: &std::path::Path,
+    now: jiff::Timestamp,
+) -> Check {
     const TOPIC: &str = "backup";
-    if let state::Stored::Unreadable { .. } = stored {
-        return Check::new(
-            TOPIC,
-            Verdict::Unknown,
-            "an archive was recorded, but the record no longer parses",
-        )
-        .with_remedy("take another to replace it: rad backup");
-    }
-    let Some(record) = stored.record() else {
-        let where_to = args
-            .backup_dir
-            .as_ref()
-            .map(|dir| format!(" --output {}", dir.display()))
-            .unwrap_or_default();
-        return Check::new(
-            TOPIC,
-            Verdict::Fail,
-            "no archive has ever been taken for this identity",
-        )
-        .with_remedy(format!("rad backup{where_to}"));
+    let looked_in = directory.display().to_string();
+    let record = stored.record();
+
+    // The file that is there answers first: it is what a restore would actually use, and it is
+    // there whoever wrote it. The record answers only when nothing is, because an archive
+    // carried off to another disk is still an archive that was taken.
+    let judged = match (newest, record) {
+        (Some(archive), _) => Newest {
+            days: archive.taken.map(|taken| term::days_between(taken, now)),
+            named: format!("{} in {looked_in}", archive.name()),
+            caveat: None,
+        },
+        (None, Some(record)) => Newest {
+            days: record.age_in_days(now),
+            named: format!("the newest {} archive this tool recorded", record.tier),
+            caveat: Some(match &record.archive {
+                Some(path) => format!("{path} is not there now"),
+                None => "it went to stdout, so this tool never knew where it landed".to_string(),
+            }),
+        },
+        (None, None) => {
+            if let state::Stored::Unreadable { .. } = stored {
+                return Check::new(
+                    TOPIC,
+                    Verdict::Unknown,
+                    format!(
+                        "no archive of this identity in {looked_in}, and the record of earlier \
+                         ones no longer parses"
+                    ),
+                )
+                .with_remedy("take another to replace it: rad backup");
+            }
+            return Check::new(
+                TOPIC,
+                Verdict::Fail,
+                format!(
+                    "no archive of this identity in {looked_in}, and this tool has no record of \
+                     one anywhere"
+                ),
+            )
+            .with_remedy(format!("rad backup --output {looked_in}"));
+        }
     };
-    match record.age_in_days(now) {
+
+    let Newest {
+        days,
+        named,
+        caveat,
+    } = judged;
+    let beside = caveat
+        .map(|caveat| format!(", though {caveat}"))
+        .unwrap_or_default();
+    let check = match days {
         // Ahead of this clock, so the age says nothing. Left as a Pass it pinned the staleness
         // alarm open forever: one archive taken on a machine whose clock ran fast reported
         // "taken -300 days ago" and never went stale again.
         Some(days) if days < 0 => Check::new(
             TOPIC,
             Verdict::Unknown,
-            "the newest archive is stamped in the future, so its age cannot be judged",
+            format!("{named} is stamped in the future, so its age cannot be judged{beside}"),
         )
         .with_remedy("check the clock on the machine that took it, then `rad backup`"),
         Some(days) if days <= STALE_AFTER_DAYS => Check::new(
             TOPIC,
             Verdict::Pass,
-            format!(
-                "a {}-tier archive was taken {}",
-                record.tier,
-                term::days_ago(days)
-            ),
+            format!("{named} was taken {}{beside}", term::days_ago(days)),
         ),
         Some(days) => Check::new(
             TOPIC,
             Verdict::Warn,
-            format!("the newest archive was taken {}", term::days_ago(days)),
+            format!("{named} was taken {}{beside}", term::days_ago(days)),
         )
         .with_remedy("rad backup"),
         None => Check::new(
             TOPIC,
             Verdict::Unknown,
-            "an archive was recorded, but its timestamp does not parse",
+            format!("{named} carries a timestamp that does not parse{beside}"),
         ),
+    };
+    // An archive that is not where it was is still an archive, but a clean pass would say it
+    // is at hand, and it is not.
+    match check.verdict == Verdict::Pass && !beside.is_empty() {
+        true => Check {
+            verdict: Verdict::Warn,
+            ..check
+        }
+        .with_remedy("take another where this tool will find it: rad backup"),
+        false => check,
     }
 }
 
-fn check_backup_encryption(record: Option<&state::Record>) -> Check {
+/// Whether the newest archive can still be read by someone who is not you, and whether it can
+/// still be read by you.
+///
+/// Read off the file, never off the state record. The record says what a run once wrote, so it
+/// answered "the newest archive cannot be read without its passphrase" over a directory whose
+/// only archive was a plaintext one somebody dropped there by hand. It also cannot answer the
+/// half that matters more: an archive encrypted to a key nobody still holds is as lost as no
+/// archive at all, and only trying the unwrap says so.
+fn check_backup_encryption(
+    identities: &crate::crypt::Identities,
+    newest: Option<&crate::archives::Archive>,
+    record: Option<&state::Record>,
+) -> Result<Check> {
     const TOPIC: &str = "archive encryption";
-    match record {
-        Some(record) if record.encrypted => Check::new(
-            TOPIC,
-            Verdict::Pass,
-            "the newest archive cannot be read without its passphrase or key",
-        ),
-        Some(_) => Check::new(
+    let Some(archive) = newest else {
+        // Nothing here to open, so the record is all there is, and it is hearsay about a file
+        // this run never saw. It is still worth repeating when what it remembers is bad news.
+        return Ok(match record {
+            Some(record) if !record.encrypted => Check::new(
+                TOPIC,
+                Verdict::Warn,
+                "no archive of this identity was found here, and the last one this tool wrote \
+                 was written in the clear",
+            )
+            .with_remedy("wherever that archive is, it can be read by anyone holding it"),
+            Some(_) => Check::new(
+                TOPIC,
+                Verdict::Unknown,
+                "no archive of this identity was found here, so none could be opened",
+            ),
+            None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to judge"),
+        });
+    };
+
+    let name = archive.name();
+    if !crate::crypt::looks_encrypted(&archive.path)? {
+        return Ok(Check::new(
             TOPIC,
             Verdict::Fail,
-            "the newest archive can be read by anyone who holds it, your key file included",
+            format!("{name} can be read by anyone who holds it, your key file included"),
         )
-        .with_remedy("take another without --plaintext, then delete the old one"),
-        None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to judge"),
+        .with_remedy("take another without --plaintext, then delete the old one"));
     }
-}
+    if crate::crypt::needs_passphrase(&archive.path)? {
+        // Not opened, because opening it means asking for the passphrase, and a health report
+        // that prompts is one people stop running. The header is enough to say which key it
+        // wants, and a passphrase is something its owner can test whenever they like.
+        return Ok(Check::new(
+            TOPIC,
+            Verdict::Pass,
+            format!("{name} opens only with the passphrase it was sealed under"),
+        ));
+    }
 
-fn check_backup_locality(home: &std::path::Path, record: Option<&state::Record>) -> Check {
-    const TOPIC: &str = "archive location";
-    let Some(archive) = record.and_then(|record| record.archive.as_ref()) else {
-        return Check::new(
+    if identities.files.is_empty() {
+        return Ok(Check::new(
             TOPIC,
             Verdict::Unknown,
-            "no archive path was recorded, so this could not be judged",
-        );
-    };
-    let path = std::path::Path::new(archive);
-    if !path.exists() {
-        return Check::new(
-            TOPIC,
-            Verdict::Warn,
-            format!("{archive} is no longer where it was written"),
+            format!("{name} is encrypted to a key, and no key was offered to try against it"),
         )
-        .with_remedy("if you moved it somewhere safe, this is fine; if not, take another");
+        .with_remedy("rad backup doctor --identity ~/.ssh/id_ed25519"));
     }
-    match crate::perms::same_device(path, home) {
+    // The whole point of the check: the header unwraps or it does not, and everything after it
+    // (zstd, tar, the manifest) is somebody else's check. Opening far enough to build the zstd
+    // decoder has already made age produce the file key, so this proves the key on hand opens
+    // the archive without reading a gigabyte to find out.
+    Ok(
+        match crate::container::Reader::open(&archive.path, None, identities) {
+            Ok(_) => Check::new(
+                TOPIC,
+                Verdict::Pass,
+                format!("{name} is encrypted to a key, and the key offered here opens it"),
+            ),
+            Err(e) => Check::new(TOPIC, Verdict::Fail, format!("{name} did not open: {e}"))
+                .with_remedy(
+                    "an archive whose key is gone is not a backup; take another one you can open",
+                ),
+        },
+    )
+}
+
+/// Whether the archive would survive whatever takes the home with it.
+fn check_backup_locality(
+    home: &std::path::Path,
+    newest: Option<&crate::archives::Archive>,
+    record: Option<&state::Record>,
+) -> Check {
+    const TOPIC: &str = "archive location";
+    // The file that is there first, then the path the record remembers, which may well be on
+    // another disk entirely and is the more interesting answer when it is.
+    let recorded = record.and_then(|record| record.archive.as_ref());
+    let judged = newest.map(|archive| archive.path.clone()).or_else(|| {
+        recorded
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.exists())
+    });
+    let Some(path) = judged else {
+        return match recorded {
+            Some(archive) => Check::new(
+                TOPIC,
+                Verdict::Unknown,
+                format!("{archive} is not there now, so where it sits could not be judged"),
+            )
+            .with_remedy("if you moved it somewhere safe, this is fine; if not, take another"),
+            None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to locate"),
+        };
+    };
+
+    let name = path.display().to_string();
+    match crate::perms::same_device(&path, home) {
         // A warning and not a failure, because the same filesystem does not mean the same
         // fate: a directory synced by MEGA, Dropbox, Drive or Syncthing is already off this
         // machine, and this tool has no way to know whether one is watching. Failing a posture
@@ -314,22 +500,29 @@ fn check_backup_locality(home: &std::path::Path, record: Option<&state::Record>)
         Some(true) => Check::new(
             TOPIC,
             Verdict::Warn,
-            "the newest archive is on the same filesystem as the home it protects",
+            format!("{name} is on the same filesystem as the home it protects"),
         )
         .with_remedy(
             "one dead disk would take both, unless something replicates that directory off this \
              machine. If a sync client watches it, this line is noise; if not, copy the archive \
              to another disk, another machine, or a service you trust",
         ),
+        // A different filesystem is not always a different disk: two partitions of one drive,
+        // or a loopback mount, answer the same way as a second machine would. It is the most
+        // this can be told without asking the kernel about the block device under each.
         Some(false) => Check::new(
             TOPIC,
             Verdict::Pass,
-            "the newest archive is on a different filesystem from the home it protects",
+            format!("{name} is on a different filesystem from the home it protects"),
+        )
+        .with_remedy(
+            "worth confirming it is also a different disk, which two partitions of one drive \
+             are not",
         ),
         None => Check::new(
             TOPIC,
             Verdict::Unknown,
-            "the two filesystems could not be compared",
+            format!("{name} and the home could not be compared"),
         ),
     }
 }
@@ -541,9 +734,43 @@ fn check_propagation(
 /// puts the key here while the machine it came from still holds its own copy. `move` is the
 /// command that closes it, by retiring the source key as part of the run, so an archive that
 /// says it was written by a move is the one case this can pass on.
-fn check_sole_holder(record: Option<&state::Record>) -> Check {
+///
+/// Given the whole `Stored` and not just its record, because the two ways there is no record
+/// are not the same answer. A missing state file is the normal shape of a home restored under
+/// `sudo`, or by `restore.sh`, which writes none: reading that as "not restored from an
+/// archive" printed a green line about the double-signing hazard at exactly the people most
+/// likely to be in it.
+fn check_sole_holder(stored: &state::Stored) -> Check {
     const TOPIC: &str = "key copies";
-    let Some(restored) = record.and_then(|record| record.restored.as_ref()) else {
+    let record = match stored {
+        state::Stored::Record(record) => record,
+        state::Stored::Absent => {
+            return Check::new(
+                TOPIC,
+                Verdict::Unknown,
+                "this tool has no record of where this home came from, so whether another \
+                 machine holds the same key is not known here",
+            )
+            .with_remedy(
+                "if this home was restored or copied from another machine, make sure that \
+                 machine is not running a node",
+            );
+        }
+        state::Stored::Unreadable { .. } => {
+            return Check::new(
+                TOPIC,
+                Verdict::Unknown,
+                "the record of where this home came from no longer parses, so whether another \
+                 machine holds the same key is not known here",
+            )
+            .with_remedy(
+                "if this home was restored or copied from another machine, make sure that \
+                 machine is not running a node",
+            );
+        }
+    };
+
+    let Some(restored) = record.restored.as_ref() else {
         return Check::new(
             TOPIC,
             Verdict::Pass,
@@ -552,10 +779,15 @@ fn check_sole_holder(record: Option<&state::Record>) -> Check {
     };
 
     match restored.source_retires_key {
+        // What the archive recorded, not what happened on the other machine: this tool has
+        // never been there. `move` retires the key as part of its own run, so the claim is a
+        // good one, but a sentence that stated it as fact would be stating something it cannot
+        // see, and `--keep-source` is exactly the case where it would be wrong.
         Some(true) => Check::new(
             TOPIC,
             Verdict::Pass,
-            "this home was moved here, and a move retires the key on the machine it came from",
+            "this home was moved here, and the archive records the machine it came from as \
+             retiring its key",
         ),
         // Said as a possibility, never as a finding: this tool cannot see the other machine,
         // and telling somebody their identity is being double-signed when it is not would send
@@ -566,11 +798,11 @@ fn check_sole_holder(record: Option<&state::Record>) -> Check {
             match restored.source_node_was_running {
                 true => {
                     "this home was restored from a backup, and that backup was taken from a \
-                         machine with a node running"
+                     machine with a node running"
                 }
                 false => {
-                    "this home was restored from a backup, which leaves the key on the \
-                          machine the backup was taken from"
+                    "this home was restored from a backup, which leaves the key on the machine \
+                     the backup was taken from"
                 }
             },
         )
@@ -590,12 +822,43 @@ fn check_sole_holder(record: Option<&state::Record>) -> Check {
 
 #[cfg(test)]
 mod tests {
+    use age::secrecy::ExposeSecret as _;
+
     use super::*;
+
+    /// Freshness judged with nothing on disk, which is the case every state-record test is
+    /// about: what the tool remembers, when the directory it looked in holds nothing.
+    fn recorded_freshness(stored: &state::Stored, now: jiff::Timestamp) -> Check {
+        check_backup_freshness(stored, None, std::path::Path::new("/nowhere"), now)
+    }
+
+    /// An archive found on disk, stamped `when`. Freshness never opens one, so no file is
+    /// needed to ask it how old what it found is.
+    fn found(when: &str) -> crate::archives::Archive {
+        crate::archives::Archive {
+            path: std::path::PathBuf::from(
+                "/nowhere/radicle-z6MkAAAAAAAA-20260813T120000Z.tar.zst",
+            ),
+            bytes: 4096,
+            taken: Some(when.parse().expect("a valid instant")),
+            encrypted: false,
+        }
+    }
+
+    /// Freshness judged on an archive that is there, which is what a covered machine looks
+    /// like: the file answers, and the record beside it is never consulted.
+    fn found_freshness(when: &str, now: jiff::Timestamp) -> Check {
+        check_backup_freshness(
+            &state::Stored::Absent,
+            Some(&found(when)),
+            std::path::Path::new("/nowhere"),
+            now,
+        )
+    }
 
     /// Every topic the report can print, one per check, whatever the verdict turns out to be.
     fn every_topic() -> Vec<String> {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let args = Doctor { backup_dir: None };
         let empty = Inventory {
             described: Vec::new(),
             selected: Default::default(),
@@ -614,13 +877,19 @@ mod tests {
 
         vec![
             key,
-            check_backup_freshness(&state::Stored::Absent, now, &args),
-            check_backup_encryption(None),
-            check_backup_locality(std::path::Path::new("/nowhere"), None),
+            check_backup_freshness(
+                &state::Stored::Absent,
+                None,
+                std::path::Path::new("/nowhere"),
+                now,
+            ),
+            check_backup_encryption(&Default::default(), None, None)
+                .expect("no archive is not an error"),
+            check_backup_locality(std::path::Path::new("/nowhere"), None, None),
             check_private_coverage(&empty, None),
             check_delegate_quorum(&empty),
             check_replication(&empty, &BTreeMap::new()),
-            check_sole_holder(None),
+            check_sole_holder(&state::Stored::Absent),
             check_propagation(&empty, &BTreeMap::new(), "z6MkAAA"),
         ]
         .into_iter()
@@ -663,15 +932,9 @@ mod tests {
     #[test]
     fn a_topic_does_not_change_with_the_verdict_so_two_runs_can_be_compared_line_by_line() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let args = Doctor { backup_dir: None };
-        let mut fresh = record();
-        fresh.created = "2026-08-13T12:00:00Z".to_string();
-        let mut stale = record();
-        stale.created = "2026-05-01T12:00:00Z".to_string();
-
-        let taken = check_backup_freshness(&state::Stored::Record(Box::new(fresh)), now, &args);
-        let old = check_backup_freshness(&state::Stored::Record(Box::new(stale)), now, &args);
-        let never = check_backup_freshness(&state::Stored::Absent, now, &args);
+        let taken = found_freshness("2026-08-13T12:00:00Z", now);
+        let old = found_freshness("2026-05-01T12:00:00Z", now);
+        let never = recorded_freshness(&state::Stored::Absent, now);
         assert_eq!(taken.verdict, Verdict::Pass);
         assert_eq!(old.verdict, Verdict::Warn);
         assert_eq!(never.verdict, Verdict::Fail);
@@ -689,19 +952,6 @@ mod tests {
         // The old line said "6 of 7 checks pass" here, which reads as one failure when there
         // is none: a check nobody could run is not a check that went wrong.
         assert_eq!(summary(6, 0, 0, 1), "6 pass, 1 could not be checked");
-    }
-
-    #[test]
-    fn an_unencrypted_archive_does_not_claim_to_know_how_the_key_inside_it_is_stored() {
-        // This check reads one bool: whether the ARCHIVE was encrypted. It has never been told
-        // whether the key file inside carries its own passphrase, so a detail claiming the key
-        // is in the clear was false for everyone whose key is not, which is everyone the check
-        // above tells to add one.
-        let mut plaintext = record();
-        plaintext.encrypted = false;
-        let check = check_backup_encryption(Some(&plaintext));
-        assert_eq!(check.verdict, Verdict::Fail);
-        assert!(!check.detail.contains("in the clear"), "{}", check.detail);
     }
 
     #[test]
@@ -726,25 +976,56 @@ mod tests {
     #[test]
     fn a_backup_that_has_never_been_taken_fails_rather_than_being_unknown() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let check =
-            check_backup_freshness(&state::Stored::Absent, now, &Doctor { backup_dir: None });
+        let check = recorded_freshness(&state::Stored::Absent, now);
         assert_eq!(check.verdict, Verdict::Fail);
-        assert_eq!(check.remedy.as_deref(), Some("rad backup"));
+        // The remedy names where it looked, because "rad backup" alone sends the next archive
+        // wherever the default points, which is where this run already found nothing.
+        let remedy = check.remedy.expect("a failing backup names its fix");
+        assert!(remedy.starts_with("rad backup --output "), "{remedy}");
     }
 
     #[test]
     fn a_backup_older_than_the_stale_mark_warns_but_does_not_fail() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let mut record = record();
-        record.created = "2026-05-01T12:00:00Z".to_string();
-        let stored = state::Stored::Record(Box::new(record.clone()));
-        let check = check_backup_freshness(&stored, now, &Doctor { backup_dir: None });
-        assert_eq!(check.verdict, Verdict::Warn);
+        assert_eq!(
+            found_freshness("2026-05-01T12:00:00Z", now).verdict,
+            Verdict::Warn
+        );
+        assert_eq!(
+            found_freshness("2026-08-13T12:00:00Z", now).verdict,
+            Verdict::Pass
+        );
+    }
 
+    /// The bug this half fixes: `doctor` read the state file only, so a machine whose nightly
+    /// timer runs as another user, or whose home came back through `restore.sh`, was told "no
+    /// archive has ever been taken for this identity" while its archives sat in the directory
+    /// the same command had just been pointed at.
+    #[test]
+    fn an_archive_on_disk_answers_even_when_this_tool_has_no_record_of_taking_one() {
+        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        let check = found_freshness("2026-08-13T12:00:00Z", now);
+        assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
+        assert!(check.detail.contains(".tar.zst"), "{}", check.detail);
+    }
+
+    /// The other half: a record fresh enough to pass, over a directory where the file it names
+    /// is gone. It may have been carried off somewhere safe, so this is not a failure, but a
+    /// clean pass would say the archive is at hand and it is not.
+    #[test]
+    fn a_recorded_backup_whose_archive_is_not_there_warns_rather_than_passing() {
+        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        let mut record = record();
         record.created = "2026-08-13T12:00:00Z".to_string();
-        let stored = state::Stored::Record(Box::new(record));
-        let check = check_backup_freshness(&stored, now, &Doctor { backup_dir: None });
-        assert_eq!(check.verdict, Verdict::Pass);
+        record.archive = Some("/media/usb/radicle.tar.zst.age".to_string());
+
+        let check = recorded_freshness(&state::Stored::Record(Box::new(record)), now);
+        assert_eq!(check.verdict, Verdict::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("/media/usb/radicle.tar.zst.age"),
+            "{}",
+            check.detail
+        );
     }
 
     #[test]
@@ -754,7 +1035,7 @@ mod tests {
             path: std::path::PathBuf::from("/nowhere/state.json"),
             reason: "expected value at line 1 column 1".to_string(),
         };
-        let check = check_backup_freshness(&stored, now, &Doctor { backup_dir: None });
+        let check = recorded_freshness(&stored, now);
         assert_eq!(check.verdict, Verdict::Unknown);
         assert!(check.remedy.is_some());
     }
@@ -772,7 +1053,7 @@ mod tests {
 
         let mut record = record();
         record.archive = Some(archive.to_string_lossy().into_owned());
-        let check = check_backup_locality(&dir, Some(&record));
+        let check = check_backup_locality(&dir, None, Some(&record));
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(
             check.remedy.is_some_and(|remedy| remedy.contains("sync")),
@@ -782,20 +1063,119 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A real archive on disk, sealed as asked, plus the record a directory scan makes of it.
+    ///
+    /// Every one of these checks reads the file now, so a fixture that is only a `state::Record`
+    /// would test the reading of a claim rather than the reading of an archive.
+    fn archive_at(
+        dir: &std::path::Path,
+        name: &str,
+        encryption: &crate::crypt::Encryption,
+    ) -> crate::archives::Archive {
+        use std::io::Write as _;
+
+        std::fs::create_dir_all(dir).expect("scratch directory is creatable");
+        let path = dir.join(name);
+        let file = std::fs::File::create(&path).expect("scratch archive is creatable");
+        let mut sink =
+            crate::crypt::Sink::new(Box::new(file), encryption).expect("sink is buildable");
+        // Empty, but genuinely zstd: opening an archive builds the decoder, and a body of
+        // rubbish would fail there for a reason that has nothing to do with the key.
+        let body = zstd::encode_all(std::io::empty(), 0).expect("zstd encodes nothing");
+        sink.write_all(&body).expect("body is writable");
+        sink.finish().expect("sink finishes");
+
+        crate::archives::Archive {
+            bytes: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+            taken: None,
+            encrypted: !matches!(encryption, crate::crypt::Encryption::None),
+            path,
+        }
+    }
+
+    /// The bug: `rad backup --plaintext` into a directory whose state record remembers an
+    /// encrypted run was reported as encrypted, because the check read the record. The record
+    /// describes a run; the archive is the thing anyone would steal.
     #[test]
-    fn a_plaintext_archive_fails_the_encryption_check() {
+    fn a_plaintext_archive_fails_even_when_the_record_remembers_an_encrypted_one() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-crypt-{}", std::process::id()));
+        let archive = archive_at(&dir, "plain.tar.zst", &crate::crypt::Encryption::None);
         let mut record = record();
-        record.encrypted = false;
-        assert_eq!(
-            check_backup_encryption(Some(&record)).verdict,
-            Verdict::Fail
-        );
         record.encrypted = true;
-        assert_eq!(
-            check_backup_encryption(Some(&record)).verdict,
-            Verdict::Pass
+
+        let check = check_backup_encryption(&Default::default(), Some(&archive), Some(&record))
+            .expect("the header is readable");
+        assert_eq!(check.verdict, Verdict::Fail, "{}", check.detail);
+        assert!(check.detail.contains("plain.tar.zst"), "{}", check.detail);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_archive_sealed_with_a_passphrase_passes_without_asking_for_it() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-pass-{}", std::process::id()));
+        let sealed = crate::crypt::Encryption::Passphrase(zeroize::Zeroizing::new(
+            "open sesame".to_string(),
+        ));
+        let archive = archive_at(&dir, "sealed.tar.zst.age", &sealed);
+
+        // No passphrase is given and none is read from anywhere: a health report that stops to
+        // prompt is one nobody schedules.
+        let check = check_backup_encryption(&Default::default(), Some(&archive), None)
+            .expect("the header is readable");
+        assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_archive_encrypted_to_a_key_is_unknown_until_a_key_is_offered_and_passes_once_it_is() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-keyed-{}", std::process::id()));
+        let identity = age::x25519::Identity::generate();
+        let keyed = crate::crypt::Encryption::Recipients(vec![identity.to_public().to_string()]);
+        let archive = archive_at(&dir, "keyed.tar.zst.age", &keyed);
+
+        // Nothing was offered, so nothing was tried. Calling that a pass is how an archive
+        // whose key had been lost went on being reported as a working backup.
+        let blind = check_backup_encryption(&Default::default(), Some(&archive), None)
+            .expect("the header is readable");
+        assert_eq!(blind.verdict, Verdict::Unknown, "{}", blind.detail);
+        assert!(
+            blind.remedy.is_some(),
+            "an unknown with no way out is a nag"
         );
-        assert_eq!(check_backup_encryption(None).verdict, Verdict::Unknown);
+
+        let key_file = dir.join("identity.txt");
+        std::fs::write(&key_file, identity.to_string().expose_secret())
+            .expect("scratch key is writable");
+        let offered = crate::crypt::Identities {
+            files: vec![key_file],
+            ..Default::default()
+        };
+        let opened = check_backup_encryption(&offered, Some(&archive), None)
+            .expect("the header is readable");
+        assert_eq!(opened.verdict, Verdict::Pass, "{}", opened.detail);
+
+        let stranger = dir.join("stranger.txt");
+        std::fs::write(
+            &stranger,
+            age::x25519::Identity::generate()
+                .to_string()
+                .expose_secret(),
+        )
+        .expect("scratch key is writable");
+        let wrong = check_backup_encryption(
+            &crate::crypt::Identities {
+                files: vec![stranger],
+                ..Default::default()
+            },
+            Some(&archive),
+            None,
+        )
+        .expect("the header is readable");
+        assert_eq!(wrong.verdict, Verdict::Fail, "{}", wrong.detail);
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     const ME: &str = "z6MkAAA";
@@ -873,7 +1253,7 @@ mod tests {
             source_retires_key: Some(false),
             source_node_was_running: true,
         });
-        let check = check_sole_holder(Some(&record));
+        let check = check_sole_holder(&state::Stored::Record(Box::new(record)));
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.remedy.is_some(), "a warning with no way out is a nag");
     }
@@ -885,7 +1265,10 @@ mod tests {
             source_retires_key: Some(true),
             source_node_was_running: true,
         });
-        assert_eq!(check_sole_holder(Some(&record)).verdict, Verdict::Pass);
+        assert_eq!(
+            check_sole_holder(&state::Stored::Record(Box::new(record))).verdict,
+            Verdict::Pass
+        );
     }
 
     #[test]
@@ -897,13 +1280,35 @@ mod tests {
             source_retires_key: None,
             source_node_was_running: false,
         });
-        assert_eq!(check_sole_holder(Some(&record)).verdict, Verdict::Unknown);
+        assert_eq!(
+            check_sole_holder(&state::Stored::Record(Box::new(record))).verdict,
+            Verdict::Unknown
+        );
     }
 
     #[test]
     fn a_home_that_was_never_restored_is_not_asked_about_a_machine_it_never_came_from() {
-        assert_eq!(check_sole_holder(Some(&record())).verdict, Verdict::Pass);
-        assert_eq!(check_sole_holder(None).verdict, Verdict::Pass);
+        let stored = state::Stored::Record(Box::new(record()));
+        assert_eq!(check_sole_holder(&stored).verdict, Verdict::Pass);
+    }
+
+    /// The bug: `sudo rad-backup restore` writes its record into root's state directory, and
+    /// `restore.sh` writes none at all. Both leave the user's own `doctor` with nothing to
+    /// read, and reading nothing as "never restored" put a green line on the one hazard this
+    /// tool exists for, at the two people most likely to be standing in it.
+    #[test]
+    fn a_home_with_no_record_of_its_own_origin_is_unknown_rather_than_never_restored() {
+        for stored in [
+            state::Stored::Absent,
+            state::Stored::Unreadable {
+                path: std::path::PathBuf::from("/nowhere/state.json"),
+                reason: "expected value at line 1 column 1".to_string(),
+            },
+        ] {
+            let check = check_sole_holder(&stored);
+            assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
+            assert!(check.remedy.is_some(), "{}", check.detail);
+        }
     }
 
     fn record() -> state::Record {
