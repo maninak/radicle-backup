@@ -59,21 +59,6 @@ impl Git {
             .collect())
     }
 
-    /// The object a ref points at, or `None` when the ref does not exist.
-    pub fn ref_oid(&self, git_dir: &Path, name: &str) -> Result<Option<String>> {
-        let printed = self.tool.answer(&[
-            "--git-dir".as_ref(),
-            git_dir.as_os_str(),
-            "rev-parse".as_ref(),
-            "--verify".as_ref(),
-            "--quiet".as_ref(),
-            format!("{name}^{{commit}}").as_ref(),
-        ])?;
-        Ok(printed
-            .map(|oid| oid.trim().to_string())
-            .filter(|o| !o.is_empty()))
-    }
-
     /// What `HEAD` is a symbolic ref to, which a bundle does not carry and a restore must set
     /// back by hand.
     pub fn head_target(&self, git_dir: &Path) -> Result<Option<String>> {
@@ -261,11 +246,6 @@ pub fn config_entry(rid: &str) -> String {
     format!("repos/{}.config", rid.strip_prefix("rad:").unwrap_or(rid))
 }
 
-/// The ref that holds a peer's signed refs, which is what divergence is measured on.
-pub fn sigrefs_ref(node_id: &str) -> String {
-    format!("refs/namespaces/{node_id}/refs/rad/sigrefs")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,13 +371,5 @@ mod tests {
         // Only ASCII control characters are refused, so a branch named in a language with
         // accents keeps its HEAD.
         assert!(names_a_ref("refs/heads/caf\u{e9}"));
-    }
-
-    #[test]
-    fn the_sigrefs_ref_is_namespaced_under_the_peer_it_belongs_to() {
-        assert_eq!(
-            sigrefs_ref("z6MkvAFBkdph6yXSZDkkVqf9FfCcvkG29JD4KbwwnGphDRLV"),
-            "refs/namespaces/z6MkvAFBkdph6yXSZDkkVqf9FfCcvkG29JD4KbwwnGphDRLV/refs/rad/sigrefs"
-        );
     }
 }

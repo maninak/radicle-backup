@@ -227,20 +227,22 @@ Everything is unpacked into a staging directory first and every digest is checke
 
 Radicle signs a set of refs per peer. If you restore an archive taken before your last push, your storage now holds signed refs that are *behind* what the network already accepted. Push on top of them and you sign a second, conflicting history for your own peer id. Other nodes do not resolve that: they see your identity fork.
 
-So after restoring, and before handing control back, every restored repository is fetched and compared:
+So after restoring, and before handing control back, every restored repository is fetched, and the archived signed refs are held against what other nodes have said they hold of yours. That second half matters: a fetch into a repository already in storage is a *pull*, and a pull ignores your own key, so your own refs come back exactly as the archive wrote them however far the network has moved. The node's record of what peers announced is the only view of your own namespace this machine can get.
 
 | Standing | What it means | What happens |
 |---|---|---|
-| in step | Your signed refs match the network's | Nothing to do |
-| the network was ahead | The network had newer refs, which are now yours | Fetched and taken; you are current |
+| no other node has reported holding anything else | Nobody has announced signed refs of yours that are missing here | Nothing to do, but see below |
 | holds work the network has not seen | The archive is ahead, as after a crash | Kept; push when ready |
-| diverged | Neither is an ancestor of the other | **Named, and the restore exits `3`** |
+| another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here | **Named, and the restore exits `3`** |
+| could not be compared | The fetch failed, or no node has said what it holds | Named; fetch again before you write |
+
+There is no "in step with the network" row, because this tool cannot establish it. A node's record of a peer is rewritten only when that peer announces a *different* head, so disagreement announces itself and agreement is silent. The check catches the hazard; it does not certify its absence. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
 
 `--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push.
 
 `--replay-policies` re-applies the seeding and following policies through `rad` instead of copying the policy database, for restoring into a Radicle whose schema has moved past the archived one.
 
-A repository the archive carried and this run could not put back is named and costs exit `3`, the same as a divergence: the rest of the restore stands, and the archive is untouched.
+A repository the archive carried and this run could not put back is named and costs exit `3`, the same as a fork hazard: the rest of the restore stands, and the archive is untouched.
 
 ### Restoring without this tool
 

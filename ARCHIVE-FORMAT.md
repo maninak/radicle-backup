@@ -93,7 +93,7 @@ Keys are camelCase. Unknown keys must be ignored, and unknown values of `tier` a
 Fields that carry weight:
 
 - **`entries[].sha256`** is over the entry's bytes as stored, uncompressed and unencrypted. It is the whole of verification: an entry listed but absent, an entry present but unlisted, a length that disagrees or a digest that disagrees are all errors.
-- **`repos[].sigrefs`** maps a peer's node id to the object its `refs/rad/sigrefs` pointed at when the archive was taken. Comparing it with what the network holds is how a restore detects divergence before anyone pushes on top of it.
+- **`repos[].sigrefs`** maps a peer's node id to the object its `refs/rad/sigrefs` pointed at when the archive was taken. Comparing it with what other nodes announced they hold of your refs is how a restore detects a fork hazard before anyone pushes on top of it.
 - **`repos[].bundle`** is absent when the repository was described but not carried, which is how a `state` archive keeps an inventory without the data.
 - **`repos[].visibility`** is `public` or `private`, from the repository's identity document; a document with no `visibility` is public, as heartwood reads it. `private` means the open network does not carry it, and `repos[].allowed` lists the peers its owner allowed to hold a copy. That list being empty is what makes a repository unrecoverable without this archive.
 - **`identity.keyEncrypted`** says whether the archived key has a passphrase of its own. When it is `false`, the archive's own encryption is the only thing protecting the identity.

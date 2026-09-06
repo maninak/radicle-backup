@@ -42,7 +42,7 @@ pub struct Tool {
 }
 
 /// What a probe said, when it was in a position to say anything.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
     Yes,
     No,
