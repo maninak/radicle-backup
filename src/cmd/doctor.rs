@@ -870,7 +870,7 @@ fn check_sigrefs_propagation(
         // offers it: a head that reached anybody, ever, has left this disk.
         let elsewhere = synced_heads
             .get(&repo.rid)
-            .is_some_and(|heads| heads.contains(mine));
+            .is_some_and(|heads| heads.iter().any(|head| crate::git::same_oid(head, mine)));
         if !elsewhere {
             here_only.push(repo.display_name());
         }

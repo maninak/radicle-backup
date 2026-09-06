@@ -119,7 +119,11 @@ jobs:
             found=1
           fi
           rules=$((rules + 1))
-          shared_scratch=$(grep -rn 'Scratch::create(std::env::temp_dir()' src/ || true)
+          shared_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$' | grep -v '^src/key.rs$'); do
+            if tr '\n' ' ' < "$file" | grep -qE 'Scratch::create\([^)]*temp_dir'; then
+              echo "$file"
+            fi
+          done)
           if [ -n "$shared_scratch" ]; then
             echo "$shared_scratch" | sed 's/$/: two tests cannot share one scratch parent; use TestScratch::create("name")/' | sed 's/^/::error::/'
             found=1

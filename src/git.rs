@@ -251,6 +251,16 @@ pub fn names_an_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Whether two oids out of the node's own records name one commit.
+///
+/// `names_an_oid` lets either case through and git resolves either, so two spellings of one
+/// commit reach these readers as two strings. One place for the comparison, because `restore`
+/// and `doctor` read the same `repo-sync-status` column and disagreeing about equality made
+/// `doctor` report work as stranded on a disk the network had held for months.
+pub fn same_oid(one: &str, other: &str) -> bool {
+    one.eq_ignore_ascii_case(other)
+}
+
 /// The bundle file name for a repository inside an archive. One place, so the writer and the
 /// reader cannot disagree about it.
 ///
@@ -323,6 +333,33 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&finished.stdout).trim().to_string()
     }
 
+    /// Damage of the kind a restore can produce: everything packed, and the pack short. The
+    /// repository still opens and every object in it stops answering, which is a state
+    /// `cat-file -e` reports as "absent" rather than as a failure.
+    pub(crate) fn truncate_the_pack(git_dir: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let finished = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(git_dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(finished.status.success(), "git {args:?}");
+        };
+        run(&["repack", "-a", "-d", "-q"]);
+        let packs = git_dir.join("objects/pack");
+        let pack = std::fs::read_dir(&packs)
+            .expect("the pack directory is readable")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.extension().is_some_and(|kind| kind == "pack"))
+            .expect("repack wrote a pack");
+        // Rewritten rather than truncated in place, because `repack` leaves the file read
+        // only and this has to work without a mode change on every platform the tests run on.
+        let short = std::fs::read(&pack).expect("the pack is readable")[..60].to_vec();
+        std::fs::remove_file(&pack).expect("the pack is removable");
+        std::fs::write(&pack, short).expect("the pack is writable");
+    }
+
     /// Three answers again, and the point is that they are not the same three. `merge-base`
     /// gives 128 both for an object that is not here and for a repository it cannot open, so
     /// reading its failure needs a question that separates those, and `cat-file -e` bare is
@@ -349,6 +386,15 @@ pub(crate) mod tests {
         assert!(
             matches!(unopenable, crate::exec::Answer::CouldNotAsk { .. }),
             "{unopenable:?}"
+        );
+
+        // And the state this question cannot separate, which is why `restore` asks it twice.
+        // A store that cannot produce an object it has answers exactly as one that never had
+        // it, so "absent" is a fact about a lookup and not yet a fact about the network.
+        truncate_the_pack(&git_dir);
+        assert_eq!(
+            git.holds_object(&git_dir, &second).expect("git ran"),
+            crate::exec::Answer::No
         );
     }
 

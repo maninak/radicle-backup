@@ -188,13 +188,13 @@ pub fn count(n: usize, singular: &str, plural: &str) -> String {
 
 /// A few named and the rest counted: identifiers stop being readable well before they stop
 /// being numerous, while the count is what says how much of the home this is about.
-pub fn shortlist<'a>(ids: impl IntoIterator<Item = &'a String>) -> String {
+pub fn shortlist<S: AsRef<str>>(ids: impl IntoIterator<Item = S>) -> String {
     const NAMED: usize = 5;
-    let all: Vec<&str> = ids.into_iter().map(String::as_str).collect();
+    let all: Vec<S> = ids.into_iter().collect();
     let named = all
         .iter()
         .take(NAMED)
-        .copied()
+        .map(AsRef::as_ref)
         .collect::<Vec<_>>()
         .join(", ");
     match all.len().saturating_sub(NAMED) {

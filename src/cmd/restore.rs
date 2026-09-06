@@ -223,9 +223,9 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // leave a home that has been fully restored and believes it has never seen an archive.
     let comparison = if args.no_reconcile {
         term.warn("--no-reconcile: nothing was compared with the network");
-        Ok(Reconciled::default())
+        Ok(nothing_compared(&restored.repos))
     } else {
-        reconcile(ctx, &manifest, &restored.repos)
+        reconcile(ctx, &manifest, &restored.repos, &staging)
     };
     remember(ctx, &manifest, &restored.repos, archive, encrypted);
     let reconciled = comparison?;
@@ -640,10 +640,14 @@ struct Reconciled {
 /// The fetch is what makes the answer current; it is not itself the answer. See `classify` for
 /// why the network's view of our own namespace has to come from the node's record of what
 /// peers announced rather than from the refs sitting in local storage.
-fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<Reconciled> {
-    let mut standings = Reconciled::default();
+fn reconcile(
+    ctx: &Ctx,
+    manifest: &Manifest,
+    restored: &[RepoRecord],
+    staging: &Path,
+) -> Result<Reconciled> {
     if restored.is_empty() {
-        return Ok(standings);
+        return Ok(Reconciled::default());
     }
 
     let rad = Rad::new(ctx.home.path());
@@ -652,8 +656,9 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
             .warn("rad is not on PATH, so nothing was compared with the network");
         ctx.term
             .detail("run `rad sync <rid> --fetch` for each repository before you write to it");
-        return Ok(standings);
+        return Ok(nothing_compared(restored));
     }
+    let mut standings = Reconciled::default();
     // The node is started here, and this is the only place it can be. Installing over a live
     // home corrupts both, so restore refuses to begin while the node runs; comparing with the
     // network needs a node to ask. Held together, those two rules made this check unreachable:
@@ -674,26 +679,25 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
                 .warn("the node would not start, so nothing was compared with the network");
             ctx.term
                 .detail("run `rad node start`, then `rad sync <rid> --fetch` before you write");
-            return Ok(standings);
+            return Ok(nothing_compared(restored));
         }
         true
     };
 
-    let outcome = compare_with_network(
+    compare_with_network(
         ctx,
         manifest,
         restored,
+        staging,
         &rad,
         &mut standings.standings,
         &mut standings.ahead_of_someone,
     );
 
-    // Put back before the outcome is propagated, so a comparison that fails halfway does not
-    // also leave a node running that the user never started.
     if started_here {
         ctx.term.step("stopping the node again");
-        // Reported, never propagated: the comparison's own outcome below is the answer this
-        // function owes its caller, and a stop that failed must not stand in front of it.
+        // Reported, never propagated: the standings are the answer this function owes its
+        // caller, and a stop that failed must not stand in front of them.
         if !matches!(rad.stop_node(), Ok(true)) {
             ctx.term
                 .warn("the node was started to run this check and would not stop again");
@@ -701,7 +705,6 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
                 .detail("stop it with `rad node stop` if you meant it to stay down");
         }
     }
-    outcome?;
     Ok(standings)
 }
 
@@ -736,6 +739,15 @@ struct Comparison {
     someone_is_behind: bool,
 }
 
+/// Where a row in the node's record came from, which decides what may be read out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Some node wrote it while this restore was running.
+    AnnouncedSinceRestore,
+    /// The restored home started with it, which means it came out of the archive.
+    CameWithTheArchive,
+}
+
 /// Where the archive's signed refs stand against what other nodes hold of them.
 ///
 /// `held` is what those nodes have said they carry of *our* `rad/sigrefs` that is not what the
@@ -761,21 +773,33 @@ where
     // nothing that contradicts this copy.
     let mut standing = Standing::NothingSaysOtherwise;
     let mut someone_is_behind = false;
-    for head in &held.heads {
+    for (origin, head) in held.rows() {
         standing = standing.worse_of(if !git::names_an_oid(head) {
             // A row shaped like a flag would be one to `merge-base`, which takes no `--`. A
             // malformed row is a database this tool cannot read, not evidence of a fork.
             Standing::CouldNotAsk
         } else {
             match is_ancestor(head)? {
-                // Their head is in our history: they are behind, and we hold the work.
-                Answer::Yes => {
-                    someone_is_behind = true;
-                    Standing::ArchiveIsAhead
-                }
+                // Their head is in our history, so they are behind and we hold the work. True
+                // of a row that arrived just now; only ever true of one the archive carried at
+                // the moment the backup was taken. A node that was behind in January is a node
+                // that has had since January to catch up and pass us, and it announces nothing
+                // when it does not, so acting on that row is how a copy the network is ahead
+                // of gets told to run `rad sync --announce`.
+                Answer::Yes => match origin {
+                    Origin::AnnouncedSinceRestore => {
+                        someone_is_behind = true;
+                        Standing::ArchiveIsAhead
+                    }
+                    Origin::CameWithTheArchive => Standing::NothingSaysOtherwise,
+                },
                 // Their head is not in our history: work signed under this key that is not
-                // here. `resolve_git_failure` turns a `git` that could not resolve their head
-                // at all into this, having first established the object is genuinely absent.
+                // here. Taken from either origin, because this reading cannot decay. A node
+                // that once held refs under your key that you lack still holds them, so a row
+                // the archive carried is as true today as the day it was written.
+                //
+                // `resolve_git_failure` turns a `git` that could not resolve their head at all
+                // into this, having first established the object is genuinely absent.
                 Answer::No => Standing::PeerHoldsOther,
                 // `git` could not run, or could not open the repository. That says nothing
                 // about any peer, and saying it does costs exit 3 and a warning that somebody
@@ -791,38 +815,62 @@ where
 }
 
 /// What other nodes have said they hold of one repository's signed refs that is not what the
-/// archive holds.
+/// archive holds, split by whether the archive itself brought the row.
 ///
-/// A row that agrees with the archive is dropped here rather than classified, because nothing
-/// distinguishes the two things it can be. Heartwood rewrites a peer's row only when that peer
-/// announces a *different* head, so an agreeing row is either a peer's first word or the one
-/// the archive itself carried, and a restored home starts with the archive's own copy of that
-/// table. Reading it as the network agreeing is the archive being compared with itself.
+/// A row that agrees with the archive is in neither set. Nothing distinguishes the two things
+/// it can be: heartwood rewrites a peer's row only when that peer announces a *different*
+/// head, so an agreeing row is either a peer's first word or the one the archive carried, and
+/// a restored home starts with the archive's own copy of that table. Reading it as the network
+/// agreeing is the archive being compared with itself.
 ///
-/// A row that differs has no second reading. Whenever it was written, some node put its name
-/// to a head this copy's own is not, and that stays true across a restore: either the node is
-/// behind, or it holds refs signed under this key that are not here. Both are worth saying,
-/// and neither depends on when the row was written, which is as well, because the column
-/// carries the announcing node's clock and heartwood replays old gossip with its old stamp.
+/// A row that differs is kept, and where it came from decides what may be read out of it. Both
+/// readings hold for a row that arrived during this run. Only the one that cannot decay, a
+/// node holding refs signed under this key that are not here, may be taken from a row the
+/// archive carried. See `classify`.
 #[derive(Default)]
 struct Evidence {
-    heads: BTreeSet<String>,
+    announced_since_restore: BTreeSet<String>,
+    came_with_the_archive: BTreeSet<String>,
 }
 
-fn evidence_against(archived: &str, recorded: Option<&BTreeSet<String>>) -> Evidence {
+impl Evidence {
+    /// Every row worth asking `git` about, each beside where it came from.
+    fn rows(&self) -> impl Iterator<Item = (Origin, &String)> {
+        self.announced_since_restore
+            .iter()
+            .map(|head| (Origin::AnnouncedSinceRestore, head))
+            .chain(
+                self.came_with_the_archive
+                    .iter()
+                    .map(|head| (Origin::CameWithTheArchive, head)),
+            )
+    }
+}
+
+/// `recorded` is what the node's record holds for one repository now, and `carried` what the
+/// same record held before this restore started the node, read out of the archive's own copy.
+fn evidence_against(
+    archived: &str,
+    recorded: Option<&BTreeSet<String>>,
+    carried: Option<&BTreeSet<String>>,
+) -> Evidence {
     let Some(recorded) = recorded else {
         return Evidence::default();
     };
-    Evidence {
-        // Case-insensitively, because `names_an_oid` lets either case through and git resolves
-        // either: two spellings of one commit are not two commits, and treating them as two
-        // spends a `git` to report unpushed work that does not exist.
-        heads: recorded
-            .iter()
-            .filter(|head| !head.eq_ignore_ascii_case(archived))
-            .cloned()
-            .collect(),
+    let mut evidence = Evidence::default();
+    for head in recorded {
+        // Two spellings of one commit are not two commits, and treating them as two spends a
+        // `git` to report unpushed work that does not exist.
+        if git::same_oid(head, archived) {
+            continue;
+        }
+        if carried.is_some_and(|carried| carried.contains(head)) {
+            evidence.came_with_the_archive.insert(head.clone());
+        } else {
+            evidence.announced_since_restore.insert(head.clone());
+        }
     }
+    evidence
 }
 
 /// The repository id in the form heartwood's own tables use, which carries the `rad:` prefix.
@@ -850,20 +898,30 @@ const GOSSIP_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
 ///
 /// A flat wait, with nothing to poll for: a peer that holds exactly what the archive holds
 /// writes no row at all, so no observable state ever says the answers are in. Twenty seconds
-/// is what this command already spends waiting for a node it started.
+/// was inherited from what this command spends waiting for a node it started, and it is spent
+/// on every restore that fetched anything rather than only when something is wrong, which is
+/// why the line saying so names the number.
+fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    ctx.term
+        .step("waiting twenty seconds for other nodes to say what they hold of these refs");
+    std::thread::sleep(GOSSIP_WINDOW);
+    read_what_others_hold(ctx, node_id)
+}
+
+/// The reading on its own, so that what it decides can be tested without the wait.
 ///
 /// `None` rather than an error when the record cannot be read, because propagating it would
 /// cost the report of which repositories did not come back at all, which this run established
 /// long before the comparison and which no later command can reconstruct.
-fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSet<String>>> {
-    ctx.term
-        .step("waiting for other nodes to say what they hold of these refs");
-    std::thread::sleep(GOSSIP_WINDOW);
-    match crate::db::read_synced_heads(&ctx.home.node_db(), node_id) {
+fn read_what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    let node_db = ctx.home.node_db();
+    match crate::db::read_synced_heads(&node_db, node_id) {
         // A table this build cannot read comes back empty, and an empty record means "nobody
         // has reported anything else", which would reassure the reader on the strength of a
-        // table nobody managed to open. `main` prints which table moved.
-        Ok(_) if crate::db::saw_schema_drift() => {
+        // table nobody managed to open. Asked about this database rather than about the
+        // process, because an unrelated reader's drift would otherwise discard a record that
+        // was read perfectly. `main` prints which table moved.
+        Ok(_) if crate::db::saw_schema_drift_at(&node_db) => {
             ctx.term
                 .warn("this build cannot read part of the node's schema, so nothing was compared");
             None
@@ -885,27 +943,62 @@ fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSe
 /// never brings back. But an unreadable repository exits 128 too, and blaming a peer for that
 /// costs exit 3 and a warning that somebody's identity may have forked.
 ///
-/// So the object is looked for. Asking instead whether the archived head reaches itself proves
-/// nothing, because `merge-base --is-ancestor A A` answers on equality without opening a
-/// single object, and a repository whose unbundle left a hole would pass it.
-fn resolve_git_failure(git: &Git, git_dir: &Path, head: &str, answer: Answer) -> Result<Answer> {
+/// So the objects are looked for, both of them. `cat-file -e` answers "absent" for an object
+/// sitting in a pack that was truncated in transit, which a restore is exactly the moment for,
+/// and every object in that pack answers the same way. The archived head is the control: a
+/// restore that worked put it there, so a store that cannot produce it either is a store that
+/// cannot answer, not a network holding something else.
+///
+/// Asking instead whether the archived head reaches itself proves nothing, because
+/// `merge-base --is-ancestor A A` answers on equality without opening a single object.
+fn resolve_git_failure(
+    git: &Git,
+    git_dir: &Path,
+    head: &str,
+    archived: &str,
+    answer: Answer,
+) -> Result<Answer> {
     if !matches!(answer, Answer::CouldNotAsk { .. }) {
         return Ok(answer);
     }
-    match git.holds_object(git_dir, head)? {
-        Answer::No => Ok(Answer::No),
-        _ => Ok(answer),
+    if git.holds_object(git_dir, head)? != Answer::No {
+        return Ok(answer);
+    }
+    if git.holds_object(git_dir, archived)? == Answer::Yes {
+        return Ok(Answer::No);
+    }
+    Ok(answer)
+}
+
+/// Every restored repository, with nothing compared about it.
+///
+/// The paths that give up before comparing anything used to hand back an empty record, which
+/// `--json` rendered as empty `atRisk`, `ahead` and `notChecked` arrays: a run that never
+/// asked the network anything was indistinguishable, to a script, from one that asked and
+/// found nothing wrong.
+fn nothing_compared(restored: &[RepoRecord]) -> Reconciled {
+    Reconciled {
+        standings: restored
+            .iter()
+            .map(|repo| (repo.rid.clone(), Standing::CouldNotAsk))
+            .collect(),
+        ahead_of_someone: BTreeSet::new(),
     }
 }
 
+/// Never returns an error, because everything it can fail at happens after the identity, the
+/// repositories and the policies are on disk. A `git` that vanished mid-run or a file
+/// descriptor limit reached on the twelfth repository used to propagate past `report`, and the
+/// user was never told which repositories the archive carried and the home did not get.
 fn compare_with_network(
     ctx: &Ctx,
     manifest: &Manifest,
     restored: &[RepoRecord],
+    staging: &Path,
     rad: &Rad,
     standings: &mut BTreeMap<String, Standing>,
     ahead_of_someone: &mut BTreeSet<String>,
-) -> Result<()> {
+) {
     let git = Git::new();
     let node_id = &manifest.identity.node_id;
 
@@ -937,27 +1030,39 @@ fn compare_with_network(
             standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
         }
-        if !rad.fetch(&repo.rid)? {
-            standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
-            continue;
+        match rad.fetch(&repo.rid) {
+            Ok(true) => fetched.push((repo, archived)),
+            Ok(false) => {
+                standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
+            }
+            Err(e) => {
+                ctx.term
+                    .warn(&format!("{} could not be fetched: {e}", repo.rid));
+                standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
+            }
         }
-        fetched.push((repo, archived));
     }
     if fetched.is_empty() {
-        return Ok(());
+        return;
     }
 
+    // What the record held before the node this restore started could write to it, which is
+    // the archive's own copy of the table. Unreadable, every row reads as one the archive
+    // carried, which is the reading that claims less.
+    let carried =
+        crate::db::read_synced_heads(&staging.join("node/node.db"), node_id).unwrap_or_default();
     let held = what_others_hold(ctx, node_id);
     for (repo, archived) in fetched {
         let Some(held) = &held else {
             standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
         };
+        let rid = prefixed_rid(&repo.rid);
         let path = ctx.home.repository_path(&repo.rid);
-        let evidence = evidence_against(archived, held.get(&prefixed_rid(&repo.rid)));
+        let evidence = evidence_against(archived, held.get(&rid), carried.get(&rid));
         let compared = classify(&evidence, |head| {
             let asked = git.is_ancestor(&path, head, archived)?;
-            let answer = resolve_git_failure(&git, &path, head, asked)?;
+            let answer = resolve_git_failure(&git, &path, head, archived, asked)?;
             if let Answer::CouldNotAsk { said } = &answer {
                 ctx.term.warn(&format!(
                     "git could not compare {} with what other nodes hold: {said}",
@@ -965,13 +1070,24 @@ fn compare_with_network(
                 ));
             }
             Ok(answer)
-        })?;
-        if compared.someone_is_behind {
-            ahead_of_someone.insert(repo.rid.clone());
+        });
+        match compared {
+            Ok(compared) => {
+                if compared.someone_is_behind {
+                    ahead_of_someone.insert(repo.rid.clone());
+                }
+                standings.insert(repo.rid.clone(), compared.standing);
+            }
+            // `git` itself could not be run: the binary went away mid-restore, or this process
+            // is out of file descriptors. One repository's worth of unknown, and the rest of
+            // the report still owed to the user.
+            Err(e) => {
+                ctx.term
+                    .warn(&format!("{} could not be compared: {e}", repo.rid));
+                standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
+            }
         }
-        standings.insert(repo.rid.clone(), compared.standing);
     }
-    Ok(())
 }
 
 /// Re-apply seeding and following through `rad`, for a Radicle whose schema has moved on.
@@ -1066,9 +1182,9 @@ fn replay(
 
 /// What the report is about to say, decided before a word of it is printed.
 ///
-/// A value rather than four expressions inside `report`, because these are the whole of what a
-/// restore tells somebody about their signed refs and until they were one the only way to
-/// check them was to read a restore's output by eye.
+/// A value rather than a handful of expressions inside `report`, because these are the whole
+/// of what a restore tells somebody about their signed refs and until they were one the only
+/// way to check them was to read a restore's output by eye.
 struct Verdict<'a> {
     /// Another node holds signed refs this copy does not. Do not write in these.
     at_risk: Vec<&'a str>,
@@ -1077,6 +1193,10 @@ struct Verdict<'a> {
     /// Nothing came back to hold against. Named, so that a comparison which answered nothing
     /// does not read as a clean bill.
     not_checked: Vec<&'a str>,
+    /// No node will ever hold these: announced to nobody, or with no signed refs of ours in
+    /// the archive. Said out loud, because a home of only private repositories otherwise gets
+    /// a restore that mentions the network nowhere at all.
+    nothing_to_compare: Vec<&'a str>,
     /// Whether anything at all was held against what a node reported, which is what the line
     /// saying nobody has reported otherwise rests on.
     nothing_was_reported_otherwise: bool,
@@ -1094,6 +1214,7 @@ impl<'a> Verdict<'a> {
         };
         let at_risk = of_standing(Standing::PeerHoldsOther);
         let not_checked = of_standing(Standing::CouldNotAsk);
+        let nothing_to_compare = of_standing(Standing::NothingToCompare);
         // Off the second answer rather than off the standings, because a repository some node
         // is behind on and another node has said nothing about reports as the unknown, and the
         // work it holds that nowhere else does would then never be named.
@@ -1123,6 +1244,7 @@ impl<'a> Verdict<'a> {
             at_risk,
             ahead,
             not_checked,
+            nothing_to_compare,
             nothing_was_reported_otherwise,
         }
     }
@@ -1142,6 +1264,7 @@ fn report(
         at_risk,
         ahead,
         not_checked,
+        nothing_to_compare,
         nothing_was_reported_otherwise,
     } = Verdict::of(reconciled);
 
@@ -1156,6 +1279,7 @@ fn report(
             "atRisk": at_risk,
             "ahead": ahead,
             "notChecked": not_checked,
+            "nothingToCompare": nothing_to_compare,
             "notRestored": dropped,
         }))?;
     } else {
@@ -1188,9 +1312,23 @@ fn report(
             // that failed is answered by running it again; a node database this build could
             // not read is not, and telling somebody to re-run the command that has just run is
             // how the schema check used to send people to start a node already up.
+            for rid in &not_checked {
+                term.detail(rid);
+            }
             term.detail("`rad sync <rid> --fetch` again with the node running, and read any");
             term.detail("warning above about the node's database: those are the two reasons");
             term.detail("this comparison has nothing to work from");
+        }
+        if !nothing_to_compare.is_empty() {
+            term.hint(&format!(
+                "{} announced to nobody, so no node can hold them: {}",
+                term::count(
+                    nothing_to_compare.len(),
+                    "repository is",
+                    "repositories are"
+                ),
+                term::shortlist(&nothing_to_compare)
+            ));
         }
         if nothing_was_reported_otherwise {
             term.detail("no other node has reported holding signed refs of yours missing here");
@@ -1332,9 +1470,19 @@ mod tests {
         }
     }
 
-    fn holding(heads: &[String]) -> Evidence {
+    /// Rows some node wrote while this restore was running.
+    fn announced(heads: &[String]) -> Evidence {
         Evidence {
-            heads: heads.iter().cloned().collect(),
+            announced_since_restore: heads.iter().cloned().collect(),
+            came_with_the_archive: BTreeSet::new(),
+        }
+    }
+
+    /// Rows the restored home started with, which came out of the archive.
+    fn carried(heads: &[String]) -> Evidence {
+        Evidence {
+            announced_since_restore: BTreeSet::new(),
+            came_with_the_archive: heads.iter().cloned().collect(),
         }
     }
 
@@ -1351,7 +1499,7 @@ mod tests {
     #[test]
     fn a_node_holding_signed_refs_this_copy_does_not_have_is_the_fork_hazard() {
         let calls = std::cell::Cell::new(0);
-        let compared = classify(&holding(&[oid('b')]), asked(Answer::No, &calls))
+        let compared = classify(&announced(&[oid('b')]), asked(Answer::No, &calls))
             .expect("the ancestry answer is not an error");
         assert_eq!(compared.standing, Standing::PeerHoldsOther);
         assert!(!compared.someone_is_behind);
@@ -1367,7 +1515,7 @@ mod tests {
     fn a_git_that_could_not_answer_at_all_is_an_unknown_and_not_a_fork() {
         let calls = std::cell::Cell::new(0);
         let compared = classify(
-            &holding(&[oid('b')]),
+            &announced(&[oid('b')]),
             asked(
                 Answer::CouldNotAsk {
                     said: "fatal: not a git repository".to_string(),
@@ -1382,7 +1530,7 @@ mod tests {
     #[test]
     fn a_node_still_back_at_an_ancestor_is_read_as_the_archive_being_ahead() {
         let calls = std::cell::Cell::new(0);
-        let compared = classify(&holding(&[oid('b')]), asked(Answer::Yes, &calls))
+        let compared = classify(&announced(&[oid('b')]), asked(Answer::Yes, &calls))
             .expect("the ancestry answer is not an error");
         assert_eq!(compared.standing, Standing::ArchiveIsAhead);
         assert!(compared.someone_is_behind);
@@ -1395,7 +1543,7 @@ mod tests {
     fn the_node_that_most_needs_acting_on_is_the_one_reported() {
         for order in [[Answer::No, Answer::Yes], [Answer::Yes, Answer::No]] {
             let mut answers = order.clone().into_iter();
-            let compared = classify(&holding(&[oid('a'), oid('b')]), |_| {
+            let compared = classify(&announced(&[oid('a'), oid('b')]), |_| {
                 Ok(answers.next().expect("one answer per head"))
             })
             .expect("the ancestry answer is not an error");
@@ -1411,7 +1559,7 @@ mod tests {
     #[test]
     fn work_a_node_is_behind_on_is_still_a_fact_beside_a_node_holding_other_refs() {
         let mut answers = [Answer::Yes, Answer::No].into_iter();
-        let compared = classify(&holding(&[oid('a'), oid('b')]), |_| {
+        let compared = classify(&announced(&[oid('a'), oid('b')]), |_| {
             Ok(answers.next().expect("one answer per head"))
         })
         .expect("the ancestry answer is not an error");
@@ -1428,9 +1576,9 @@ mod tests {
     /// and came back with "push this first" about work that was already there.
     #[test]
     fn one_commit_spelled_in_two_cases_is_not_two_commits() {
-        let evidence = evidence_against(&oid('a').to_uppercase(), Some(&rows(&[oid('a')])));
+        let evidence = evidence_against(&oid('a').to_uppercase(), Some(&rows(&[oid('a')])), None);
 
-        assert!(evidence.heads.is_empty(), "{:?}", evidence.heads);
+        assert_eq!(evidence.rows().count(), 0);
     }
 
     /// The reading a row that agrees can never bear. A restored home's node database is the
@@ -1440,9 +1588,9 @@ mod tests {
     /// network agreeing, that is the archive compared with itself a second time.
     #[test]
     fn a_row_that_agrees_with_the_archive_is_not_evidence_about_the_network() {
-        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('a')])));
+        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('a')])), None);
 
-        assert!(evidence.heads.is_empty(), "{:?}", evidence.heads);
+        assert_eq!(evidence.rows().count(), 0);
     }
 
     /// And the reading a row that differs always bears, whenever it was written. Gated on a
@@ -1450,9 +1598,12 @@ mod tests {
     /// "could not be compared" and the run exited 0 over a live fork hazard.
     #[test]
     fn a_row_that_differs_is_evidence_whenever_the_node_wrote_it() {
-        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('b'), oid('c')])));
+        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('b'), oid('c')])), None);
 
-        assert_eq!(evidence.heads, BTreeSet::from([oid('b'), oid('c')]));
+        assert_eq!(
+            evidence.announced_since_restore,
+            BTreeSet::from([oid('b'), oid('c')])
+        );
     }
 
     /// `rad::is_identifier` takes both spellings, so a manifest can carry either, and the node
@@ -1462,15 +1613,15 @@ mod tests {
     fn a_repository_id_without_its_prefix_still_finds_the_row_the_node_wrote() {
         let held = BTreeMap::from([("rad:z6MkAAA".to_string(), rows(&[oid('b')]))]);
 
-        let evidence = evidence_against(&oid('a'), held.get(&prefixed_rid("z6MkAAA")));
+        let evidence = evidence_against(&oid('a'), held.get(&prefixed_rid("z6MkAAA")), None);
 
-        assert_eq!(evidence.heads, BTreeSet::from([oid('b')]));
+        assert_eq!(evidence.announced_since_restore, BTreeSet::from([oid('b')]));
     }
 
     #[test]
     fn identical_refs_are_in_step_without_asking_git_anything() {
         let calls = std::cell::Cell::new(0);
-        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('a')])));
+        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('a')])), None);
         let compared = classify(&evidence, asked(Answer::No, &calls)).expect("no head reaches git");
 
         assert_eq!(compared.standing, Standing::NothingSaysOtherwise);
@@ -1485,12 +1636,103 @@ mod tests {
     fn a_recorded_head_that_is_not_an_oid_is_an_unknown_and_never_reaches_git() {
         let calls = std::cell::Cell::new(0);
         let compared = classify(
-            &holding(&["--output=/etc/passwd".to_string()]),
+            &announced(&["--output=/etc/passwd".to_string()]),
             asked(Answer::No, &calls),
         )
         .expect("the ancestry answer is not an error");
         assert_eq!(compared.standing, Standing::CouldNotAsk);
         assert_eq!(calls.get(), 0, "git was handed a value out of a database");
+    }
+
+    /// The instruction that must never come off a stale row. A node recorded as behind was
+    /// behind on the day the backup was taken, and it has had every day since to catch up and
+    /// pass this copy; heartwood writes nothing when a peer still agrees, so no announcement
+    /// corrects the row. Acted on, it prints `rad sync --announce` beside a repository the
+    /// network may be months ahead of, which is the command that publishes the fork.
+    #[test]
+    fn a_node_the_archive_recorded_as_behind_is_never_a_reason_to_push() {
+        let calls = std::cell::Cell::new(0);
+        let compared = classify(&carried(&[oid('b')]), asked(Answer::Yes, &calls))
+            .expect("the ancestry answer is not an error");
+
+        assert_eq!(compared.standing, Standing::NothingSaysOtherwise);
+        assert!(!compared.someone_is_behind);
+    }
+
+    /// And the reading the same row still bears. A node that once held refs signed under this
+    /// key that this copy lacks still holds them: nothing about a restore makes that untrue,
+    /// so the fork hazard is taken from a row of any age.
+    #[test]
+    fn a_node_the_archive_recorded_holding_other_refs_is_still_the_fork_hazard() {
+        let calls = std::cell::Cell::new(0);
+        let compared = classify(&carried(&[oid('b')]), asked(Answer::No, &calls))
+            .expect("the ancestry answer is not an error");
+
+        assert_eq!(compared.standing, Standing::PeerHoldsOther);
+    }
+
+    /// Which side of the split a row lands on is decided by the archive's own copy of the
+    /// table, read before the node this restore starts can write to it. No clock is consulted,
+    /// because the column carries the announcing node's and heartwood replays old gossip under
+    /// its old stamp.
+    #[test]
+    fn a_row_the_archive_brought_is_told_from_one_that_arrived_during_the_restore() {
+        let now = rows(&[oid('b'), oid('c')]);
+        let before = rows(&[oid('b')]);
+
+        let evidence = evidence_against(&oid('a'), Some(&now), Some(&before));
+
+        assert_eq!(evidence.announced_since_restore, BTreeSet::from([oid('c')]));
+        assert_eq!(evidence.came_with_the_archive, BTreeSet::from([oid('b')]));
+    }
+
+    /// With no baseline to read, every row is one the archive may have brought. The reading
+    /// that survives that is the one that claims less.
+    #[test]
+    fn an_unreadable_baseline_makes_every_row_one_the_archive_may_have_brought() {
+        let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('b')])), Some(&rows(&[])));
+
+        assert_eq!(evidence.announced_since_restore, BTreeSet::from([oid('b')]));
+
+        // And with the archive's own copy holding it, the other way round.
+        let evidence = evidence_against(
+            &oid('a'),
+            Some(&rows(&[oid('b')])),
+            Some(&rows(&[oid('b')])),
+        );
+        assert!(evidence.announced_since_restore.is_empty());
+    }
+
+    /// A pack that arrived truncated. `cat-file -e` answers "absent" for every object in it,
+    /// so a probe that asked only about the peer's head read a damaged store as a node holding
+    /// refs this copy does not have: exit 3, and a paragraph telling somebody their identity
+    /// may have forked, over a repository nobody else had touched. The archived head is the
+    /// control, because a restore that worked put it there.
+    #[test]
+    fn a_store_that_cannot_produce_our_own_head_either_is_a_broken_store_and_not_a_fork() {
+        let git = Git::new();
+        assert!(git.is_available(), "this test drives the real git");
+        let scratch = crate::key::tests::TestScratch::create("restore-truncated-pack");
+        let (git_dir, peer, archived) = crate::git::tests::two_commits(&scratch);
+        crate::git::tests::truncate_the_pack(&git_dir);
+
+        let asked = git
+            .is_ancestor(&git_dir, &peer, &archived)
+            .expect("git ran");
+        assert!(matches!(asked, Answer::CouldNotAsk { .. }), "{asked:?}");
+        // The premise: the repository itself opens, and the objects in it do not answer.
+        assert_eq!(
+            git.holds_object(&git_dir, &peer).expect("git ran"),
+            Answer::No
+        );
+
+        let resolved =
+            resolve_git_failure(&git, &git_dir, &peer, &archived, asked).expect("the probe runs");
+
+        assert!(
+            matches!(resolved, Answer::CouldNotAsk { .. }),
+            "{resolved:?}"
+        );
     }
 
     /// A repository is reported as one standing, and these are the pairs whose order decides
@@ -1546,7 +1788,8 @@ mod tests {
         let asked = git.is_ancestor(&git_dir, &tree, &head).expect("git ran");
         assert!(matches!(asked, Answer::CouldNotAsk { .. }), "{asked:?}");
 
-        let resolved = resolve_git_failure(&git, &git_dir, &tree, asked).expect("the probe runs");
+        let resolved =
+            resolve_git_failure(&git, &git_dir, &tree, &head, asked).expect("the probe runs");
 
         assert!(
             matches!(resolved, Answer::CouldNotAsk { .. }),
@@ -1566,7 +1809,8 @@ mod tests {
         let nowhere = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
         let asked = git.is_ancestor(&git_dir, nowhere, &head).expect("git ran");
-        let resolved = resolve_git_failure(&git, &git_dir, nowhere, asked).expect("the probe runs");
+        let resolved =
+            resolve_git_failure(&git, &git_dir, nowhere, &head, asked).expect("the probe runs");
 
         assert_eq!(resolved, Answer::No);
     }
@@ -1577,12 +1821,13 @@ mod tests {
     #[test]
     fn an_answer_git_gave_is_never_second_guessed() {
         let git = Git::new();
+        assert!(git.is_available(), "this test drives the real git");
         let scratch = crate::key::tests::TestScratch::create("restore-answer-stands");
-        let (git_dir, _, _) = crate::git::tests::two_commits(&scratch);
+        let (git_dir, _, head) = crate::git::tests::two_commits(&scratch);
         let nowhere = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
         for answer in [Answer::Yes, Answer::No] {
-            let left = resolve_git_failure(&git, &git_dir, nowhere, answer.clone())
+            let left = resolve_git_failure(&git, &git_dir, nowhere, &head, answer.clone())
                 .expect("the probe runs");
             assert_eq!(left, answer);
         }
@@ -1641,6 +1886,25 @@ mod tests {
         assert!(Verdict::of(&every_one_compared).nothing_was_reported_otherwise);
     }
 
+    /// A home of only private repositories used to get a restore that mentioned the network
+    /// nowhere at all: nothing at risk, nothing ahead, nothing unchecked, and no line saying
+    /// why. The standing exists; it was simply never read out.
+    #[test]
+    fn repositories_no_node_can_ever_hold_are_named_rather_than_passed_over() {
+        let found = reconciled(
+            &[
+                ("rad:zAAA", Standing::NothingToCompare),
+                ("rad:zBBB", Standing::NothingToCompare),
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            Verdict::of(&found).nothing_to_compare,
+            vec!["rad:zAAA", "rad:zBBB"]
+        );
+    }
+
     /// Nothing was held against anything: no node can hold these and none was asked. Gated on
     /// the standings merely being there, the line printed over a home of private repositories
     /// as though the network had been consulted about them.
@@ -1669,13 +1933,11 @@ mod tests {
         use crate::container::MODE_SECRET;
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("rad-backup-restore-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch directory is creatable");
+        let scratch = crate::key::tests::TestScratch::create("restore-owner-only");
 
-        let source = dir.join("source");
+        let source = scratch.path_of("source");
         std::fs::write(&source, b"key material").expect("source is writable");
-        let target = dir.join("target");
+        let target = scratch.path_of("target");
         copy_secret(&source, &target).expect("copy succeeds");
 
         assert_eq!(
@@ -1687,7 +1949,5 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, MODE_SECRET);
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

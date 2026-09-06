@@ -273,8 +273,8 @@ pub(crate) mod tests {
         path
     }
 
-    /// The guard this crate's tests write key material behind: nothing but this puts a
-    /// fixture in `/tmp`.
+    /// The guard this crate's tests write key material behind: no fixture holding a key, or
+    /// anything shaped like one, goes into `/tmp` by any other route.
     ///
     /// `crate::cmd::Scratch` already does the two things that matter, an owner-only directory
     /// that refuses to exist twice and a `Drop` that removes it however the test ends. What it

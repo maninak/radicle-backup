@@ -159,8 +159,7 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
     Ok(counts)
 }
 
-/// Which of this peer's sigrefs some other node is known to hold, per repository, and when it
-/// last said so.
+/// Which of this peer's sigrefs some other node is known to hold, per repository.
 ///
 /// The node records, per repository and per peer, the head of *your* `rad/sigrefs` that peer
 /// was last seen to carry. A repository whose current local head appears here against somebody
@@ -386,6 +385,18 @@ pub fn saw_schema_drift() -> bool {
         .unwrap_or(false)
 }
 
+/// The same question about one database, for a caller whose empty answer came from that file.
+///
+/// A reader that asks the process-wide question treats another database's drift as its own,
+/// so adding an unrelated read anywhere before it would silently turn a table that was read
+/// perfectly into "could not be compared", with a warning naming a table nobody asked about.
+pub fn saw_schema_drift_at(database: &Path) -> bool {
+    SCHEMA_DRIFT
+        .lock()
+        .map(|drift| drift.iter().any(|seen| seen.path == database))
+        .unwrap_or(false)
+}
+
 /// Take the list of such absences, leaving it empty.
 // `expect` rather than `allow`, so the attribute fails the build the moment the command layer
 // drains this, because it must be removed then and an `allow` would sit on live code forever.
@@ -593,6 +604,16 @@ mod tests {
         let heads = read_synced_heads(&path, "z6MkAAA")
             .expect("a renamed sync status table is not a failure");
         assert!(routing.is_empty() && aliases.is_empty() && heads.is_empty());
+
+        // Asked per database as well. `restore` reads it that way to decide whether an empty
+        // record means "nobody has reported anything else" or "this build could not read the
+        // table", and the first of those is a sentence that reassures: asked about the
+        // process instead, one unrelated read of a renamed table anywhere earlier in the run
+        // would turn every repository into "could not be compared".
+        assert!(saw_schema_drift_at(&path));
+        assert!(!saw_schema_drift_at(std::path::Path::new(
+            "/nonexistent.db"
+        )));
 
         // Other tests drain the same list, so what is asserted is presence and not the exact
         // set.

@@ -153,7 +153,16 @@ names:
     # whole test binary is one process, so two such tests running at once refuse each other:
     # a failure that depends on how the runner interleaves them and names neither cause.
     # `TestScratch` exists for this and gives each test a parent of its own.
-    shared_scratch=$(grep -rn 'Scratch::create(std::env::temp_dir()' src/ || true)
+    #
+    # Read with the newlines squeezed out, because a line-based grep is evaded by rustfmt
+    # alone: a longer receiver wraps the argument onto its own line and the pattern stops
+    # matching, with nobody having decided anything. `key.rs` is where `TestScratch` itself
+    # reaches for the temporary directory, which is the one place that may.
+    shared_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$' | grep -v '^src/key.rs$'); do
+    	if tr '\n' ' ' < "$file" | grep -qE 'Scratch::create\([^)]*temp_dir'; then
+    		echo "$file"
+    	fi
+    done)
     if [ -n "$shared_scratch" ]; then
     	echo "$shared_scratch" | sed 's/$/: two tests cannot share one scratch parent; use TestScratch::create("name")/' >&2
     	found=1
