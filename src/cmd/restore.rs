@@ -795,6 +795,16 @@ where
     })
 }
 
+/// How far ahead of the machine that took the archive another node's clock may have been.
+///
+/// A `repo-sync-status` row is stamped with the ANNOUNCING node's clock, not ours, and
+/// heartwood accepts an announcement up to an hour in the future (`MAX_TIME_DELTA`, one hour,
+/// in `radicle-protocol`'s service). So a row the archive itself carried can be stamped up to
+/// an hour after the archive was written, and a gate on the archive's own instant would read
+/// that row as news and report a peer agreeing with an archive it has never seen. Revisit if
+/// heartwood tightens that bound.
+const OTHER_CLOCKS_MAY_LEAD_BY_MILLIS: i64 = 60 * 60 * 1000;
+
 /// What other nodes said they hold of one repository's signed refs, and nothing older.
 ///
 /// A restored home's node database is the archive's own, so a row nobody has rewritten says
@@ -806,11 +816,22 @@ struct Evidence {
     heads: BTreeSet<String>,
 }
 
+/// The instant a row has to beat to be news rather than something the archive carried.
+///
+/// `None` when the archive's own stamp does not parse, and then nothing qualifies: an
+/// undateable archive cannot date anything against itself, and reporting no evidence is the
+/// direction that refuses to reassure.
+fn evidence_is_newer_than(created: &str) -> Option<i64> {
+    created.parse::<jiff::Timestamp>().ok().map(|at| {
+        at.as_millisecond()
+            .saturating_add(OTHER_CLOCKS_MAY_LEAD_BY_MILLIS)
+    })
+}
+
 /// Split what the node recorded into evidence and hearsay, by when each row was written.
 ///
-/// `written_after` is `None` when the archive's own stamp does not parse, and then nothing
-/// qualifies: an undateable archive cannot date anything against itself, and reporting no
-/// evidence is the direction that refuses to reassure.
+/// `written_after` comes from `evidence_is_newer_than`, which is the archive's own instant
+/// plus what another node's clock may be ahead by.
 fn evidence_since(
     recorded: Option<&BTreeMap<String, i64>>,
     written_after: Option<i64>,
@@ -948,11 +969,7 @@ fn compare_with_network(
         fetched.push((repo, archived));
     }
 
-    let written_after = manifest
-        .created
-        .parse::<jiff::Timestamp>()
-        .ok()
-        .map(|at| at.as_millisecond());
+    let written_after = evidence_is_newer_than(&manifest.created);
     let held = wait_for_what_others_hold(ctx, node_id, &fetched, written_after)?;
     for (repo, archived) in fetched {
         let path = ctx.home.repository_path(&repo.rid);
@@ -1141,7 +1158,13 @@ fn report(
                 not_checked,
                 restored.len()
             ));
-            term.detail("run `rad sync <rid> --fetch` for those before you write to them");
+            // Two causes, and the remedy has to cover both without asserting either. A fetch
+            // that failed is answered by running it again; a repository nobody has announced
+            // anything about is not, and telling somebody to re-run the command that has just
+            // run is how the schema check used to send people to start a node already up.
+            term.detail("`rad sync <rid> --fetch` again, and leave the node running: until");
+            term.detail("another node says what it holds of your refs there is nothing to");
+            term.detail("compare them with");
         }
         // Only when at least one repository was genuinely held against a row some node wrote.
         // Gated on the map being non-empty, it printed over a home of private repositories
@@ -1522,6 +1545,31 @@ mod tests {
             &["rad:zAAA", "rad:zBBB"],
             Some(taken_at)
         ));
+    }
+
+    /// A node whose clock runs ahead stamps a row later than the machine that wrote the
+    /// archive did, so the archive's own rows can carry instants after its own. Gated on the
+    /// archive's instant alone, such a row is read as a peer agreeing with an archive it has
+    /// never seen, which is the reassurance this whole check exists not to give.
+    #[test]
+    fn a_row_stamped_by_a_clock_running_ahead_is_still_a_row_the_archive_carried() {
+        let taken = "2026-01-01T00:00:00Z";
+        let half_an_hour_later = millis("2026-01-01T00:30:00Z");
+        let rows = recorded(&[(&oid('a'), half_an_hour_later)]);
+
+        let evidence = evidence_since(Some(&rows), evidence_is_newer_than(taken));
+
+        assert!(evidence.heads.is_empty(), "{:?}", evidence.heads);
+    }
+
+    #[test]
+    fn a_row_stamped_well_past_any_clock_difference_is_evidence() {
+        let taken = "2026-01-01T00:00:00Z";
+        let rows = recorded(&[(&oid('a'), millis("2026-01-01T02:00:00Z"))]);
+
+        let evidence = evidence_since(Some(&rows), evidence_is_newer_than(taken));
+
+        assert_eq!(evidence.heads, BTreeSet::from([oid('a')]));
     }
 
     /// Rows the archive itself carried are what the wait is waiting past, so they must not end
