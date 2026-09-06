@@ -1607,9 +1607,9 @@ fn report(
         if !ahead_of_a_stale_record.is_empty() {
             // The fact without the instruction. The only node on record was behind when the
             // archive was taken and has said nothing since, and heartwood writes nothing for
-            // a peer that still agrees, so that row is as likely to be eight months stale as
-            // current. `rad sync --announce` on a copy the network has moved past is the
-            // command that publishes the fork.
+            // a peer that still agrees, so that row is as likely to be as stale as the
+            // archive as it is to be current. `rad sync --announce` on a copy the network has
+            // moved past is the command that publishes the fork.
             term.warn(&format!(
                 "{} hold work no node had when the archive was taken: {}",
                 term::count(
@@ -1619,7 +1619,16 @@ fn report(
                 ),
                 term::shortlist(&ahead_of_a_stale_record)
             ));
-            term.detail("no node has spoken since, so that may be eight months out of date:");
+            // The archive's own date rather than a figure standing in for it. How stale that
+            // record might be is exactly the age of the backup, and somebody deciding whether
+            // to announce is deciding on which month it was taken.
+            let taken = manifest
+                .created
+                .get(..10)
+                .unwrap_or(manifest.created.as_str());
+            term.detail(&format!(
+                "no node has spoken since, so that may be as old as the archive, {taken}:"
+            ));
             term.detail("fetch, and look at what the network holds under your peer id, before");
             term.detail("you announce");
         }
