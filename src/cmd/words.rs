@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 use crate::cmd::Ctx;
 use crate::crypt;
 use crate::error::{Error, Result};
-use crate::perms::{set_owner_only, write_owner_only};
+use crate::perms::{set_dir_owner_only, write_owner_only};
 
 /// Rebuild an identity from a mnemonic, for when the paper sheet is all that is left.
 pub fn restore(ctx: &Ctx) -> Result<()> {
@@ -35,7 +35,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     std::io::stdin()
         .lock()
         .read_line(&mut line)
-        .map_err(Error::Bare)?;
+        .map_err(Error::PathlessIo)?;
 
     let mnemonic = bip39::Mnemonic::parse_normalized(line.trim()).map_err(|e| {
         Error::refused(
@@ -74,7 +74,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     let openssh = crate::key::openssh_from_seed(&seed, Some(&passphrase))?;
 
     std::fs::create_dir_all(home.keys_dir()).map_err(|e| Error::io(home.keys_dir(), e))?;
-    set_owner_only(home.path())?;
+    set_dir_owner_only(home.path())?;
     write_owner_only(&home.secret_key(), openssh.as_bytes())?;
     std::fs::write(home.public_key(), identity.to_openssh()?)
         .map_err(|e| Error::io(home.public_key(), e))?;

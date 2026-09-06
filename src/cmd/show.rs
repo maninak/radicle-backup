@@ -1,20 +1,20 @@
 //! Showing what is inside an archive.
 
-use crate::cli::Target;
+use crate::cli::ArchiveArg;
 use crate::cmd::Ctx;
 use crate::container::Reader;
 use crate::error::Result;
 use crate::manifest::Manifest;
 use crate::term;
 
-pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
-    let scan = open(ctx, args)?;
+pub fn run(ctx: &Ctx, args: &ArchiveArg) -> Result<()> {
+    let manifest = read_manifest(ctx, args)?;
     if ctx.global.json {
-        return ctx.term.print_json(&serde_json::to_value(&scan)?);
+        return ctx.term.print_json(&serde_json::to_value(&manifest)?);
     }
 
     let term = &ctx.term;
-    let manifest = &scan;
+
     term.headline(&format!(
         "{} ({})",
         manifest.identity.alias.as_deref().unwrap_or("unnamed"),
@@ -42,10 +42,14 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
     term.headline(&format!(
         "{} entries, {}",
         manifest.entries.len(),
-        term::bytes(manifest.total_bytes())
+        term::human_bytes(manifest.total_bytes())
     ));
     for entry in &manifest.entries {
-        term.print(&format!("{:>10}  {}", term::bytes(entry.bytes), entry.path))?;
+        term.print(&format!(
+            "{:>10}  {}",
+            term::human_bytes(entry.bytes),
+            entry.path
+        ))?;
     }
 
     if !manifest.repos.is_empty() {
@@ -103,9 +107,9 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
 /// The whole archive is read even for a listing, because the manifest is the last entry: it
 /// carries the digest of every entry as written, which is a claim that can only be made once
 /// the entries exist.
-pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
+pub fn read_manifest(ctx: &Ctx, args: &ArchiveArg) -> Result<Manifest> {
     let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
-    let passphrase = crate::cmd::archive_passphrase(ctx, &archive)?;
+    let passphrase = crate::cmd::read_archive_passphrase(ctx, &archive)?;
     let reader = Reader::open(&archive, passphrase.as_ref(), &ctx.identities())?;
     Ok(reader.scan(&archive)?.manifest)
 }

@@ -16,7 +16,7 @@ const SUFFIXES: [&str; 2] = [".tar.zst.age", ".tar.zst"];
 
 /// How much of a node id an archive name carries. Long enough that two identities on one
 /// machine cannot collide, short enough to leave a file name readable.
-pub const SHORT_ID_LEN: usize = 12;
+pub const SHORT_NODE_ID_LEN: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Archive {
@@ -48,7 +48,7 @@ impl Archive {
 /// The alias is deliberately not part of the match. An identity that renames itself keeps the
 /// same node id, and archives taken under the old name are still that identity's archives.
 pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
-    let short: String = node_id.chars().take(SHORT_ID_LEN).collect();
+    let short: String = node_id.chars().take(SHORT_NODE_ID_LEN).collect();
     let marker = format!("-{short}-");
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -109,7 +109,7 @@ pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: 
         .map(sanitise)
         .filter(|alias| !alias.is_empty())
         .unwrap_or_else(|| "radicle".to_string());
-    let short: String = node_id.chars().take(SHORT_ID_LEN).collect();
+    let short: String = node_id.chars().take(SHORT_NODE_ID_LEN).collect();
     let extension = if encrypted { "tar.zst.age" } else { "tar.zst" };
     format!("{alias}-{short}-{stamp}.{extension}")
 }
@@ -151,7 +151,7 @@ mod tests {
     const NODE: &str = "z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
     const OTHER: &str = "z6MkvAFBkdph6yXSZDkkVqf9FfCcvkG29JD4KbwwnGphDRLV";
 
-    fn scratch(name: &str) -> PathBuf {
+    fn scratch_dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("rad-backup-archives-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -174,7 +174,7 @@ mod tests {
     /// that says otherwise, and the listing told its owner it could be read by anyone.
     #[test]
     fn whether_an_archive_is_encrypted_is_read_from_it_and_not_from_its_name() {
-        let dir = scratch("header");
+        let dir = scratch_dir("header");
         touch_encrypted(&dir, "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst");
         touch(&dir, "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst.age");
 
@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn archives_of_one_identity_come_back_newest_first_and_nothing_else_comes_back() {
-        let dir = scratch("listing");
+        let dir = scratch_dir("listing");
         touch(&dir, "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst.age");
         touch(&dir, "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst.age");
         // The same identity after a rename: same node id, so still its archive.
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn a_name_stamp_comes_back_as_the_instant_it_was_written_for() {
-        let dir = scratch("stamp");
+        let dir = scratch_dir("stamp");
         touch(&dir, "maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age");
 
         let found = in_dir(&dir, NODE).expect("the directory is readable");
@@ -280,12 +280,12 @@ mod tests {
 
     #[test]
     fn an_archive_named_by_the_writer_is_found_again_by_the_reader() {
-        let dir = scratch("writer-and-reader");
+        let dir = scratch_dir("writer-and-reader");
         let name = crate::archives::archive_name(Some("fixture"), NODE, "20260101T000000Z", true);
         touch(&dir, &name);
 
         // The writer used to spell the length of the short node id by hand while this reader
-        // matched on SHORT_ID_LEN. They agreed only by coincidence, and moving the
+        // matched on SHORT_NODE_ID_LEN. They agreed only by coincidence, and moving the
         // constant would
         // have made every new archive invisible to `ls`, `prune` and `--keep` at once.
         let found = in_dir(&dir, NODE).expect("the directory is readable");

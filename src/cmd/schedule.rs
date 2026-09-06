@@ -18,7 +18,7 @@ use crate::exec::Tool;
 /// It used to end "Edit freely; it will not be replaced", which is the opposite of what
 /// `write_unit` does: a file carrying the marker is exactly the file the next run overwrites,
 /// so an edit made in place was lost without a word. Deleting the line is what keeps a unit.
-const MARKER: &str = concat!(
+const MARKER_UNIT: &str = concat!(
     "# Written by `rad backup schedule`, and replaced by its next run.\n",
     "# Delete both these lines to keep your own edits."
 );
@@ -27,7 +27,7 @@ const MARKER: &str = concat!(
 /// that deleting it keeps their edits, which is true of a unit, because `write_unit` refuses a
 /// file without the mark, and false here, because this file is rewritten in full by every run
 /// whatever it holds. The same promise the marker rewording set out to stop making.
-const ENVIRONMENT_MARK: &str = concat!(
+const MARKER_ENVIRONMENT: &str = concat!(
     "# Written by `rad backup schedule`, and rewritten in full by its next run.\n",
     "# A lasting change belongs on the command line, not in this file."
 );
@@ -35,13 +35,13 @@ const ENVIRONMENT_MARK: &str = concat!(
 /// The half of the marker that decides whether a unit is ours, kept apart from the wording so
 /// that rephrasing the advice cannot make every unit written by an older version look like
 /// somebody's hand-written file and refuse to be updated.
-const MARKER_MARK: &str = "# Written by `rad backup schedule`";
+const MARKER_SIGNATURE: &str = "# Written by `rad backup schedule`";
 
 const SERVICE: &str = "rad-backup.service";
 const TIMER: &str = "rad-backup.timer";
 
 pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     // Checked here too: this is the verb that writes the number into a file a timer reads
     // every night, so a bad one is installed rather than typed once.
     if let Some(keep) = args.keep {
@@ -80,9 +80,9 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     // the check and installed a timer that then failed every night at the prompt.
     // Nothing to unlock, so nothing to ask for: an archive written to a recipient needs
     // only their public key, and a plaintext one needs nothing at all.
-    let unattended = !args.recipient.is_empty() || args.plaintext;
+    let needs_no_passphrase = !args.recipient.is_empty() || args.plaintext;
     let passphrase_file = ctx.global.passphrase_file.clone();
-    if !unattended && passphrase_file.is_none() && !systemd_holds_passphrase(&systemctl)? {
+    if !needs_no_passphrase && passphrase_file.is_none() && !systemd_holds_passphrase(&systemctl)? {
         return Err(Error::refused(
             "a scheduled run has nobody to ask for the archive passphrase",
             "put it in a file only you can read and pass --passphrase-file <path>; an exported \
@@ -91,9 +91,9 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         ));
     }
 
-    let dir = unit_dir()?;
+    let dir = unit_dir_from_env()?;
     std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
-    let environment = environment_file()?;
+    let environment = environment_file_from_env()?;
     write_environment(ctx, &environment, args, passphrase_file.as_deref())?;
     let encryption = encryption_arguments(&args.recipient, args.plaintext);
     write_unit(
@@ -135,7 +135,7 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
 /// from the shell does not, which is why the shell's own environment is not consulted here.
 fn systemd_holds_passphrase(systemctl: &Tool) -> Result<bool> {
     let shown = systemctl.spoken(&["--user", "show-environment"])?;
-    let prefix = format!("{}=", crate::crypt::PASSPHRASE_ENV);
+    let prefix = format!("{}=", crate::crypt::ARCHIVE_PASSPHRASE_ENV);
     Ok(shown.stdout.lines().any(|line| line.starts_with(&prefix)))
 }
 
@@ -161,9 +161,9 @@ fn timer_verdict(said: &str, load_state: &str) -> Option<String> {
 }
 
 fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
-    let asked = systemctl.spoken(&["--user", "is-enabled", TIMER])?;
+    let is_enabled = systemctl.spoken(&["--user", "is-enabled", TIMER])?;
     // Only when there is nothing to go on, so the ordinary path still costs one spawn.
-    let load = match asked.stdout.is_empty() {
+    let load_state = match is_enabled.stdout.is_empty() {
         true => {
             systemctl
                 .spoken(&["--user", "show", TIMER, "-p", "LoadState"])?
@@ -171,50 +171,56 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
         }
         false => String::new(),
     };
-    let enabled = match timer_verdict(&asked.stdout, &load) {
+    let timer_state = match timer_verdict(&is_enabled.stdout, &load_state) {
         Some(word) => word,
         None => {
             ctx.term
                 .warn("systemd could not be asked whether the timer is on");
-            if !asked.stderr.is_empty() {
-                ctx.term.detail(&asked.stderr);
+            if !is_enabled.stderr.is_empty() {
+                ctx.term.detail(&is_enabled.stderr);
             }
             "unknown".to_string()
         }
     };
-    let next = systemctl
+    let next_run = systemctl
         .answer(&["--user", "show", TIMER, "-p", "NextElapseUSecRealtime"])?
-        .and_then(|out| out.trim().split_once('=').map(|(_, when)| when.to_string()))
+        .and_then(|shown| shown.trim().split_once('=').map(|(_, at)| at.to_string()))
         .filter(|when| !when.is_empty());
-    let last = systemctl
+    let last_failure = systemctl
         .answer(&["--user", "show", SERVICE, "-p", "Result"])?
-        .and_then(|out| out.trim().split_once('=').map(|(_, what)| what.to_string()))
+        .and_then(|shown| {
+            shown
+                .trim()
+                .split_once('=')
+                .map(|(_, what)| what.to_string())
+        })
         .filter(|what| !what.is_empty() && what != "success");
 
     if ctx.global.json {
         return ctx.term.print_json(&serde_json::json!({
-            "enabled": enabled == "enabled",
+            "enabled": timer_state == "enabled",
             // The word systemd used, because "enabled: false" cannot tell a timer that is off
             // from a systemd that could not be reached.
-            "state": enabled,
-            "next": next,
-            "lastFailure": last,
+            "state": timer_state,
+            "next": next_run,
+            "lastFailure": last_failure,
         }));
     }
-    if enabled == "unknown" {
+    if timer_state == "unknown" {
         ctx.term
             .detail("run `systemctl --user is-enabled rad-backup.timer` on the machine itself");
-    } else if enabled == "enabled" {
+    } else if timer_state == "enabled" {
         ctx.term.ok(&format!(
             "the timer is on{}",
-            next.map(|when| format!(", next run {when}"))
+            next_run
+                .map(|at| format!(", next run {at}"))
                 .unwrap_or_default()
         ));
     } else {
         ctx.term.warn("no backup is scheduled on this machine");
         ctx.term.detail("turn one on with `rad backup schedule`");
     }
-    if let Some(failure) = last {
+    if let Some(failure) = last_failure {
         ctx.term
             .fail(&format!("the last scheduled run ended as: {failure}"));
         ctx.term
@@ -241,8 +247,8 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     let encryption = shell_encryption_arguments(&args.recipient, args.plaintext);
     ctx.term.print(&format!(
         "  0 3 * * *  {} --output {} --keep {keep} --yes --quiet{encryption}",
-        shell_quoted(&binary),
-        shell_quoted(&output.display().to_string())
+        shell_systemd_quoted(&binary),
+        shell_systemd_quoted(&output.display().to_string())
     ))?;
     ctx.term.blank();
     if encryption.is_empty() {
@@ -257,23 +263,23 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ))
 }
 
-fn unit_dir() -> Result<PathBuf> {
+fn unit_dir_from_env() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) => PathBuf::from(dir),
-        None => home_dir()?.join(".config"),
+        None => home_dir_from_env()?.join(".config"),
     };
     Ok(base.join("systemd").join("user"))
 }
 
-fn environment_file() -> Result<PathBuf> {
+fn environment_file_from_env() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) => PathBuf::from(dir),
-        None => home_dir()?.join(".config"),
+        None => home_dir_from_env()?.join(".config"),
     };
     Ok(base.join("rad-backup").join("env"))
 }
 
-fn home_dir() -> Result<PathBuf> {
+fn home_dir_from_env() -> Result<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
         Error::refused(
             "cannot tell where your home directory is",
@@ -291,7 +297,7 @@ fn environment_text(
     passphrase_file: Option<&Path>,
 ) -> String {
     let mut lines = vec![
-        ENVIRONMENT_MARK.to_string(),
+        MARKER_ENVIRONMENT.to_string(),
         format!("RAD_HOME={}", home.display()),
     ];
     if let Some(output) = output {
@@ -349,7 +355,7 @@ fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
 /// by hand on any machine where the directory was readable and the file was not.
 fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>) -> Result<()> {
     match existing {
-        Ok(text) if !text.contains(MARKER_MARK) => Err(Error::refused(
+        Ok(text) if !text.contains(MARKER_SIGNATURE) => Err(Error::refused(
             format!("{} was not written by this tool", path.display()),
             "edit it yourself, or move it aside and run this again",
         )),
@@ -370,7 +376,7 @@ fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>
 /// `$` and `%` are doubled as well as escaped. Quoting does not stop systemd substituting
 /// `$VAR` or expanding a `%h`-style specifier in `ExecStart=`, and an ssh recipient carries
 /// a free-text comment, so both can arrive inside a key this tool was handed.
-fn quoted(argument: &str) -> String {
+fn systemd_quoted(argument: &str) -> String {
     format!(
         "\"{}\"",
         argument
@@ -383,7 +389,7 @@ fn quoted(argument: &str) -> String {
 
 /// One argument as `sh` will read it back. Single quotes take every other character
 /// literally, and the quote itself is closed, escaped and reopened.
-fn shell_quoted(argument: &str) -> String {
+fn shell_systemd_quoted(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\\''"))
 }
 
@@ -396,7 +402,7 @@ fn encryption_arguments(recipients: &[String], plaintext: bool) -> String {
     }
     recipients
         .iter()
-        .map(|key| format!(" --recipient {}", quoted(key)))
+        .map(|key| format!(" --recipient {}", systemd_quoted(key)))
         .collect()
 }
 
@@ -410,7 +416,7 @@ fn shell_encryption_arguments(recipients: &[String], plaintext: bool) -> String 
     }
     recipients
         .iter()
-        .map(|key| format!(" --recipient {}", shell_quoted(key)))
+        .map(|key| format!(" --recipient {}", shell_systemd_quoted(key)))
         .collect()
 }
 
@@ -419,7 +425,7 @@ fn service_unit(environment: &Path, encryption: &str) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "rad-backup".to_string());
     format!(
-        "{MARKER}
+        "{MARKER_UNIT}
 [Unit]
 Description=Archive this Radicle identity
 Documentation=man:rad-backup(1)
@@ -432,13 +438,13 @@ Nice=10
 IOSchedulingClass=idle
 ",
         environment.display(),
-        quoted(&binary)
+        systemd_quoted(&binary)
     )
 }
 
 fn timer_unit(calendar: &str) -> String {
     format!(
-        "{MARKER}
+        "{MARKER_UNIT}
 [Unit]
 Description=Archive this Radicle identity {calendar}
 
@@ -480,7 +486,7 @@ mod tests {
         let absent = IoError::from(ErrorKind::NotFound);
         assert!(may_replace(path, Err(&absent)).is_ok());
 
-        let ours = format!("[Unit]\n{MARKER_MARK}\n");
+        let ours = format!("[Unit]\n{MARKER_SIGNATURE}\n");
         assert!(may_replace(path, Ok(&ours)).is_ok());
 
         let theirs = may_replace(path, Ok("[Unit]\nDescription=my own timer\n"))
@@ -498,8 +504,8 @@ mod tests {
 
     #[test]
     fn a_unit_this_tool_wrote_carries_the_mark_that_lets_it_be_replaced() {
-        assert!(timer_unit("daily").contains(MARKER));
-        assert!(service_unit(Path::new("/tmp/env"), "").contains(MARKER));
+        assert!(timer_unit("daily").contains(MARKER_UNIT));
+        assert!(service_unit(Path::new("/tmp/env"), "").contains(MARKER_UNIT));
     }
 
     #[test]
@@ -556,7 +562,7 @@ mod tests {
 
     #[test]
     fn a_recipient_that_holds_a_quote_cannot_break_out_of_the_unit() {
-        let broken = quoted("ssh-ed25519 \"AAAA\" \\x");
+        let broken = systemd_quoted("ssh-ed25519 \"AAAA\" \\x");
         assert_eq!(broken, "\"ssh-ed25519 \\\"AAAA\\\" \\\\x\"");
     }
 
@@ -565,7 +571,7 @@ mod tests {
         // Quoting does not stop systemd substituting in `ExecStart=`: `$HOME` becomes the
         // value of a variable and `%h` becomes a path. An ssh recipient ends in a free-text
         // comment, so both arrive in keys people really paste.
-        let expanded = quoted("ssh-ed25519 AAAA 100% of $HOME");
+        let expanded = systemd_quoted("ssh-ed25519 AAAA 100% of $HOME");
         assert_eq!(expanded, "\"ssh-ed25519 AAAA 100%% of $$HOME\"");
     }
 
@@ -608,13 +614,13 @@ mod tests {
         // It read "Edit freely; it will not be replaced", which is what `write_unit` does to
         // a file WITHOUT the marker. A hand edit that kept the line was silently overwritten
         // by the next run, having been told in writing that it would not be.
-        assert!(!MARKER.contains("will not be replaced"));
-        assert!(MARKER.contains("replaced by its next run"));
+        assert!(!MARKER_UNIT.contains("will not be replaced"));
+        assert!(MARKER_UNIT.contains("replaced by its next run"));
 
         // The recognition half must survive a rewording of the advice, or every unit written
         // by an older version stops being recognised as ours and refuses to be updated.
-        assert!(MARKER.contains(MARKER_MARK));
-        for line in MARKER.lines() {
+        assert!(MARKER_UNIT.contains(MARKER_SIGNATURE));
+        for line in MARKER_UNIT.lines() {
             // systemd reads these as comments, and a comment starts the line.
             assert!(line.starts_with('#'), "not a comment line: {line:?}");
         }

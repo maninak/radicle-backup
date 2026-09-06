@@ -181,7 +181,7 @@ impl Tool {
 
     fn failure<S: AsRef<OsStr>>(&self, args: &[S], finished: &Output) -> Error {
         Error::Command {
-            command: self.display(args),
+            command: self.command_line(args),
             status: match finished.status.code() {
                 Some(code) => format!("exit code {code}"),
                 None => "a signal".to_string(),
@@ -192,7 +192,7 @@ impl Tool {
         }
     }
 
-    fn display<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
+    fn command_line<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
         let mut line = self.program.clone();
         for arg in args {
             line.push(' ');

@@ -70,7 +70,7 @@ impl RepoSelection {
     /// as a word. Anything unrecognised is `Unknown` rather than an error, on the same
     /// principle as the `#[serde(other)]` above: a file written by a later version is read for
     /// what can be read.
-    pub fn from_str(word: &str) -> Self {
+    pub fn from_word(word: &str) -> Self {
         match word {
             "none" => Self::None,
             "private" => Self::Private,

@@ -114,7 +114,7 @@ impl Rad {
             Listing::Private => &["ls", "--private"],
         };
         match self.tool.output(args) {
-            Ok(out) => Ok(Listed::Ids(repository_ids(&out))),
+            Ok(printed) => Ok(Listed::Ids(parse_repository_ids(&printed))),
             Err(e) => Ok(Listed::Unavailable { why: e.one_line() }),
         }
     }
@@ -207,8 +207,8 @@ fn strings_at(value: Option<&serde_json::Value>) -> Vec<String> {
 ///
 /// Table borders, column widths and colour all change between releases; a `rad:z...` token
 /// does not, because it is the identifier itself.
-fn repository_ids(text: &str) -> Vec<String> {
-    let mut ids: Vec<String> = text
+fn parse_repository_ids(printed: &str) -> Vec<String> {
+    let mut ids: Vec<String> = printed
         .split(|c: char| c.is_whitespace() || c == '│' || c == '|')
         .filter(|token| token.starts_with("rad:z"))
         .map(|token| token.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()))
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn identifiers_survive_the_table_that_rad_ls_draws_around_them() {
         assert_eq!(
-            repository_ids(LISTING),
+            parse_repository_ids(LISTING),
             vec![
                 "rad:z3aBsetMhPLWMhqkaBJD9CZ4Lb1ZT".to_string(),
                 "rad:z3yQUb9HDAC7TQrUDGkQsXDsYFj9G".to_string(),
@@ -245,14 +245,14 @@ mod tests {
 
     #[test]
     fn a_listing_with_no_repositories_yields_nothing_rather_than_a_blank_entry() {
-        assert!(repository_ids("").is_empty());
-        assert!(repository_ids("Nothing to show.").is_empty());
+        assert!(parse_repository_ids("").is_empty());
+        assert!(parse_repository_ids("Nothing to show.").is_empty());
     }
 
     #[test]
     fn the_same_identifier_seen_twice_is_reported_once() {
         let text = "rad:zAAA rad:zAAA rad:zBBB";
-        assert_eq!(repository_ids(text), vec!["rad:zAAA", "rad:zBBB"]);
+        assert_eq!(parse_repository_ids(text), vec!["rad:zAAA", "rad:zBBB"]);
     }
 
     #[test]

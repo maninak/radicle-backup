@@ -28,14 +28,14 @@ use crate::term;
 /// wrong are not equal: describing too much makes a repository look newly added, and too
 /// little makes one look lost.
 fn comparison_selection(recorded: &str) -> RepoSelection {
-    match RepoSelection::from_str(recorded) {
+    match RepoSelection::from_word(recorded) {
         RepoSelection::Unknown => RepoSelection::All,
         known => known,
     }
 }
 
 pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     let identity = Identity::read(ctx.home.public_key())?;
     let node_id = identity.node_id();
 
@@ -57,7 +57,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     let rad = Rad::new(ctx.home.path());
     let rad = rad.is_available().then_some(rad);
     let policies = db::read_policies(&ctx.home.policies_db())?;
-    let routing = db::routing_counts(&ctx.home.node_db(), &node_id)?;
+    let routing = db::read_routing_counts(&ctx.home.node_db(), &node_id)?;
     let inventory = inventory::collect(
         &ctx.home,
         &git,
@@ -68,18 +68,18 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         &routing,
     )?;
 
-    let now: BTreeSet<String> = inventory
-        .described
+    let rids_now: BTreeSet<String> = inventory
+        .records
         .iter()
         .map(|repo| repo.rid.clone())
         .collect();
-    let added: Vec<&String> = now.difference(&record.described).collect();
-    let removed: Vec<&String> = record.described.difference(&now).collect();
+    let added: Vec<&String> = rids_now.difference(&record.described).collect();
+    let removed: Vec<&String> = record.described.difference(&rids_now).collect();
 
     // A repository has moved on when the signed refs of this peer point somewhere else than
     // they did. That is the only change that can cost work, so it is the one worth naming.
     let moved: Vec<&crate::manifest::RepoRecord> = inventory
-        .described
+        .records
         .iter()
         .filter(|repo| {
             let current = repo.sigrefs.get(&node_id);
@@ -93,11 +93,12 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     // Two spellings of the same list: rids for the report a machine reads, names for the
     // lines a person reads.
     let moved_rids: Vec<&String> = moved.iter().map(|repo| &repo.rid).collect();
-    let changed: Vec<&str> = moved.iter().map(|repo| repo.display_name()).collect();
+    let moved_names: Vec<&str> = moved.iter().map(|repo| repo.display_name()).collect();
 
     let policy_drift = policies.seeded().count() != record.seeded
         || policies.followed().count() != record.followed;
-    let drifted = !added.is_empty() || !removed.is_empty() || !changed.is_empty() || policy_drift;
+    let drifted =
+        !added.is_empty() || !removed.is_empty() || !moved_names.is_empty() || policy_drift;
 
     if ctx.global.json {
         // By rid, and by rid only. This report named the added and gone repositories by rid
@@ -138,12 +139,12 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
                 term.hint(&inventory.display_name(rid));
             }
         }
-        if !changed.is_empty() {
+        if !moved_names.is_empty() {
             term.warn(&format!(
                 "{} with new signed refs of yours",
-                term::count(changed.len(), "repository", "repositories")
+                term::count(moved_names.len(), "repository", "repositories")
             ));
-            for name in &changed {
+            for name in &moved_names {
                 term.hint(name);
             }
         }

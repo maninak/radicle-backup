@@ -7,25 +7,25 @@
 use crate::archives::sidecar_path;
 use crate::archives::{self, Archive};
 use crate::cli::Prune;
-use crate::cmd::{Ctx, archive_dir, refuse_keep_zero};
+use crate::cmd::{Ctx, archive_dir_from_env, refuse_keep_zero};
 use crate::error::{Error, Result};
 use crate::key::Identity;
 use crate::state;
 use crate::term;
 
 pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     refuse_keep_zero(args.keep)?;
     let identity = Identity::read(ctx.home.public_key())?;
-    let record = state::read(&identity.did())?;
-    let directory = archive_dir(args.dir.as_deref(), record.record());
-    let found = archives::in_dir(&directory, &identity.node_id())?;
+    let stored = state::read(&identity.did())?;
+    let directory = archive_dir_from_env(args.dir.as_deref(), stored.record());
+    let present = archives::in_dir(&directory, &identity.node_id())?;
 
-    let doomed: Vec<&Archive> = found.iter().skip(args.keep).collect();
+    let doomed: Vec<&Archive> = present.iter().skip(args.keep).collect();
     if doomed.is_empty() {
         ctx.term.ok(&format!(
             "nothing to prune: {} of this identity in {}, keeping {}",
-            term::count(found.len(), "archive", "archives"),
+            term::count(present.len(), "archive", "archives"),
             directory.display(),
             args.keep
         ));
@@ -41,7 +41,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         ctx.term.print(&format!(
             "  {}  {}",
             archive.name(),
-            term::bytes(archive.bytes)
+            term::human_bytes(archive.bytes)
         ))?;
     }
     let freed: u64 = doomed.iter().map(|archive| archive.bytes).sum();
@@ -50,14 +50,14 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     if args.dry_run {
         ctx.term.hint(&format!(
             "{} would come back; nothing was deleted",
-            term::bytes(freed)
+            term::human_bytes(freed)
         ));
         return Ok(());
     }
-    if !ctx
-        .term
-        .confirm(&format!("Delete them, freeing {}?", term::bytes(freed)))?
-    {
+    if !ctx.term.confirm(&format!(
+        "Delete them, freeing {}?",
+        term::human_bytes(freed)
+    ))? {
         return Err(Error::refused(
             "nothing was deleted",
             "run again without --dry-run when you have decided",
@@ -71,7 +71,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     ctx.term.ok(&format!(
         "deleted {}, freeing {}",
         term::count(doomed.len(), "archive", "archives"),
-        term::bytes(freed)
+        term::human_bytes(freed)
     ));
     Ok(())
 }

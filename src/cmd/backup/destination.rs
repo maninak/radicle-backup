@@ -12,7 +12,7 @@ use crate::cli::Create;
 use crate::crypt::Encryption;
 use crate::error::{Error, Result};
 use crate::key::Identity;
-use crate::perms::create_private;
+use crate::perms::create_private_file;
 use crate::term::Term;
 
 /// Where the archive is going, and how it gets there safely.
@@ -27,7 +27,7 @@ pub(super) enum Destination {
     Stdout,
     File {
         final_path: PathBuf,
-        partial: PathBuf,
+        partial_path: PathBuf,
         committed: std::cell::Cell<bool>,
     },
 }
@@ -40,11 +40,13 @@ pub(super) enum Destination {
 impl Drop for Destination {
     fn drop(&mut self) {
         if let Self::File {
-            partial, committed, ..
+            partial_path,
+            committed,
+            ..
         } = self
             && !committed.get()
         {
-            let _ = std::fs::remove_file(partial);
+            let _ = std::fs::remove_file(partial_path);
         }
     }
 }
@@ -60,7 +62,7 @@ impl Destination {
     pub(super) fn open(&self) -> Result<Box<dyn Write>> {
         match self {
             Self::Stdout => Ok(Box::new(std::io::stdout())),
-            Self::File { partial, .. } => Ok(Box::new(create_private(partial)?)),
+            Self::File { partial_path, .. } => Ok(Box::new(create_private_file(partial_path)?)),
         }
     }
 
@@ -69,7 +71,7 @@ impl Destination {
             Self::Stdout => Ok(None),
             Self::File {
                 final_path,
-                partial,
+                partial_path,
                 committed,
             } => {
                 // Flushed is not durable: `Write::flush` on a `File` is a no-op, so without
@@ -79,10 +81,10 @@ impl Destination {
                 // handle, which failed every backup there after the whole archive was written.
                 std::fs::OpenOptions::new()
                     .write(true)
-                    .open(partial)
+                    .open(partial_path)
                     .and_then(|file| file.sync_all())
-                    .map_err(|e| Error::io(partial, e))?;
-                std::fs::rename(partial, final_path).map_err(|e| Error::io(final_path, e))?;
+                    .map_err(|e| Error::io(partial_path, e))?;
+                std::fs::rename(partial_path, final_path).map_err(|e| Error::io(final_path, e))?;
                 sync_directory(term, final_path.parent());
                 committed.set(true);
                 Ok(Some(final_path.clone()))
@@ -115,7 +117,7 @@ fn sync_directory(term: &Term, directory: Option<&Path>) {
     }
 }
 
-pub(super) fn choose(
+pub(super) fn prepare(
     args: &Create,
     identity: &Identity,
     alias: Option<&str>,
@@ -142,21 +144,21 @@ pub(super) fn choose(
         &file_stamp(*now),
         encryption.is_encrypted(),
     );
-    let chosen = args.output.clone().unwrap_or_else(|| PathBuf::from("."));
+    let requested = args.output.clone().unwrap_or_else(|| PathBuf::from("."));
 
-    let final_path = if names_an_archive(&chosen) {
-        if let Some(parent) = chosen.parent().filter(|p| !p.as_os_str().is_empty()) {
+    let final_path = if names_an_archive(&requested) {
+        if let Some(parent) = requested.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
-        chosen
+        requested
     } else {
-        std::fs::create_dir_all(&chosen).map_err(|e| Error::io(&chosen, e))?;
-        chosen.join(name)
+        std::fs::create_dir_all(&requested).map_err(|e| Error::io(&requested, e))?;
+        requested.join(name)
     };
-    let partial = final_path.with_extension("partial");
+    let partial_path = final_path.with_extension("partial");
     Ok(Destination::File {
         final_path,
-        partial,
+        partial_path,
         committed: std::cell::Cell::new(false),
     })
 }
@@ -182,7 +184,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_directory_output_gets_a_generated_name_and_a_file_output_is_taken_as_given() {
+    fn a_directory_output_gets_a_generated_name() {
         let identity = Identity::parse(
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
         )
@@ -193,12 +195,12 @@ mod tests {
             output: Some(PathBuf::from("/tmp")),
             ..blank_create()
         };
-        let destination = choose(
+        let destination = prepare(
             &into_directory,
             &identity,
             Some("maninak"),
             &now,
-            &Encryption::None,
+            &Encryption::Plaintext,
             false,
         )
         .expect("a directory is a destination");
@@ -242,14 +244,14 @@ mod tests {
 
         // A terminal keeps the bytes in scrollback, so the archive never goes there.
         // `matches!` rather than `expect_err`, which would want Debug on Destination.
-        let refused = choose(&args, &identity, None, &now, &Encryption::None, true);
+        let refused = prepare(&args, &identity, None, &now, &Encryption::Plaintext, true);
         assert!(
             matches!(refused, Err(Error::Refused { .. })),
             "a terminal should be refused"
         );
 
         // A pipe or a redirect is the whole point of --stdout and must keep working.
-        let allowed = choose(&args, &identity, None, &now, &Encryption::None, false)
+        let allowed = prepare(&args, &identity, None, &now, &Encryption::Plaintext, false)
             .expect("a pipe is a destination");
         assert!(matches!(allowed, Destination::Stdout));
     }
@@ -265,7 +267,7 @@ mod tests {
             stdout: true,
             ..blank_create()
         };
-        let destination = choose(&args, &identity, None, &now, &Encryption::None, false)
+        let destination = prepare(&args, &identity, None, &now, &Encryption::Plaintext, false)
             .expect("stdout is a destination");
         assert!(matches!(destination, Destination::Stdout));
         assert!(destination.directory().is_none());

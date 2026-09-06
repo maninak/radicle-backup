@@ -16,11 +16,11 @@ pub(crate) const RETIRED_KEY: &str = "radicle.retired";
 const RETIRED_NOTE: &str = "RETIRED.txt";
 
 pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
 
     // Not "is it running" but "is it proven stopped": this run is about to retire the key on
     // this machine, and a socket that could not be reached is not evidence of anything.
-    let state = ctx.home.node_state();
+    let state = ctx.home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
@@ -89,7 +89,7 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     let report = verify::check(
         ctx,
         &Verify {
-            target: crate::cli::Target {
+            target: crate::cli::ArchiveArg {
                 archive: Some(archive.clone()),
             },
             deep: true,
@@ -166,7 +166,7 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
          Put it back only if the move failed and the other machine never started its node.\n\
          \n\
          The archive it was moved with: {}\n",
-        crate::cmd::iso_stamp(jiff::Timestamp::now()),
+        crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
         archive.display()
     );
     let note_path = ctx.home.keys_dir().join(RETIRED_NOTE);

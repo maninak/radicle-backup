@@ -42,7 +42,7 @@ impl Term {
 
     /// Progress and status go to stderr, so that `--stdout` archives and `--json` reports can
     /// be piped without the narration mixing in.
-    fn say(&self, line: &str) {
+    fn narrate(&self, line: &str) {
         if self.verbosity == Verbosity::Normal {
             self.always(line);
         }
@@ -73,15 +73,15 @@ impl Term {
     }
 
     pub fn headline(&self, text: &str) {
-        self.say(&self.bold(text));
+        self.narrate(&self.bold(text));
     }
 
     pub fn step(&self, text: &str) {
-        self.say(&format!("{} {text}", self.dim("·")));
+        self.narrate(&format!("{} {text}", self.dim("·")));
     }
 
     pub fn ok(&self, text: &str) {
-        self.say(&format!("{} {text}", self.paint("32", "✓")));
+        self.narrate(&format!("{} {text}", self.paint("32", "✓")));
     }
 
     pub fn fail(&self, text: &str) {
@@ -101,7 +101,7 @@ impl Term {
 
     /// A hint attached to a step that went fine. Narration, and `--quiet` drops it.
     pub fn hint(&self, text: &str) {
-        self.say(&self.dim(&format!("  {text}")));
+        self.narrate(&self.dim(&format!("  {text}")));
     }
 
     /// The lines under a `warn` or a `fail` that carry the substance: which repositories
@@ -112,7 +112,7 @@ impl Term {
     }
 
     pub fn blank(&self) {
-        self.say("");
+        self.narrate("");
     }
 
     /// Anything a machine consumes goes to stdout: JSON reports, listings, recovery sheets.
@@ -127,7 +127,7 @@ impl Term {
         match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-            Err(e) => Err(Error::Bare(e)),
+            Err(e) => Err(Error::PathlessIo(e)),
         }
     }
 
@@ -150,17 +150,19 @@ impl Term {
             return Ok(false);
         }
         let mut stderr = io::stderr();
-        write!(stderr, "{question} [y/N] ").map_err(Error::Bare)?;
-        stderr.flush().map_err(Error::Bare)?;
+        write!(stderr, "{question} [y/N] ").map_err(Error::PathlessIo)?;
+        stderr.flush().map_err(Error::PathlessIo)?;
 
         let mut answer = String::new();
-        io::stdin().read_line(&mut answer).map_err(Error::Bare)?;
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(Error::PathlessIo)?;
         Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
     }
 }
 
 /// Render a byte count the way a person reads it, not the way a computer stores it.
-pub fn bytes(n: u64) -> String {
+pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut size = n as f64;
     let mut unit = 0;
@@ -202,7 +204,7 @@ pub fn shortlist<'a>(ids: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 /// The verb that agrees with a count, so no line ever reads "1 of 3 are in no archive".
-pub fn agree(n: usize) -> &'static str {
+pub fn is_or_are(n: usize) -> &'static str {
     if n == 1 { "is" } else { "are" }
 }
 
@@ -247,12 +249,12 @@ mod tests {
 
     #[test]
     fn byte_counts_render_in_the_largest_unit_that_keeps_a_whole_part() {
-        assert_eq!(bytes(0), "0 B");
-        assert_eq!(bytes(524), "524 B");
-        assert_eq!(bytes(1024), "1.0 KiB");
-        assert_eq!(bytes(20_480), "20.0 KiB");
-        assert_eq!(bytes(976 * 1024 * 1024), "976.0 MiB");
-        assert_eq!(bytes(2_147_483_648), "2.0 GiB");
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(524), "524 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(20_480), "20.0 KiB");
+        assert_eq!(human_bytes(976 * 1024 * 1024), "976.0 MiB");
+        assert_eq!(human_bytes(2_147_483_648), "2.0 GiB");
     }
 
     #[test]

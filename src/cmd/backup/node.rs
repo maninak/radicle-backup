@@ -83,7 +83,7 @@ pub(super) fn quiesce<'a>(
     // the warning about refs fetched mid-run is printed, and `--stop-node` still tries. Read
     // as stopped, this wrote `node.was_running: false` into the manifest over a home whose
     // node was up, and the restore on the far end skipped the warning that costs an identity.
-    let state = ctx.home.node_state();
+    let state = ctx.home.probe_node_state();
     let why_running_is_unknown = state.doubt();
     if let Some(doubt) = &why_running_is_unknown {
         warnings.push(format!(
@@ -130,7 +130,7 @@ pub(super) fn quiesce<'a>(
     // The exit status, not just the spawn. A `rad node stop` that fails outright used to be
     // discarded here, and the run then spent the whole timeout watching a socket that was
     // never going to close before blaming the node for not stopping.
-    let stopped = rad.stop_node()?;
+    let stop_accepted = rad.stop_node()?;
 
     // The guard exists from the moment the stop is asked for, not from the moment it is
     // confirmed. `rad node stop` can succeed and the socket still be up when the deadline
@@ -148,13 +148,13 @@ pub(super) fn quiesce<'a>(
     // twenty seconds. A stop that was accepted gets the full deadline, because the node closes
     // its socket when it is done serving and that is not instant.
     let deadline = Instant::now()
-        + if stopped {
+        + if stop_accepted {
             NODE_STOP_TIMEOUT
         } else {
             Duration::ZERO
         };
     loop {
-        if ctx.home.node_state().is_stopped() {
+        if ctx.home.probe_node_state().is_stopped() {
             return Ok(node);
         }
         if Instant::now() >= deadline {
@@ -172,7 +172,7 @@ pub(super) fn quiesce<'a>(
         Some(doubt) => format!("the node could not be asked whether it stopped ({doubt})"),
         None => "the node is still serving its control socket".to_string(),
     };
-    Err(if stopped {
+    Err(if stop_accepted {
         Error::refused(
             format!("{still_up} after being asked to stop"),
             "stop it by hand and run again, or run without --stop-node",

@@ -92,7 +92,7 @@ impl Check {
 }
 
 pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     let checks = examine(ctx, args)?;
     let tally = |wanted| {
         checks
@@ -189,7 +189,7 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let rad = Rad::new(home.path());
     let rad = rad.is_available().then_some(rad);
     let policies = db::read_policies(&home.policies_db())?;
-    let routing = db::routing_counts(&home.node_db(), &node_id)?;
+    let routing = db::read_routing_counts(&home.node_db(), &node_id)?;
     let inventory = inventory::collect(
         home,
         &git,
@@ -216,7 +216,7 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     // The archive on disk, found once and answered from twice: how old it is, and whether it
     // is encrypted. Reading it from the state file instead is how both checks came to report
     // on a run that happened rather than on the file that is there.
-    let directory = crate::cmd::archive_dir(args.dir.as_deref(), record);
+    let directory = crate::cmd::archive_dir_from_env(args.dir.as_deref(), record);
     let newest = crate::archives::newest(&directory, &node_id)?;
 
     let mut checks = vec![check_key_protection(&secret, &home.secret_key())];
@@ -226,20 +226,20 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         &directory,
         now,
     ));
-    checks.push(check_backup_encryption(
+    checks.push(check_archive_encryption(
         &ctx.identities(),
         newest.as_ref(),
         record,
     )?);
-    checks.push(check_backup_locality(home.path(), newest.as_ref(), record));
+    checks.push(check_archive_location(home.path(), newest.as_ref(), record));
     checks.push(check_private_coverage(&inventory, record).qualified_by_unread(unread));
-    checks.push(check_delegate_quorum(&inventory).qualified_by_unread(unread));
+    checks.push(check_sole_delegate(&inventory).qualified_by_unread(unread));
     checks.push(check_replication(&inventory, &routing).qualified_by_unread(unread));
-    checks.push(check_sole_holder(&stored));
+    checks.push(check_second_key_copy(&stored));
     checks.push(
-        check_propagation(
+        check_sigrefs_propagation(
             &inventory,
-            &db::synced_heads(&home.node_db(), &node_id)?,
+            &db::read_synced_heads(&home.node_db(), &node_id)?,
             &node_id,
         )
         .qualified_by_unread(unread),
@@ -451,7 +451,7 @@ fn check_backup_freshness(
 /// only archive was a plaintext one somebody dropped there by hand. It also cannot answer the
 /// half that matters more: an archive encrypted to a key nobody still holds is as lost as no
 /// archive at all, and only trying the unwrap says so.
-fn check_backup_encryption(
+fn check_archive_encryption(
     identities: &crate::crypt::Identities,
     newest: Option<&crate::archives::Archive>,
     record: Option<&state::Record>,
@@ -539,7 +539,7 @@ fn check_backup_encryption(
 }
 
 /// Whether the archive would survive whatever takes the home with it.
-fn check_backup_locality(
+fn check_archive_location(
     home: &std::path::Path,
     newest: Option<&crate::archives::Archive>,
     record: Option<&state::Record>,
@@ -626,7 +626,7 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
         .iter()
         .filter(|repo| !repo.has_another_holder())
         .count();
-    let (count, verb) = (missing.len(), term::agree(missing.len()));
+    let (count, verb) = (missing.len(), term::is_or_are(missing.len()));
     let detail = if alone == 0 {
         format!(
             "{count} of {} {verb} in no archive, though every one of those is allowed to a peer \
@@ -652,13 +652,13 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
     Check::new(TOPIC, verdict, detail).with_remedy("rad backup --repos private")
 }
 
-fn check_delegate_quorum(inventory: &Inventory) -> Check {
+fn check_sole_delegate(inventory: &Inventory) -> Check {
     let sole: Vec<&str> = inventory
-        .sole_delegate()
+        .solely_delegated()
         .map(|repo| repo.display_name())
         .collect();
     let delegated = inventory
-        .described
+        .records
         .iter()
         .filter(|repo| repo.is_delegate)
         .count();
@@ -700,7 +700,7 @@ fn check_delegate_quorum(inventory: &Inventory) -> Check {
 
 fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check {
     let alone: Vec<&str> = inventory
-        .described
+        .records
         .iter()
         .filter(|repo| !repo.is_private())
         .filter(|repo| routing.get(&repo.rid).copied().unwrap_or(0) == 0)
@@ -731,7 +731,7 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
         format!(
             "{} {} announced by no other node: {}",
             term::count(alone.len(), "public repository", "public repositories"),
-            term::agree(alone.len()),
+            term::is_or_are(alone.len()),
             alone.join(", ")
         ),
     )
@@ -750,13 +750,13 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
 /// nothing could read is not known to be public either, which is why the caller qualifies this
 /// answer the way it qualifies its three siblings: without it, a home with no `rad` on PATH
 /// was told to announce repositories that must never be announced.
-fn check_propagation(
+fn check_sigrefs_propagation(
     inventory: &Inventory,
-    synced: &BTreeMap<String, BTreeSet<String>>,
+    synced_heads: &BTreeMap<String, BTreeSet<String>>,
     node_id: &str,
 ) -> Check {
     const TOPIC: &str = "signed refs propagation";
-    if synced.is_empty() {
+    if synced_heads.is_empty() {
         return Check::new(
             TOPIC,
             Verdict::Unknown,
@@ -766,7 +766,7 @@ fn check_propagation(
     }
 
     let mut here_only = Vec::new();
-    for repo in &inventory.described {
+    for repo in &inventory.records {
         if repo.is_private() {
             continue;
         }
@@ -774,7 +774,7 @@ fn check_propagation(
         let Some(mine) = repo.sigrefs.get(node_id) else {
             continue;
         };
-        let elsewhere = synced
+        let elsewhere = synced_heads
             .get(&repo.rid)
             .is_some_and(|heads| heads.contains(mine));
         if !elsewhere {
@@ -795,7 +795,7 @@ fn check_propagation(
         format!(
             "the newest signed refs of {} {} on this disk and no other: {}",
             term::count(here_only.len(), "repository", "repositories"),
-            term::agree(here_only.len()),
+            term::is_or_are(here_only.len()),
             here_only.join(", ")
         ),
     )
@@ -817,7 +817,7 @@ fn check_propagation(
 /// `sudo`, or by `restore.sh`, which writes none: reading that as "not restored from an
 /// archive" printed a green line about the double-signing hazard at exactly the people most
 /// likely to be in it.
-fn check_sole_holder(stored: &state::Stored) -> Check {
+fn check_second_key_copy(stored: &state::Stored) -> Check {
     const TOPIC: &str = "key copies";
     let record = match stored {
         state::Stored::Record(record) => record,
@@ -1002,7 +1002,7 @@ mod tests {
     fn every_topic() -> Vec<String> {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
         let empty = Inventory {
-            described: Vec::new(),
+            records: Vec::new(),
             selected: Default::default(),
             warnings: Vec::new(),
         };
@@ -1025,14 +1025,14 @@ mod tests {
                 std::path::Path::new("/nowhere"),
                 now,
             ),
-            check_backup_encryption(&Default::default(), None, None)
+            check_archive_encryption(&Default::default(), None, None)
                 .expect("no archive is not an error"),
-            check_backup_locality(std::path::Path::new("/nowhere"), None, None),
+            check_archive_location(std::path::Path::new("/nowhere"), None, None),
             check_private_coverage(&empty, None),
-            check_delegate_quorum(&empty),
+            check_sole_delegate(&empty),
             check_replication(&empty, &BTreeMap::new()),
-            check_sole_holder(&state::Stored::Absent),
-            check_propagation(&empty, &BTreeMap::new(), "z6MkAAA"),
+            check_second_key_copy(&state::Stored::Absent),
+            check_sigrefs_propagation(&empty, &BTreeMap::new(), "z6MkAAA"),
         ]
         .into_iter()
         .map(|check| check.topic)
@@ -1195,7 +1195,7 @@ mod tests {
 
         let mut record = record();
         record.archive = Some(archive.to_string_lossy().into_owned());
-        let check = check_backup_locality(&dir, None, Some(&record));
+        let check = check_archive_location(&dir, None, Some(&record));
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(
             check.remedy.is_some_and(|remedy| remedy.contains("sync")),
@@ -1230,7 +1230,7 @@ mod tests {
         crate::archives::Archive {
             bytes: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
             taken: None,
-            encrypted: Some(!matches!(encryption, crate::crypt::Encryption::None)),
+            encrypted: Some(!matches!(encryption, crate::crypt::Encryption::Plaintext)),
             path,
         }
     }
@@ -1241,11 +1241,11 @@ mod tests {
     #[test]
     fn a_plaintext_archive_fails_even_when_the_record_remembers_an_encrypted_one() {
         let dir = std::env::temp_dir().join(format!("rad-backup-crypt-{}", std::process::id()));
-        let archive = archive_at(&dir, "plain.tar.zst", &crate::crypt::Encryption::None);
+        let archive = archive_at(&dir, "plain.tar.zst", &crate::crypt::Encryption::Plaintext);
         let mut record = record();
         record.is_encrypted = true;
 
-        let check = check_backup_encryption(&Default::default(), Some(&archive), Some(&record))
+        let check = check_archive_encryption(&Default::default(), Some(&archive), Some(&record))
             .expect("the header is readable");
         assert_eq!(check.verdict, Verdict::Fail, "{}", check.detail);
         assert!(check.detail.contains("plain.tar.zst"), "{}", check.detail);
@@ -1263,7 +1263,7 @@ mod tests {
 
         // No passphrase is given and none is read from anywhere: a health report that stops to
         // prompt is one nobody schedules.
-        let check = check_backup_encryption(&Default::default(), Some(&archive), None)
+        let check = check_archive_encryption(&Default::default(), Some(&archive), None)
             .expect("the header is readable");
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
 
@@ -1279,7 +1279,7 @@ mod tests {
 
         // Nothing was offered, so nothing was tried. Calling that a pass is how an archive
         // whose key had been lost went on being reported as a working backup.
-        let blind = check_backup_encryption(&Default::default(), Some(&archive), None)
+        let blind = check_archive_encryption(&Default::default(), Some(&archive), None)
             .expect("the header is readable");
         assert_eq!(blind.verdict, Verdict::Unknown, "{}", blind.detail);
         assert!(
@@ -1294,7 +1294,7 @@ mod tests {
             files: vec![key_file],
             ..Default::default()
         };
-        let opened = check_backup_encryption(&offered, Some(&archive), None)
+        let opened = check_archive_encryption(&offered, Some(&archive), None)
             .expect("the header is readable");
         assert_eq!(opened.verdict, Verdict::Pass, "{}", opened.detail);
 
@@ -1306,7 +1306,7 @@ mod tests {
                 .expose_secret(),
         )
         .expect("scratch key is writable");
-        let wrong = check_backup_encryption(
+        let wrong = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![stranger],
                 ..Default::default()
@@ -1346,9 +1346,9 @@ mod tests {
 
         // Interactive on purpose, which is how `doctor` is usually called. What this asserts
         // is the verdict; that the check hands age a non-interactive copy of the identities
-        // is visible in `check_backup_encryption` and cannot be shown from here, because a
+        // is visible in `check_archive_encryption` and cannot be shown from here, because a
         // test harness has no terminal for the prompt to reach either way.
-        let locked = check_backup_encryption(
+        let locked = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![key_file.clone()],
                 is_interactive: true,
@@ -1368,7 +1368,7 @@ mod tests {
         // The same key, unlocked by a passphrase file, opens it.
         let passphrase_file = dir.join("passphrase");
         std::fs::write(&passphrase_file, passphrase.as_str()).expect("scratch file is writable");
-        let opened = check_backup_encryption(
+        let opened = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![key_file],
                 passphrase_file: Some(passphrase_file),
@@ -1386,7 +1386,7 @@ mod tests {
     const ME: &str = "z6MkAAA";
 
     /// A public repository whose current signed refs are `head`.
-    fn signed(rid: &str, head: &str) -> crate::manifest::RepoRecord {
+    fn public_repo_signed_at(rid: &str, head: &str) -> crate::manifest::RepoRecord {
         crate::manifest::RepoRecord {
             rid: rid.to_string(),
             name: None,
@@ -1406,7 +1406,7 @@ mod tests {
 
     fn holding(records: Vec<crate::manifest::RepoRecord>) -> Inventory {
         Inventory {
-            described: records,
+            records,
             selected: Default::default(),
             warnings: Vec::new(),
         }
@@ -1414,7 +1414,10 @@ mod tests {
 
     #[test]
     fn work_no_other_node_holds_is_named_as_being_on_this_disk_alone() {
-        let inventory = holding(vec![signed("rad:zAAA", "aaa"), signed("rad:zBBB", "bbb")]);
+        let inventory = holding(vec![
+            public_repo_signed_at("rad:zAAA", "aaa"),
+            public_repo_signed_at("rad:zBBB", "bbb"),
+        ]);
         // Somebody else has zAAA's current head. Nobody has zBBB's: it was committed and
         // signed here and has reached nothing, which no file copy of the home can tell you.
         let synced = BTreeMap::from([
@@ -1425,7 +1428,7 @@ mod tests {
             ),
         ]);
 
-        let check = check_propagation(&inventory, &synced, ME);
+        let check = check_sigrefs_propagation(&inventory, &synced, ME);
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.detail.contains("rad:zBBB"), "{}", check.detail);
         assert!(!check.detail.contains("rad:zAAA"), "{}", check.detail);
@@ -1435,19 +1438,19 @@ mod tests {
     fn a_private_repository_is_not_counted_as_work_that_failed_to_propagate() {
         // Private repositories are announced to nobody on purpose. Counting them here would
         // report the feature working as a fault, on every run, for everyone who has one.
-        let mut private = signed("rad:zPriv", "aaa");
+        let mut private = public_repo_signed_at("rad:zPriv", "aaa");
         private.visibility = Some("private".to_string());
         let synced =
             BTreeMap::from([("rad:zOther".to_string(), BTreeSet::from(["x".to_string()]))]);
 
-        let check = check_propagation(&holding(vec![private]), &synced, ME);
+        let check = check_sigrefs_propagation(&holding(vec![private]), &synced, ME);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
     }
 
     #[test]
     fn a_node_that_has_never_run_is_unknown_rather_than_everything_being_stranded() {
-        let inventory = holding(vec![signed("rad:zAAA", "aaa")]);
-        let check = check_propagation(&inventory, &BTreeMap::new(), ME);
+        let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);
+        let check = check_sigrefs_propagation(&inventory, &BTreeMap::new(), ME);
         assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
     }
 
@@ -1459,7 +1462,7 @@ mod tests {
             source_node_was_running: true,
             source_node_state_was_guessed: false,
         });
-        let check = check_sole_holder(&state::Stored::Record(Box::new(record.clone())));
+        let check = check_second_key_copy(&state::Stored::Record(Box::new(record.clone())));
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.remedy.is_some(), "a warning with no way out is a nag");
         assert!(
@@ -1476,7 +1479,7 @@ mod tests {
             source_node_was_running: true,
             source_node_state_was_guessed: true,
         });
-        let guessed = check_sole_holder(&state::Stored::Record(Box::new(record)));
+        let guessed = check_second_key_copy(&state::Stored::Record(Box::new(record)));
         assert_eq!(guessed.verdict, Verdict::Warn);
         assert!(
             guessed.detail.contains("could not tell"),
@@ -1494,7 +1497,7 @@ mod tests {
             source_node_state_was_guessed: false,
         });
         assert_eq!(
-            check_sole_holder(&state::Stored::Record(Box::new(record))).verdict,
+            check_second_key_copy(&state::Stored::Record(Box::new(record))).verdict,
             Verdict::Pass
         );
     }
@@ -1510,7 +1513,7 @@ mod tests {
             source_node_state_was_guessed: false,
         });
         assert_eq!(
-            check_sole_holder(&state::Stored::Record(Box::new(record))).verdict,
+            check_second_key_copy(&state::Stored::Record(Box::new(record))).verdict,
             Verdict::Unknown
         );
     }
@@ -1518,7 +1521,7 @@ mod tests {
     #[test]
     fn a_home_that_was_never_restored_is_not_asked_about_a_machine_it_never_came_from() {
         let stored = state::Stored::Record(Box::new(record()));
-        assert_eq!(check_sole_holder(&stored).verdict, Verdict::Pass);
+        assert_eq!(check_second_key_copy(&stored).verdict, Verdict::Pass);
     }
 
     /// The bug: `sudo rad-backup restore` writes its record into root's state directory, and
@@ -1534,7 +1537,7 @@ mod tests {
                 reason: "expected value at line 1 column 1".to_string(),
             },
         ] {
-            let check = check_sole_holder(&stored);
+            let check = check_second_key_copy(&stored);
             assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
             assert!(check.remedy.is_some(), "{}", check.detail);
         }

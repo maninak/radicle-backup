@@ -18,7 +18,7 @@ use crate::rad::{Described, Listed, Listing, Rad};
 /// What the inventory pass worked out, before anything is written.
 pub struct Inventory {
     /// Every repository the archive will describe, whether or not it carries its data.
-    pub described: Vec<RepoRecord>,
+    pub records: Vec<RepoRecord>,
     /// Repositories whose data the archive will carry, by identifier.
     pub selected: BTreeSet<String>,
     pub warnings: Vec<String>,
@@ -26,13 +26,13 @@ pub struct Inventory {
 
 impl Inventory {
     pub fn private(&self) -> impl Iterator<Item = &RepoRecord> {
-        self.described.iter().filter(|record| record.is_private())
+        self.records.iter().filter(|record| record.is_private())
     }
 
     /// What to call a repository in a message: its name when the paperwork knows one, and its
     /// identifier when it does not.
     pub fn display_name(&self, rid: &str) -> String {
-        self.described
+        self.records
             .iter()
             .find(|record| record.rid == rid)
             .map(|record| record.display_name().to_string())
@@ -43,7 +43,7 @@ impl Inventory {
     /// and delegate list are unknown rather than absent. Every one of them when `rad` was not
     /// there at all.
     pub fn identities_not_read(&self) -> usize {
-        self.described
+        self.records
             .iter()
             .filter(|record| !record.identity_was_read())
             .count()
@@ -51,8 +51,8 @@ impl Inventory {
 
     /// Repositories this identity is the only delegate of. Losing the key ends their
     /// governance, which is the one loss a backup cannot undo.
-    pub fn sole_delegate(&self) -> impl Iterator<Item = &RepoRecord> {
-        self.described
+    pub fn solely_delegated(&self) -> impl Iterator<Item = &RepoRecord> {
+        self.records
             .iter()
             .filter(|record| record.is_delegate && record.delegates.len() == 1)
     }
@@ -69,8 +69,8 @@ pub fn collect(
     routing: &BTreeMap<String, u64>,
 ) -> Result<Inventory> {
     let mut warnings = Vec::new();
-    let (stored, unreadable) = home.repository_ids()?;
-    for name in &unreadable {
+    let (stored, not_utf8_names) = home.read_inventory()?;
+    for name in &not_utf8_names {
         warnings.push(format!(
             "storage/{name} was skipped: its directory name is not valid UTF-8, so it cannot \
              be a repository id and nothing in this archive carries it"
@@ -97,13 +97,13 @@ pub fn collect(
     let seeding = policies.seeding_by_rid();
     let mut records = Vec::with_capacity(to_describe.len());
     let mut undescribed = BTreeSet::new();
-    let mut first_reason = None;
+    let mut first_undescribed_why = None;
     let mut unreadable = BTreeSet::new();
     let mut first_unreadable = None;
     for rid in to_describe {
         let (record, trouble) = describe(home, git, rad, rid, node_id, &seeding, routing)?;
         if let Some(why) = trouble.undescribed {
-            first_reason.get_or_insert(why);
+            first_undescribed_why.get_or_insert(why);
             undescribed.insert(record.rid.clone());
         }
         if let Some(why) = trouble.unreadable {
@@ -149,12 +149,12 @@ pub fn collect(
     if let Some(why) = first_unreadable {
         warnings.push(unreadable_warning(&unreadable, &selected, &why));
     }
-    if let Some(why) = first_reason {
+    if let Some(why) = first_undescribed_why {
         warnings.push(undescribed_warning(&undescribed, &selected, &why));
     }
 
     Ok(Inventory {
-        described: records,
+        records,
         selected,
         warnings,
     })
@@ -166,13 +166,13 @@ fn undescribed_warning(
     selected: &BTreeSet<String>,
     why: &str,
 ) -> String {
-    let carried = also_selected(undescribed, selected);
+    let carried = count_also_selected(undescribed, selected);
     let fate = match carried {
         0 => "This run was not asked for them, so the archive holds none of them".to_string(),
         n => format!(
             "{n} of them {} carried as though private, because a repository whose visibility \
              cannot be read must not be left out of an archive for looking public",
-            crate::term::agree(n)
+            crate::term::is_or_are(n)
         ),
     };
     format!(
@@ -188,13 +188,13 @@ fn unreadable_warning(
     selected: &BTreeSet<String>,
     why: &str,
 ) -> String {
-    let carried = also_selected(unreadable, selected);
+    let carried = count_also_selected(unreadable, selected);
     let fate = match carried {
         0 => "This run was not asked for them, so nothing will try to bundle them".to_string(),
         n => format!(
             "{n} of them {} in this archive, and bundling {} will fail, so the archive is \
              written and marked incomplete rather than not written at all",
-            crate::term::agree(n),
+            crate::term::is_or_are(n),
             match n {
                 1 => "it",
                 _ => "them",
@@ -210,7 +210,7 @@ fn unreadable_warning(
 }
 
 /// How many of these this run will actually carry.
-fn also_selected(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
+fn count_also_selected(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
     troubled.intersection(selected).count()
 }
 

@@ -41,7 +41,7 @@ fn backup_exit_code(outcome: cmd::backup::Outcome) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let cli = cli::parse();
+    let cli = cli::parse_from_env();
     let term = Term::new(
         cli.global.yes,
         if cli.global.quiet {
@@ -71,7 +71,7 @@ fn emit(bytes: &[u8]) -> Result<ExitCode> {
     match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(ExitCode::SUCCESS),
-        Err(e) => Err(error::Error::Bare(e)),
+        Err(e) => Err(error::Error::PathlessIo(e)),
     }
 }
 
@@ -92,7 +92,7 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
             let mut rendered = Vec::new();
             clap_mangen::Man::new(Cli::command())
                 .render(&mut rendered)
-                .map_err(error::Error::Bare)?;
+                .map_err(error::Error::PathlessIo)?;
             return emit(&rendered);
         }
         _ => {}
@@ -142,7 +142,7 @@ fn dispatch(ctx: &Ctx, cli: &Cli) -> Result<ExitCode> {
         Some(Command::Schedule(args)) => cmd::schedule::run(ctx, args).map(|()| ExitCode::SUCCESS),
         Some(Command::Doctor(args)) => cmd::doctor::run(ctx, args),
         Some(Command::Paper(args)) => cmd::paper::run(ctx, args).map(|()| ExitCode::SUCCESS),
-        Some(Command::Migrate(args)) => cmd::migrate::run(ctx, args).map(|()| ExitCode::SUCCESS),
+        Some(Command::Move(args)) => cmd::migrate::run(ctx, args).map(|()| ExitCode::SUCCESS),
         Some(Command::Diff) => cmd::diff::run(ctx),
         Some(Command::Completions(_) | Command::Man) => Ok(ExitCode::SUCCESS),
     }

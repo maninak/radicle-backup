@@ -22,7 +22,7 @@ pub struct Report {
     pub manifest: Manifest,
     pub problems: Vec<String>,
     pub checks: Vec<(String, bool)>,
-    /// The archive that was checked, which is not always the one the caller named: with no
+    /// the archive that was checked, which is not always the one the caller named: with no
     /// argument this is whichever one was newest.
     pub archive: std::path::PathBuf,
 }
@@ -65,7 +65,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
                 "{} is complete: {} entries, {}",
                 report.archive.display(),
                 report.manifest.entries.len(),
-                term::bytes(report.manifest.total_bytes())
+                term::human_bytes(report.manifest.total_bytes())
             ));
             if !args.deep {
                 term.hint("--deep also restores it into a throwaway home and checks the identity");
@@ -88,7 +88,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
 
 pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
     let archive = &crate::cmd::resolve_archive(ctx, args.target.archive.as_deref())?;
-    let passphrase = crate::cmd::archive_passphrase(ctx, archive)?;
+    let passphrase = crate::cmd::read_archive_passphrase(ctx, archive)?;
 
     let mut checks = Vec::new();
     let mut problems = Vec::new();
@@ -101,9 +101,9 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
             .clone()
             .unwrap_or_else(|| archive.parent().unwrap_or(Path::new(".")).to_path_buf());
         let scratch = Scratch::create(&parent)?;
-        let staging = scratch.file("home");
+        let staging = scratch.path_of("home");
         let scan = reader.unpack(archive, &staging)?;
-        deep_checks(&staging, &scan.manifest, &mut checks, &mut problems)?;
+        check_unpacked_home(&staging, &scan.manifest, &mut checks, &mut problems)?;
         scan
     } else {
         reader.scan(archive)?
@@ -116,9 +116,12 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
     ));
     problems.extend(mismatches);
 
-    let key_present = scan.observed.contains_key("keys/radicle");
-    checks.push(("the private key is in the archive".to_string(), key_present));
-    if !key_present {
+    let secret_key_present = scan.observed.contains_key("keys/radicle");
+    checks.push((
+        "the private key is in the archive".to_string(),
+        secret_key_present,
+    ));
+    if !secret_key_present {
         problems.push("keys/radicle is not in this archive: it cannot restore an identity".into());
     }
 
@@ -131,14 +134,14 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
 }
 
 /// Rebuild what the archive holds and compare it with what the archive claims.
-fn deep_checks(
+fn check_unpacked_home(
     staging: &Path,
     manifest: &Manifest,
     checks: &mut Vec<(String, bool)>,
     problems: &mut Vec<String>,
 ) -> Result<()> {
-    let public = staging.join("keys/radicle.pub");
-    match Identity::read(&public) {
+    let public_key_path = staging.join("keys/radicle.pub");
+    match Identity::read(&public_key_path) {
         Ok(identity) => {
             let matches = identity.did() == manifest.identity.did;
             checks.push((
@@ -224,18 +227,18 @@ fn deep_checks(
         }
         return Ok(());
     }
-    let mut checked = 0;
+    let mut bundles_opened = 0;
     for repo in manifest.repos.iter().filter(|repo| repo.bundle.is_some()) {
         let bundle = staging.join(crate::git::bundle_entry(&repo.rid));
         match git.bundle_refs(&bundle) {
-            Ok(refs) if !refs.is_empty() => checked += 1,
+            Ok(refs) if !refs.is_empty() => bundles_opened += 1,
             Ok(_) => problems.push(format!("{}: its bundle holds no refs", repo.rid)),
             Err(e) => problems.push(format!("{}: its bundle does not open ({e})", repo.rid)),
         }
     }
-    if checked > 0 {
+    if bundles_opened > 0 {
         checks.push((
-            format!("{checked} repository bundles open and hold refs"),
+            format!("{bundles_opened} repository bundles open and hold refs"),
             true,
         ));
     }

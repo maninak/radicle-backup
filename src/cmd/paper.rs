@@ -11,15 +11,15 @@ use qrcode::render::svg;
 use zeroize::Zeroizing;
 
 use crate::cli::Paper;
-use crate::cmd::{Ctx, fill, iso_stamp};
+use crate::cmd::{Ctx, fill, rfc3339_stamp};
 use crate::crypt;
 use crate::error::{Error, Result};
 use crate::key::{Identity, Protection, SecretKey};
 
-const SHEET: &str = include_str!("../../assets/paper.html");
+const SHEET_TEMPLATE: &str = include_str!("../../assets/paper.html");
 
 pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     let identity = Identity::read(ctx.home.public_key())?;
     let secret = SecretKey::read(ctx.home.secret_key())?;
 
@@ -64,20 +64,20 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
     let qr = Zeroizing::new(qr_svg(&secret_text)?);
     // Both hold the key or its 24 words in the clear. `render` returns its buffer by move, so
     // wrapping the result wipes the sheet itself rather than a copy of it.
-    let words_html = Zeroizing::new(if args.words {
+    let secret_html = Zeroizing::new(if args.words {
         word_grid(&secret_text)
     } else {
         format!("<pre class=\"key\">{}</pre>", escape(&secret_text))
     });
 
     let sheet = Zeroizing::new(render(Sheet {
-        alias: ctx.home.alias()?.as_deref().unwrap_or("unnamed"),
+        alias: ctx.home.read_alias()?.as_deref().unwrap_or("unnamed"),
         did: &identity.did(),
         fingerprint: &identity.fingerprint(),
-        created: &iso_stamp(jiff::Timestamp::now()),
+        created: &rfc3339_stamp(jiff::Timestamp::now()),
         heading,
         caution,
-        secret_html: &words_html,
+        secret_html: &secret_html,
         qr: &qr,
     }));
 
@@ -126,7 +126,7 @@ struct Sheet<'a> {
 /// user is told to open in a browser next to their private key.
 fn render(sheet: Sheet<'_>) -> String {
     fill(
-        SHEET,
+        SHEET_TEMPLATE,
         &[
             ("ALIAS", &escape(sheet.alias)),
             ("DID", sheet.did),

@@ -130,7 +130,7 @@ pub fn read_policies(path: &Path) -> Result<Policies> {
 ///
 /// This is gossip, so it is a lower bound and not proof that a copy exists elsewhere. It is
 /// still the only local answer to "if this disk dies, does this repository survive".
-pub fn routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap<String, u64>> {
+pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap<String, u64>> {
     if !node_db.is_file() {
         return Ok(BTreeMap::new());
     }
@@ -159,7 +159,7 @@ pub fn routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap<Stri
 /// Empty when the node has never run or the table is not there, which a caller must read as
 /// "not known" rather than as "nothing has propagated". Every repository would otherwise look
 /// stranded on a machine whose node has simply never been started.
-pub fn synced_heads(
+pub fn read_synced_heads(
     node_db: &Path,
     own_node_id: &str,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
@@ -194,7 +194,7 @@ pub fn synced_heads(
 
 /// The aliases peers announced for themselves, so that a restored home shows names instead of
 /// node ids from its first minute.
-pub fn alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
+pub fn read_alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
     if !node_db.is_file() {
         return Ok(BTreeMap::new());
     }
@@ -233,7 +233,7 @@ fn open_read_only(path: &Path) -> Result<Connection> {
     // After the open, because the open is what creates the file. An open that failed left
     // nothing behind, and warning about it would send somebody looking for a file that is
     // not there.
-    if has_log(path) {
+    if has_write_ahead_log(path) {
         record_touched(path);
     }
     // Opening reads nothing, so this is the first call that actually goes through the log.
@@ -248,7 +248,7 @@ fn open_read_only(path: &Path) -> Result<Connection> {
 }
 
 /// Whether a write-ahead log sits beside this database, which is what makes reading it write.
-fn has_log(path: &Path) -> bool {
+fn has_write_ahead_log(path: &Path) -> bool {
     let mut log = path.as_os_str().to_os_string();
     log.push("-wal");
     Path::new(&log).exists()
@@ -326,7 +326,7 @@ mod tests {
         path
     }
 
-    fn seed_policies_db(path: &Path) {
+    fn write_policies_fixture(path: &Path) {
         let db = Connection::open(path).expect("scratch database opens");
         db.execute_batch(
             "create table seeding (id text primary key, scope text, policy text);
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn policies_export_separates_what_is_seeded_from_what_is_blocked() {
         let path = scratch("policies");
-        seed_policies_db(&path);
+        write_policies_fixture(&path);
 
         let policies = read_policies(&path).expect("policies are readable");
         assert_eq!(policies.seeding.len(), 2);
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn a_null_alias_is_absence_rather_than_a_row_that_fails_the_whole_read() {
         let path = scratch("null-alias");
-        seed_policies_db(&path);
+        write_policies_fixture(&path);
 
         let policies = read_policies(&path).expect("a null alias does not fail the read");
         let null_alias = policies
@@ -438,7 +438,7 @@ mod tests {
     fn a_snapshot_is_a_complete_copy_of_the_source_database() {
         let source = scratch("snapshot-source");
         let destination = scratch("snapshot-destination");
-        seed_policies_db(&source);
+        write_policies_fixture(&source);
 
         snapshot(&source, &destination).expect("snapshot succeeds");
         let copied = read_policies(&destination).expect("the copy is a database");
@@ -481,7 +481,7 @@ mod tests {
         // an empty answer, and it never gets as far as the predicate: it fails on the open.
         let ruined = scratch("not-a-database");
         std::fs::write(&ruined, b"this is not an sqlite image").expect("scratch file is writable");
-        let refused = synced_heads(&ruined, "z6MkAAA").expect_err("that is not a database");
+        let refused = read_synced_heads(&ruined, "z6MkAAA").expect_err("that is not a database");
         assert!(
             matches!(refused, Error::Malformed { .. }),
             "a ruined node database is news, not an empty map: {refused:?}"

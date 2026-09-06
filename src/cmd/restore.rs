@@ -16,7 +16,7 @@ use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
 use crate::git::{self, Git};
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
-use crate::perms::{copy_owner_only, copy_plain, set_owner_only};
+use crate::perms::{copy_doc, copy_secret, set_dir_owner_only};
 use crate::rad::Rad;
 use crate::state;
 use crate::term;
@@ -86,7 +86,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // Anything but a node proven stopped refuses. A socket that cannot be reached is not a
     // node that is down, and this guard exists precisely because being wrong about that costs
     // the home it was protecting.
-    let state = home.node_state();
+    let state = home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
@@ -116,7 +116,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // and a second probe after a multi-gigabyte unpack can find the file moved or the medium
     // ejected. Guessing "unencrypted" there made `doctor` fail an archive that is encrypted.
     let encrypted = crypt::looks_encrypted(archive)?;
-    let passphrase = crate::cmd::archive_passphrase(ctx, archive)?;
+    let passphrase = crate::cmd::read_archive_passphrase(ctx, archive)?;
 
     // Staging sits beside the home by default, so the filesystem that has to hold the
     // restored data is the one proven to have room for it before anything is installed.
@@ -128,7 +128,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     });
     std::fs::create_dir_all(&parent).map_err(|e| Error::io(&parent, e))?;
     let scratch = Scratch::create(&parent)?;
-    let staging = scratch.file("home");
+    let staging = scratch.path_of("home");
 
     term.step(&format!("unpacking {}", archive.display()));
     let scan =
@@ -189,7 +189,7 @@ fn remember(
     archive: &Path,
     is_encrypted: bool,
 ) {
-    let mut record = state::Record::of(
+    let mut record = state::Record::from_manifest(
         manifest,
         Some(archive),
         &manifest.identity.node_id,
@@ -241,7 +241,7 @@ fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
 }
 
 /// What the DID of the key at `path` is, when there is a readable one there.
-fn did_at(path: &Path) -> Option<String> {
+fn read_did_at(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     crate::key::Identity::parse(&text).ok().map(|id| id.did())
 }
@@ -263,8 +263,8 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let here = did_at(&ctx.home.public_key());
-    let incoming = did_at(&staging.join("keys/radicle.pub"));
+    let here = read_did_at(&ctx.home.public_key());
+    let incoming = read_did_at(&staging.join("keys/radicle.pub"));
     // Same identity, provably: the DID is derived from the public key, so equal DIDs mean the
     // archive carries the key already here. Nothing is displaced, and retiring anyway filed a
     // fresh copy of the key on every restore, as radicle.retired, .retired.2, .retired.3.
@@ -328,7 +328,7 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
 fn write_displaced_note(
     ctx: &Ctx,
     retired: &Path,
-    was: Option<&str>,
+    former_did: Option<&str>,
     public: Option<&Path>,
 ) -> Result<()> {
     let name = retired
@@ -350,8 +350,8 @@ fn write_displaced_note(
          \n\
          It still works. Put it back only into a home of its own, and never start a node with\n\
          it while another machine is running one under the same peer id.\n",
-        crate::cmd::iso_stamp(jiff::Timestamp::now()),
-        was.unwrap_or("an identity this tool could not read"),
+        crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
+        former_did.unwrap_or("an identity this tool could not read"),
     );
     let path = ctx.home.keys_dir().join("DISPLACED.txt");
     std::fs::write(&path, note).map_err(|e| Error::io(&path, e))
@@ -365,7 +365,7 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     // in between, and a node writing to the home while this copies its databases over corrupts
     // both. The check up front is the courtesy that fails before the work; this is the one
     // that matters.
-    let state = home.node_state();
+    let state = home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
@@ -395,18 +395,18 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     for directory in [home.path().to_path_buf(), home.keys_dir(), home.node_dir()] {
         std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
     }
-    set_owner_only(home.path())?;
+    set_dir_owner_only(home.path())?;
 
     retire_any_displaced_key(ctx, staging)?;
-    copy_owner_only(&staging.join("keys/radicle"), &home.secret_key())?;
-    copy_plain(&staging.join("keys/radicle.pub"), &home.public_key())?;
-    copy_plain(&staging.join("config.json"), &home.config())?;
-    copy_owner_only(&staging.join("node/policies.db"), &home.policies_db())?;
-    copy_owner_only(
+    copy_secret(&staging.join("keys/radicle"), &home.secret_key())?;
+    copy_doc(&staging.join("keys/radicle.pub"), &home.public_key())?;
+    copy_doc(&staging.join("config.json"), &home.config())?;
+    copy_secret(&staging.join("node/policies.db"), &home.policies_db())?;
+    copy_secret(
         &staging.join("node/notifications.db"),
         &home.notifications_db(),
     )?;
-    copy_owner_only(&staging.join("node/node.db"), &home.node_db())?;
+    copy_secret(&staging.join("node/node.db"), &home.node_db())?;
 
     ctx.term.ok(&format!(
         "installed the identity into {}",
@@ -520,7 +520,7 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
         }
         let config = staging.join(git::config_entry(&repo.rid));
         if config.is_file() {
-            copy_plain(&config, &target.join("config"))?;
+            copy_doc(&config, &target.join("config"))?;
         }
         Ok(())
     };
@@ -579,7 +579,7 @@ fn reconcile(
     // Started only when the node is known to be down. A doubt here means `rad node start`
     // would be aimed at a home something else may already be serving, and starting a second
     // node on one key is the fork the whole comparison exists to prevent.
-    let started_here = if !ctx.home.node_state().is_stopped() {
+    let started_here = if !ctx.home.probe_node_state().is_stopped() {
         false
     } else {
         ctx.term
@@ -622,7 +622,7 @@ fn reconcile(
 fn wait_for_node(ctx: &Ctx) -> bool {
     let deadline = std::time::Instant::now() + NODE_START_TIMEOUT;
     while std::time::Instant::now() < deadline {
-        if ctx.home.node_state().is_running() {
+        if ctx.home.probe_node_state().is_running() {
             return true;
         }
         std::thread::sleep(NODE_START_POLL);
@@ -634,9 +634,9 @@ fn wait_for_node(ctx: &Ctx) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ancestry {
     /// The archived refs are an ancestor of what is here now: the network moved on without us.
-    ArchivedIsBehind,
+    ArchivedIsAncestorOfNetwork,
     /// What is here now is an ancestor of the archived refs: the archive holds unpushed work.
-    ArchivedIsAhead,
+    NetworkIsAncestorOfArchived,
     /// Neither reaches the other, so there is no history that holds both.
     Unrelated,
 }
@@ -650,19 +650,19 @@ enum Ancestry {
 /// ever checked.
 ///
 /// `ancestry` is a closure rather than a value, so two identical oids cost no `git` at all.
-fn classify<F>(archived: &str, current: Option<&str>, ancestry: F) -> Result<Standing>
+fn classify<F>(archived: &str, network: Option<&str>, ancestry: F) -> Result<Standing>
 where
     F: FnOnce(&str) -> Result<Ancestry>,
 {
-    let Some(current) = current else {
+    let Some(network) = network else {
         return Ok(Standing::NothingToCompare);
     };
-    if current == archived {
+    if network == archived {
         return Ok(Standing::Same);
     }
-    Ok(match ancestry(current)? {
-        Ancestry::ArchivedIsBehind => Standing::NetworkWasAhead,
-        Ancestry::ArchivedIsAhead => Standing::ArchiveIsAhead,
+    Ok(match ancestry(network)? {
+        Ancestry::ArchivedIsAncestorOfNetwork => Standing::NetworkWasAhead,
+        Ancestry::NetworkIsAncestorOfArchived => Standing::ArchiveIsAhead,
         Ancestry::Unrelated => Standing::Diverged,
     })
 }
@@ -676,7 +676,7 @@ fn compare_with_network(
 ) -> Result<()> {
     let git = Git::new();
     let node_id = &manifest.identity.node_id;
-    let sigrefs = git::sigrefs_ref(node_id);
+    let sigrefs_ref = git::sigrefs_ref(node_id);
 
     ctx.term.step(&format!(
         "comparing {} with the network",
@@ -702,12 +702,12 @@ fn compare_with_network(
         }
 
         let path = ctx.home.repository_path(&repo.rid);
-        let current = git.ref_oid(&path, &sigrefs)?;
+        let current = git.ref_oid(&path, &sigrefs_ref)?;
         let standing = classify(archived, current.as_deref(), |current| {
             if git.is_ancestor(&path, archived, current)? {
-                Ok(Ancestry::ArchivedIsBehind)
+                Ok(Ancestry::ArchivedIsAncestorOfNetwork)
             } else if git.is_ancestor(&path, current, archived)? {
-                Ok(Ancestry::ArchivedIsAhead)
+                Ok(Ancestry::NetworkIsAncestorOfArchived)
             } else {
                 Ok(Ancestry::Unrelated)
             }
@@ -829,7 +829,7 @@ fn report(
     // Counted and said out loud. A repository the network could not be asked about is not a
     // repository that is in step, and the report used to mention only `Diverged` and
     // `ArchiveIsAhead`, so a comparison that answered nothing at all read as a clean bill.
-    let unchecked = standings
+    let not_checked = standings
         .values()
         .filter(|standing| **standing == Standing::CouldNotAsk)
         .count();
@@ -843,7 +843,7 @@ fn report(
                 .map(|(rid, standing)| serde_json::json!({"rid": rid, "standing": standing.as_str()}))
                 .collect::<Vec<_>>(),
             "diverged": diverged,
-            "notChecked": unchecked,
+            "notChecked": not_checked,
             "notRestored": dropped,
         }))?;
     } else {
@@ -866,10 +866,10 @@ fn report(
             installed.seeded().count(),
             installed.followed().count()
         ));
-        if unchecked > 0 {
+        if not_checked > 0 {
             term.warn(&format!(
                 "{} of {} repositories could not be compared with the network",
-                unchecked,
+                not_checked,
                 restored.len()
             ));
             term.detail("run `rad sync <rid> --fetch` for those before you write to them");
@@ -990,7 +990,7 @@ mod tests {
         let standing = classify(
             "aaaa",
             Some("bbbb"),
-            asked(Ancestry::ArchivedIsBehind, &calls),
+            asked(Ancestry::ArchivedIsAncestorOfNetwork, &calls),
         )
         .expect("the ancestry answer is not an error");
         assert_eq!(standing, Standing::NetworkWasAhead);
@@ -1003,7 +1003,7 @@ mod tests {
         let standing = classify(
             "aaaa",
             Some("bbbb"),
-            asked(Ancestry::ArchivedIsAhead, &calls),
+            asked(Ancestry::NetworkIsAncestorOfArchived, &calls),
         )
         .expect("the ancestry answer is not an error");
         assert_eq!(standing, Standing::ArchiveIsAhead);
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn every_standing_says_what_it_means_in_words_a_person_can_act_on() {
+    fn a_standing_says_what_it_means_in_words_a_person_can_act_on() {
         assert_eq!(Standing::Same.as_str(), "in step with the network");
         assert_eq!(Standing::Diverged.as_str(), "diverged from the network");
     }
@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_private_copy_lands_with_owner_only_permissions() {
-        use crate::container::SECRET_MODE;
+        use crate::container::MODE_SECRET;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join(format!("rad-backup-restore-{}", std::process::id()));
@@ -1060,7 +1060,7 @@ mod tests {
         let source = dir.join("source");
         std::fs::write(&source, b"key material").expect("source is writable");
         let target = dir.join("target");
-        copy_owner_only(&source, &target).expect("copy succeeds");
+        copy_secret(&source, &target).expect("copy succeeds");
 
         assert_eq!(
             std::fs::read(&target).expect("target exists"),
@@ -1070,7 +1070,7 @@ mod tests {
             .expect("target exists")
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, SECRET_MODE);
+        assert_eq!(mode & 0o777, MODE_SECRET);
 
         let _ = std::fs::remove_dir_all(dir);
     }

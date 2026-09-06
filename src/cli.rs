@@ -39,7 +39,7 @@ pub struct Cli {
 /// new `create` flag had to be remembered in a second place, and one that was not simply
 /// stopped being recognised here: the flag was accepted before the verb, quietly ignored, and
 /// nobody was told where it belonged.
-fn create_only() -> Vec<String> {
+fn create_only_flag_ids() -> Vec<String> {
     use clap::CommandFactory as _;
 
     Create::command()
@@ -55,8 +55,8 @@ fn create_only() -> Vec<String> {
 /// it also rejects `--home /srv/radicle doctor`, which is how every other tool in this
 /// ecosystem is used. So the global flags stay usable in either position and the
 /// archive-shaping ones are checked by hand.
-pub fn parse() -> Cli {
-    let called = as_called(std::env::args_os());
+pub fn parse_from_env() -> Cli {
+    let called = invocation_as_called(std::env::args_os());
     let mut command = Cli::command();
     if let Some(name) = called.bin_name {
         command = command.bin_name(name);
@@ -66,7 +66,7 @@ pub fn parse() -> Cli {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
-    if let Some(problem) = misplaced_create_flag(&matches) {
+    if let Some(problem) = misplaced_create_flag_complaint(&matches) {
         Cli::command()
             .error(clap::error::ErrorKind::ArgumentConflict, problem)
             .exit();
@@ -80,7 +80,7 @@ pub fn parse() -> Cli {
 /// because `rad` runs `rad-<name>` from `PATH` for any subcommand it does not know. That is
 /// the command somebody reaches for when something has already gone wrong, and it should not
 /// depend on their remembering that it lives under `rad backup`.
-fn as_called<I: Iterator<Item = OsString>>(args: I) -> Invocation {
+fn invocation_as_called<I: Iterator<Item = OsString>>(args: I) -> Invocation {
     let mut argv: Vec<OsString> = args.collect();
     let called_restore = argv
         .first()
@@ -116,9 +116,9 @@ struct Invocation {
 ///
 /// Only flags given on the command line count. A `RAD_BACKUP_TIER` in the environment is
 /// there for every run, and failing `doctor` because of it would be absurd.
-fn misplaced_create_flag(matches: &ArgMatches) -> Option<String> {
+fn misplaced_create_flag_complaint(matches: &ArgMatches) -> Option<String> {
     let verb = matches.subcommand_name()?;
-    let flags = create_only();
+    let flags = create_only_flag_ids();
     let id = flags
         .iter()
         .find(|id| matches.value_source(id) == Some(ValueSource::CommandLine))?;
@@ -194,8 +194,12 @@ pub struct Global {
     pub passphrase_file: Option<PathBuf>,
 
     /// An age or ssh private key file to decrypt an archive that was encrypted to a key.
-    #[arg(long, global = true, value_name = "PATH", action = ArgAction::Append)]
-    pub identity: Vec<PathBuf>,
+    //
+    // The flag stays `--identity`, which is what age and `age-keygen` call this and what every
+    // recipe on the internet spells; the field is named for what it holds, because "identity"
+    // in every other line of this tool means the Radicle identity, which this is not.
+    #[arg(long = "identity", global = true, value_name = "PATH", action = ArgAction::Append)]
+    pub age_identity_files: Vec<PathBuf>,
 
     /// Read the passphrase for the --identity key from a file instead of asking for it.
     ///
@@ -208,12 +212,12 @@ pub struct Global {
     /// unlock, so an unattended run should offer the one key the archive was encrypted to
     /// rather than a directory of them.
     #[arg(
-        long,
+        long = "identity-passphrase-file",
         global = true,
         value_name = "PATH",
         env = "RAD_BACKUP_IDENTITY_PASSPHRASE_FILE"
     )]
-    pub identity_passphrase_file: Option<PathBuf>,
+    pub age_identity_passphrase_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -233,7 +237,7 @@ pub enum Command {
 
     /// Show what is inside an archive.
     #[command(visible_alias = "inspect")]
-    Show(Target),
+    Show(ArchiveArg),
 
     /// Delete older archives of this identity, keeping the newest few.
     Prune(Prune),
@@ -249,7 +253,7 @@ pub enum Command {
 
     /// Move this identity to another machine.
     #[command(name = "move")]
-    Migrate(Migrate),
+    Move(Migrate),
 
     /// Show what changed since the last archive was taken.
     Diff,
@@ -374,7 +378,7 @@ pub struct Schedule {
 }
 
 #[derive(Parser, Debug, Clone)]
-pub struct Target {
+pub struct ArchiveArg {
     /// The archive to read. Defaults to the newest one this tool knows about.
     #[arg(value_name = "ARCHIVE")]
     pub archive: Option<PathBuf>,
@@ -383,7 +387,7 @@ pub struct Target {
 #[derive(Parser, Debug, Clone)]
 pub struct Verify {
     #[command(flatten)]
-    pub target: Target,
+    pub target: ArchiveArg,
 
     /// Restore into a throwaway home and prove that it comes back as the same identity.
     #[arg(long)]
@@ -583,7 +587,7 @@ mod tests {
 
     #[test]
     fn started_as_rad_restore_the_program_is_already_at_the_restore_verb() {
-        let called = as_called(
+        let called = invocation_as_called(
             ["/usr/bin/rad-restore", "--yes", "archive.tar.zst.age"]
                 .into_iter()
                 .map(OsString::from),
@@ -605,7 +609,7 @@ mod tests {
         let untouched = ["/usr/bin/rad-backup", "doctor"]
             .map(OsString::from)
             .to_vec();
-        let called = as_called(untouched.clone().into_iter());
+        let called = invocation_as_called(untouched.clone().into_iter());
         assert_eq!(called.argv, untouched);
         assert_eq!(called.bin_name, None);
     }
@@ -619,7 +623,7 @@ mod tests {
             let matches = Cli::command()
                 .try_get_matches_from(argv)
                 .expect("a global flag is allowed in either position");
-            assert_eq!(misplaced_create_flag(&matches), None);
+            assert_eq!(misplaced_create_flag_complaint(&matches), None);
             let cli = Cli::from_arg_matches(&matches).expect("it parses into the struct");
             assert_eq!(cli.global.home, Some(PathBuf::from("/srv/radicle")));
         }
@@ -630,7 +634,7 @@ mod tests {
         let matches = Cli::command()
             .try_get_matches_from(["rad-backup", "--tier", "full", "doctor"])
             .expect("clap itself allows it; the rule is ours");
-        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
         assert!(complaint.contains("--tier"), "{complaint}");
         assert!(complaint.contains("doctor"), "{complaint}");
     }
@@ -646,7 +650,7 @@ mod tests {
             matches.value_source("tier"),
             Some(ValueSource::DefaultValue)
         );
-        assert_eq!(misplaced_create_flag(&matches), None);
+        assert_eq!(misplaced_create_flag_complaint(&matches), None);
     }
 
     #[test]
@@ -674,7 +678,7 @@ mod tests {
 
     #[test]
     fn the_archive_shaping_flags_are_the_ones_create_declares_and_no_others() {
-        let flags = create_only();
+        let flags = create_only_flag_ids();
 
         // Derived from `Create`, not from the top-level command: a global belongs before any
         // verb, and reporting `--home doctor` as a misplaced archive flag would be worse than
@@ -696,7 +700,7 @@ mod tests {
     #[test]
     fn a_create_flag_before_the_create_verb_is_told_where_it_belongs() {
         let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "create"]);
-        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
         // Not "`create` does not create an archive", which is what the general wording said
         // here and which is nonsense. The flag cannot simply be allowed either: the
         // subcommand's own defaulted copy is the one dispatch reads, so it would be ignored.
@@ -706,7 +710,7 @@ mod tests {
     #[test]
     fn a_flag_the_verb_itself_has_is_told_where_it_belongs_rather_than_denied() {
         let matches = Cli::command().get_matches_from(["rad-backup", "--output", "/x", "schedule"]);
-        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
         // `schedule --output` is a real flag. "`schedule` does not create one" is what the
         // general wording said, and it reads as a denial of a flag the verb documents.
         assert!(
@@ -718,7 +722,7 @@ mod tests {
     #[test]
     fn a_flag_the_verb_does_not_have_is_denied_rather_than_relocated() {
         let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "doctor"]);
-        let complaint = misplaced_create_flag(&matches).expect("it is refused");
+        let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
         assert!(
             complaint.contains("`doctor` does not create one"),
             "{complaint}"

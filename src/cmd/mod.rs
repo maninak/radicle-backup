@@ -33,15 +33,15 @@ impl Ctx {
     /// that is itself passphrase-protected.
     pub fn identities(&self) -> crate::crypt::Identities {
         crate::crypt::Identities {
-            files: self.global.identity.clone(),
-            passphrase_file: self.global.identity_passphrase_file.clone(),
+            files: self.global.age_identity_files.clone(),
+            passphrase_file: self.global.age_identity_passphrase_file.clone(),
             is_interactive: self.term.is_interactive(),
         }
     }
 
     /// The node id of the identity being worked on, for finding its archives.
-    pub fn node_id(&self) -> Result<String> {
-        self.home.require()?;
+    pub fn read_node_id(&self) -> Result<String> {
+        self.home.require_identity()?;
         Ok(crate::key::Identity::read(self.home.public_key())?.node_id())
     }
 }
@@ -51,7 +51,10 @@ impl Ctx {
 /// One place, because `restore`, `show` and `verify` each carried a verbatim copy of it, and
 /// a change to the wording or to where a passphrase may come from had to land in all three or
 /// two verbs would start asking differently from the third.
-pub fn archive_passphrase(ctx: &Ctx, archive: &Path) -> Result<Option<zeroize::Zeroizing<String>>> {
+pub fn read_archive_passphrase(
+    ctx: &Ctx,
+    archive: &Path,
+) -> Result<Option<zeroize::Zeroizing<String>>> {
     if !crate::crypt::needs_passphrase(archive)? {
         return Ok(None);
     }
@@ -64,18 +67,24 @@ pub fn archive_passphrase(ctx: &Ctx, archive: &Path) -> Result<Option<zeroize::Z
     )?))
 }
 
-/// Where this identity's archives are expected to live.
+/// Where this identity's archives are expected to live, given every source but the
+/// environment. Pure, so the precedence can be checked without setting a variable in a
+/// process the test suite shares with every other test.
 ///
 /// In order: what the caller said, then RAD_BACKUP_DIR, then wherever the last archive
 /// actually went, then the working directory. The remembered directory matters most: someone
 /// who has taken a backup once has already answered this question, and asking again by way of
 /// an empty listing is a worse answer than using what they said.
-pub fn archive_dir(given: Option<&Path>, record: Option<&crate::state::Record>) -> PathBuf {
-    if let Some(dir) = given {
+pub fn archive_dir_given(
+    flag: Option<&Path>,
+    variable: Option<PathBuf>,
+    record: Option<&crate::state::Record>,
+) -> PathBuf {
+    if let Some(dir) = flag {
         return dir.to_path_buf();
     }
-    if let Some(dir) = std::env::var_os("RAD_BACKUP_DIR") {
-        return PathBuf::from(dir);
+    if let Some(dir) = variable {
+        return dir;
     }
     if let Some(parent) = record
         .and_then(|record| record.archive.as_ref())
@@ -88,6 +97,15 @@ pub fn archive_dir(given: Option<&Path>, record: Option<&crate::state::Record>) 
     PathBuf::from(".")
 }
 
+/// The same answer, with `RAD_BACKUP_DIR` read from the environment.
+pub fn archive_dir_from_env(flag: Option<&Path>, record: Option<&crate::state::Record>) -> PathBuf {
+    archive_dir_given(
+        flag,
+        std::env::var_os("RAD_BACKUP_DIR").map(PathBuf::from),
+        record,
+    )
+}
+
 /// The archive a command was pointed at, or the newest one of this identity that can be
 /// found. Says which it chose, because a command that reads a file the user did not name has
 /// to be obvious about which file that was.
@@ -95,9 +113,9 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = given {
         return Ok(path.to_path_buf());
     }
-    let node_id = ctx.node_id()?;
+    let node_id = ctx.read_node_id()?;
     let record = crate::state::read(&crate::key::Identity::read(ctx.home.public_key())?.did())?;
-    let directory = archive_dir(None, record.record());
+    let directory = archive_dir_from_env(None, record.record());
     let found = crate::archives::newest(&directory, &node_id)?;
     let Some(archive) = found else {
         return Err(Error::refused(
@@ -143,7 +161,7 @@ impl Scratch {
         Ok(Self { path })
     }
 
-    pub fn file(&self, name: &str) -> PathBuf {
+    pub fn path_of(&self, name: &str) -> PathBuf {
         self.path.join(name)
     }
 }
@@ -169,7 +187,7 @@ impl Drop for Scratch {
 /// recovery sheet. Scanning once means an inserted value is never looked at again, so no
 /// value can name another key, whatever it holds.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let mut text = String::with_capacity(template.len());
+    let mut filled = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
@@ -179,17 +197,17 @@ pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
         let key = &after[..end];
         match values.iter().find(|(name, _)| *name == key) {
             Some((_, value)) => {
-                text.push_str(&rest[..start]);
-                text.push_str(value);
+                filled.push_str(&rest[..start]);
+                filled.push_str(value);
             }
             // An unknown marker is left as it was written. A template carrying `{{` for its
             // own reasons is not this function's business to mangle.
-            None => text.push_str(&rest[..start + 2 + end + 2]),
+            None => filled.push_str(&rest[..start + 2 + end + 2]),
         }
         rest = &after[end + 2..];
     }
-    text.push_str(rest);
-    text
+    filled.push_str(rest);
+    filled
 }
 
 /// Refuse a retention of zero, wherever it was spelled.
@@ -208,13 +226,66 @@ pub fn refuse_keep_zero(keep: usize) -> Result<()> {
 }
 
 /// A UTC timestamp for the manifest: RFC 3339, to the second.
-pub fn iso_stamp(now: jiff::Timestamp) -> String {
-    now.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
+pub fn rfc3339_stamp(at: jiff::Timestamp) -> String {
+    at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Four sources for one answer, and the order between them decides whether `ls`, `prune`
+    /// and `doctor` look where the last archive actually went or at the working directory.
+    /// Untestable while the variable was read inside the function: setting one for a test sets
+    /// it for every other test in the process.
+    #[test]
+    fn where_archives_live_prefers_the_flag_then_the_variable_then_where_the_last_one_went() {
+        let mut record = crate::state::Record {
+            did: "did:key:z6MkAAA".to_string(),
+            archive: Some("/mnt/backups/radicle-z6MkAAA-20260901T000000Z.tar.zst".to_string()),
+            created: "2026-09-01T00:00:00Z".to_string(),
+            tier: "full".to_string(),
+            repo_selection: "mine".to_string(),
+            entries: 0,
+            bytes: 0,
+            is_encrypted: true,
+            carried: Default::default(),
+            described: Default::default(),
+            sigrefs: Default::default(),
+            seeded: 0,
+            followed: 0,
+            restored: None,
+        };
+        let flag = PathBuf::from("/flag");
+        let variable = PathBuf::from("/variable");
+
+        assert_eq!(
+            archive_dir_given(Some(&flag), Some(variable.clone()), Some(&record)),
+            flag
+        );
+        assert_eq!(
+            archive_dir_given(None, Some(variable.clone()), Some(&record)),
+            variable
+        );
+        assert_eq!(
+            archive_dir_given(None, None, Some(&record)),
+            PathBuf::from("/mnt/backups")
+        );
+
+        // An archive that went to stdout, and one whose recorded path has no directory in it.
+        // Neither names a directory, so neither may stand in for one.
+        record.archive = None;
+        assert_eq!(
+            archive_dir_given(None, None, Some(&record)),
+            PathBuf::from(".")
+        );
+        record.archive = Some("radicle.tar.zst".to_string());
+        assert_eq!(
+            archive_dir_given(None, None, Some(&record)),
+            PathBuf::from(".")
+        );
+        assert_eq!(archive_dir_given(None, None, None), PathBuf::from("."));
+    }
 
     #[test]
     fn placeholders_are_replaced_and_unknown_ones_are_left_alone() {
@@ -248,7 +319,7 @@ mod tests {
             .expect("it is there")
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, crate::perms::DIR_MODE);
+        assert_eq!(mode & 0o777, crate::perms::MODE_DIR);
 
         let _ = std::fs::remove_dir_all(&parent);
     }

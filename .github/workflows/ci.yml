@@ -68,7 +68,7 @@ jobs:
             missing=1
           fi
           exit "$missing"
-      # Two naming rules, spelled out here for the same reason the audit map above is. The
+      # Three naming rules, spelled out here for the same reason the audit map above is. The
       # rationale for each is in the `names` recipe in the justfile; a rule added there has
       # to be added here too.
       - name: Names
@@ -92,9 +92,29 @@ jobs:
             found=1
           fi
           rules=$((rules + 1))
+          env_readers=$(for file in $(git ls-files 'src/*.rs' 'src/cmd/*.rs' 'src/cmd/backup/*.rs'); do
+            awk -v file="$file" '
+              /^[[:space:]]*(pub(\([a-z]+\))? )?(async )?fn [a-z_]+/ {
+                match($0, /fn [a-z_]+/)
+                name = substr($0, RSTART + 3, RLENGTH - 3)
+                signature = $0
+              }
+              /std::env::var/ {
+                if (signature ~ /Self/) next
+                if (name ~ /_from_env$/) next
+                if (name ~ /^(read|probe|ask|require)_/) next
+                printf "%s:%d: fn %s reads the environment\n", file, NR, name
+              }
+            ' "$file"
+          done)
+          if [ -n "$env_readers" ]; then
+            echo "$env_readers" | sed 's/$/, so its name has to say so (read_, probe_, ask_, require_, _from_env)/' | sed 's/^/::error::/'
+            found=1
+          fi
+          rules=$((rules + 1))
           # Zero rules run means the step stopped doing anything, not that the tree is clean.
-          if [ "$rules" -ne 2 ]; then
-            echo "::error::the name check ran $rules of its 2 rules, so it checked less than it claims"
+          if [ "$rules" -ne 3 ]; then
+            echo "::error::the name check ran $rules of its 3 rules, so it checked less than it claims"
             found=1
           fi
           exit "$found"

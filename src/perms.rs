@@ -9,31 +9,31 @@ use std::path::Path;
 use crate::error::{Error, Result};
 
 /// Make a directory readable only by its owner, before anything is written into it.
-pub fn set_owner_only(path: &Path) -> Result<()> {
-    set_mode(path, DIR_MODE)
+pub fn set_dir_owner_only(path: &Path) -> Result<()> {
+    set_mode(path, MODE_DIR)
 }
 
 /// Copy a file that may hold key material, landing it owner-only. Missing sources are not an
 /// error: an archive of one tier simply does not carry what another tier would.
-pub fn copy_owner_only(from: &Path, to: &Path) -> Result<()> {
+pub fn copy_secret(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
     }
     let bytes = zeroize::Zeroizing::new(std::fs::read(from).map_err(|e| Error::io(from, e))?);
-    replace(to, &bytes, SECRET_MODE)
+    write_atomically(to, &bytes, MODE_SECRET)
 }
 
 /// Copy a file that holds nothing secret, landing it at the mode a home `rad` built itself
 /// would have. The staging copy is owner-only because it sat beside a private key, and
 /// carrying that mode through would leave a restored home subtly unlike a native one.
-pub fn copy_plain(from: &Path, to: &Path) -> Result<()> {
+pub fn copy_doc(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
     }
     // Through the same staged replacement as a key: `config.json` half written over is a
     // home that will not start, and this runs while a restore is putting one back together.
     let bytes = std::fs::read(from).map_err(|e| Error::io(from, e))?;
-    replace(to, &bytes, DOC_MODE)
+    write_atomically(to, &bytes, MODE_DOC)
 }
 
 #[cfg(test)]
@@ -57,7 +57,7 @@ mod tests {
         // first step, which is the earliest a failure can happen.
         std::fs::create_dir(dir.join("radicle.partial")).expect("the staging name is occupied");
 
-        assert!(replace(&path, b"the identity being restored", SECRET_MODE).is_err());
+        assert!(write_atomically(&path, b"the identity being restored", MODE_SECRET).is_err());
 
         // Writing in place unlinked the target first, so any failure after that left a home
         // holding neither the old identity nor the new one.
@@ -72,7 +72,8 @@ mod tests {
     fn a_replacement_that_worked_leaves_no_staging_file_behind() {
         let dir = scratch("replace-sweeps-up");
         let path = dir.join("radicle");
-        replace(&path, b"the identity being restored", SECRET_MODE).expect("the write lands");
+        write_atomically(&path, b"the identity being restored", MODE_SECRET)
+            .expect("the write lands");
 
         assert_eq!(
             std::fs::read(&path).expect("the new content is readable"),
@@ -87,17 +88,17 @@ mod tests {
 }
 
 /// A private key, and the archives that carry one.
-pub const SECRET_MODE: u32 = 0o600;
+pub const MODE_SECRET: u32 = 0o600;
 /// A public key, a config, a manifest: what a Radicle home keeps world-readable itself.
-pub const DOC_MODE: u32 = 0o644;
+pub const MODE_DOC: u32 = 0o644;
 /// A working directory, or a home.
-pub const DIR_MODE: u32 = 0o700;
+pub const MODE_DIR: u32 = 0o700;
 
 #[cfg(unix)]
 mod platform {
     use super::{Error, Path, Result};
 
-    pub fn create_private(path: &Path) -> Result<std::fs::File> {
+    pub fn create_private_file(path: &Path) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
 
         // Unlink first, then `create_new`, because open(2) applies its mode argument ONLY when
@@ -113,7 +114,7 @@ mod platform {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(super::SECRET_MODE)
+            .mode(super::MODE_SECRET)
             .open(path)
             .map_err(|e| Error::io(path, e))
     }
@@ -122,7 +123,7 @@ mod platform {
         use std::os::unix::fs::DirBuilderExt;
 
         std::fs::DirBuilder::new()
-            .mode(super::DIR_MODE)
+            .mode(super::MODE_DIR)
             .create(path)
             .map_err(|e| Error::io(path, e))
     }
@@ -169,7 +170,7 @@ mod platform {
         });
     }
 
-    pub fn create_private(path: &Path) -> Result<std::fs::File> {
+    pub fn create_private_file(path: &Path) -> Result<std::fs::File> {
         announce(path);
         std::fs::OpenOptions::new()
             .write(true)
@@ -185,7 +186,7 @@ mod platform {
     }
 
     pub fn set_mode(path: &Path, mode: u32) -> Result<()> {
-        if mode == super::SECRET_MODE || mode == super::DIR_MODE {
+        if mode == super::MODE_SECRET || mode == super::MODE_DIR {
             announce(path);
         }
         Ok(())
@@ -211,7 +212,7 @@ mod platform {
     }
 }
 
-pub use platform::{create_private, same_device, set_mode};
+pub use platform::{create_private_file, same_device, set_mode};
 
 /// Create a directory only its owner can enter, with that mode from the moment it exists.
 ///
@@ -226,37 +227,38 @@ pub use platform::create_private_dir;
 /// before or the whole of the new content, and never a prefix of it or nothing at all.
 ///
 /// `write_owner_only` unlinks the target before creating it, which is what makes the mode
-/// argument mean anything (see `create_private`) and what makes the window dangerous: a
+/// argument mean anything (see `create_private_file`) and what makes the window dangerous: a
 /// `restore --force` over an occupied home has already destroyed the old secret key by the
 /// time the first byte of the new one is written, so a crash, a full disk or a killed run
 /// leaves a home with no identity at all. Staged beside the target and renamed over it, the
 /// same failure leaves the old file exactly as it was, because a rename within a directory is
 /// atomic. There is no corresponding fsync of the parent: a crash may lose the rename, but
 /// losing the rename means keeping the old file, which is the promise this function makes.
-pub fn replace(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let mut beside = path.as_os_str().to_os_string();
-    beside.push(".partial");
-    let beside = std::path::PathBuf::from(beside);
+pub fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let mut staging_path = path.as_os_str().to_os_string();
+    staging_path.push(".partial");
+    let staging_path = std::path::PathBuf::from(staging_path);
 
     let staged = (|| -> Result<()> {
         use std::io::Write as _;
 
         // Owner-only from its first byte whatever the final mode is, so key material is never
         // briefly readable under a name a watcher can predict.
-        let mut file = create_private(&beside)?;
-        file.write_all(bytes).map_err(|e| Error::io(&beside, e))?;
+        let mut file = create_private_file(&staging_path)?;
+        file.write_all(bytes)
+            .map_err(|e| Error::io(&staging_path, e))?;
         // Before the rename that publishes it: a rename is atomic against a crash, but only
         // over content the filesystem has been told to keep.
-        file.sync_all().map_err(|e| Error::io(&beside, e))?;
+        file.sync_all().map_err(|e| Error::io(&staging_path, e))?;
         drop(file);
-        set_mode(&beside, mode)?;
-        std::fs::rename(&beside, path).map_err(|e| Error::io(&beside, e))
+        set_mode(&staging_path, mode)?;
+        std::fs::rename(&staging_path, path).map_err(|e| Error::io(&staging_path, e))
     })();
 
     if staged.is_err() {
         // Best effort, and deliberately not reported: the error being returned is the one
         // worth reading, and a leftover staging file changes nothing about the target.
-        let _ = std::fs::remove_file(&beside);
+        let _ = std::fs::remove_file(&staging_path);
     }
     staged
 }
@@ -266,7 +268,7 @@ pub fn replace(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
 
-    let mut file = create_private(path)?;
+    let mut file = create_private_file(path)?;
     // Named, not bare: this lands private keys and archives, and "No space left on device"
     // with no path attached is the message somebody reads while trying to work out which of
     // their files did not survive.

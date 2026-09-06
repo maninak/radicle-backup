@@ -73,7 +73,7 @@ pub struct Restored {
 impl Record {
     /// The record a finished archive leaves behind. Everything here is already public: what
     /// went in, when, and where it went. Nothing that would help anyone read it.
-    pub fn of(
+    pub fn from_manifest(
         manifest: &crate::manifest::Manifest,
         archive: Option<&Path>,
         node_id: &str,
@@ -130,7 +130,7 @@ pub fn path_in(base: &Path, did: &str) -> PathBuf {
 }
 
 /// Where the record for an identity lives on this machine.
-pub fn path_for(did: &str) -> Result<PathBuf> {
+pub fn path_from_env(did: &str) -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(dir) => PathBuf::from(dir),
         None => {
@@ -181,7 +181,7 @@ impl Stored {
 }
 
 pub fn read(did: &str) -> Result<Stored> {
-    let path = path_for(did)?;
+    let path = path_from_env(did)?;
     if !path.is_file() {
         return Ok(Stored::Absent);
     }
@@ -196,7 +196,7 @@ pub fn read(did: &str) -> Result<Stored> {
 }
 
 pub fn write(record: &Record) -> Result<PathBuf> {
-    let path = path_for(&record.did)?;
+    let path = path_from_env(&record.did)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
     }

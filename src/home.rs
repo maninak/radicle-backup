@@ -71,13 +71,13 @@ impl Home {
         if let Some(home) = std::env::var_os("RAD_HOME") {
             return Ok(Self::at(PathBuf::from(home)));
         }
-        let user = std::env::var_os("HOME").ok_or_else(|| {
+        let user_home = std::env::var_os("HOME").ok_or_else(|| {
             Error::refused(
                 "cannot tell where your Radicle home is",
                 "set RAD_HOME, or pass --home <path>",
             )
         })?;
-        Ok(Self::at(PathBuf::from(user).join(".radicle")))
+        Ok(Self::at(PathBuf::from(user_home).join(".radicle")))
     }
 
     pub fn path(&self) -> &Path {
@@ -145,7 +145,7 @@ impl Home {
 
     /// The socket a running node listens on, as `rad` would find it here.
     #[cfg(unix)]
-    pub fn control_socket(&self) -> PathBuf {
+    pub fn control_socket_from_env(&self) -> PathBuf {
         self.control_socket_given(std::env::var_os("RAD_SOCKET").map(PathBuf::from))
     }
 
@@ -165,7 +165,7 @@ impl Home {
         }
     }
 
-    pub fn require(&self) -> Result<()> {
+    pub fn require_identity(&self) -> Result<()> {
         match self.holds_identity()? {
             true => Ok(()),
             false => Err(Error::NotAHome {
@@ -175,10 +175,10 @@ impl Home {
     }
 
     #[cfg(unix)]
-    pub fn node_state(&self) -> NodeState {
+    pub fn probe_node_state(&self) -> NodeState {
         use std::io::ErrorKind;
 
-        let socket = self.control_socket();
+        let socket = self.control_socket_from_env();
         match std::os::unix::net::UnixStream::connect(&socket) {
             Ok(_) => NodeState::Running,
             // The two answers that mean nothing is listening: no socket file at all, and a
@@ -197,7 +197,7 @@ impl Home {
     /// A Radicle node is a unix program: there is no control socket to connect to here, and so
     /// nothing that could be writing to storage while an archive is read.
     #[cfg(not(unix))]
-    pub fn node_state(&self) -> NodeState {
+    pub fn probe_node_state(&self) -> NodeState {
         NodeState::Stopped
     }
 
@@ -210,7 +210,7 @@ impl Home {
     /// this home could not have bound that socket, but the sentence has to name what answered.
     #[cfg(unix)]
     pub fn borrowed_socket(&self) -> Option<PathBuf> {
-        let socket = self.control_socket();
+        let socket = self.control_socket_from_env();
         (socket != self.control_socket_at()).then_some(socket)
     }
 
@@ -221,7 +221,7 @@ impl Home {
 
     /// The alias the node announces, read from `config.json` rather than from `rad self`, so
     /// that reading an archived home works without a `rad` on PATH.
-    pub fn alias(&self) -> Result<Option<String>> {
+    pub fn read_alias(&self) -> Result<Option<String>> {
         let path = self.config();
         if !path.is_file() {
             return Ok(None);
@@ -247,13 +247,13 @@ impl Home {
     /// The second half of the answer is the directories it could not read as identifiers. A
     /// caller has to say so: skipping one quietly writes an archive missing a repository and
     /// still reports success.
-    pub fn repository_ids(&self) -> Result<(Vec<String>, Vec<String>)> {
+    pub fn read_inventory(&self) -> Result<(Vec<String>, Vec<String>)> {
         let storage = self.storage();
         if !storage.is_dir() {
             return Ok((Vec::new(), Vec::new()));
         }
         let mut rids = Vec::new();
-        let mut skipped = Vec::new();
+        let mut unreadable = Vec::new();
         for entry in std::fs::read_dir(&storage).map_err(|e| Error::io(&storage, e))? {
             let entry = entry.map_err(|e| Error::io(&storage, e))?;
             if !entry.path().is_dir() {
@@ -268,14 +268,14 @@ impl Home {
                 // Skipped, and said so. Dropping it silently would write an archive missing a
                 // repository and call the run a success, which is the failure this whole tool
                 // exists to make impossible.
-                None => skipped.push(entry.file_name().to_string_lossy().into_owned()),
+                None => unreadable.push(entry.file_name().to_string_lossy().into_owned()),
             }
         }
         // Sorted, so the inventory of one home is the same list whatever order the filesystem
         // hands its entries back in.
         rids.sort();
-        skipped.sort();
-        Ok((rids, skipped))
+        unreadable.sort();
+        Ok((rids, unreadable))
     }
 
     /// The storage directory for a repository, by `rad:`-prefixed or bare identifier.
@@ -330,12 +330,12 @@ mod tests {
         std::fs::create_dir_all(home.node_dir()).expect("scratch home is creatable");
 
         // Nothing there at all, which is the ordinary shape of a machine with no node.
-        assert_eq!(home.node_state(), NodeState::Stopped);
+        assert_eq!(home.probe_node_state(), NodeState::Stopped);
 
         // Somebody listening, which is what the probe is for.
         let listening = std::os::unix::net::UnixListener::bind(home.control_socket_at())
             .expect("a scratch socket is bindable");
-        assert_eq!(home.node_state(), NodeState::Running);
+        assert_eq!(home.probe_node_state(), NodeState::Running);
 
         // The socket file a node that died leaves behind. Nothing accepts on it, and that is
         // a real answer rather than a doubt.
@@ -344,12 +344,12 @@ mod tests {
             home.control_socket_at().exists(),
             "the socket file outlives its listener"
         );
-        assert_eq!(home.node_state(), NodeState::Stopped);
+        assert_eq!(home.probe_node_state(), NodeState::Stopped);
 
         // The directory holding the socket cannot be entered, so this process cannot ask.
         let unreadable = std::fs::Permissions::from_mode(0o000);
         std::fs::set_permissions(home.node_dir(), unreadable).expect("mode is settable");
-        let state = home.node_state();
+        let state = home.probe_node_state();
         // Root and anything holding CAP_DAC_OVERRIDE walks straight through mode 000, so there
         // is nothing it could fail to ask. Probed here rather than guessed from a user name,
         // because the probe is the condition itself; an outcome-shaped guard would also skip

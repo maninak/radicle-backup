@@ -40,7 +40,7 @@ const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 /// point is not to guess a real size but to refuse the absurd before it fills a disk.
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
-pub use crate::perms::{DOC_MODE, SECRET_MODE};
+pub use crate::perms::{MODE_DOC, MODE_SECRET};
 
 pub struct Writer<'a> {
     tar: tar::Builder<zstd::Encoder<'static, Sink<'a>>>,
@@ -50,7 +50,7 @@ pub struct Writer<'a> {
 impl<'a> Writer<'a> {
     pub fn create(output: Box<dyn Write + 'a>, encryption: &Encryption) -> Result<Self> {
         let sink = Sink::new(output, encryption)?;
-        let encoder = zstd::Encoder::new(sink, COMPRESSION_LEVEL).map_err(Error::Bare)?;
+        let encoder = zstd::Encoder::new(sink, COMPRESSION_LEVEL).map_err(Error::PathlessIo)?;
         Ok(Self {
             tar: tar::Builder::new(encoder),
             entries: Vec::new(),
@@ -60,10 +60,10 @@ impl<'a> Writer<'a> {
     /// Add bytes already in memory: manifests, JSON exports, the restore instructions.
     pub fn add_bytes(&mut self, path: &str, bytes: &[u8], mode: u32) -> Result<()> {
         reject_unwritable_name(path)?;
-        let mut header = header(bytes.len() as u64, mode);
+        let mut header = entry_header(bytes.len() as u64, mode);
         self.tar
             .append_data(&mut header, path, bytes)
-            .map_err(Error::Bare)?;
+            .map_err(Error::PathlessIo)?;
         self.entries.push(Entry {
             path: path.to_string(),
             bytes: bytes.len() as u64,
@@ -86,10 +86,10 @@ impl<'a> Writer<'a> {
         let size = file.metadata().map_err(|e| Error::io(source, e))?.len();
 
         let mut reader = HashingReader::new(file);
-        let mut header = header(size, mode);
+        let mut header = entry_header(size, mode);
         self.tar
             .append_data(&mut header, path, &mut reader)
-            .map_err(Error::Bare)?;
+            .map_err(Error::PathlessIo)?;
 
         let written = reader.bytes_read();
         if written != size {
@@ -138,13 +138,13 @@ impl<'a> Writer<'a> {
                     .to_string(),
             });
         }
-        let mut header = header(json.len() as u64, DOC_MODE);
+        let mut header = entry_header(json.len() as u64, MODE_DOC);
         self.tar
             .append_data(&mut header, MANIFEST_ENTRY, json.as_slice())
-            .map_err(Error::Bare)?;
+            .map_err(Error::PathlessIo)?;
 
-        let encoder = self.tar.into_inner().map_err(Error::Bare)?;
-        let sink = encoder.finish().map_err(Error::Bare)?;
+        let encoder = self.tar.into_inner().map_err(Error::PathlessIo)?;
+        let sink = encoder.finish().map_err(Error::PathlessIo)?;
         sink.finish()
     }
 }
@@ -219,9 +219,9 @@ impl<'a> Reader<'a> {
     }
 
     /// Read the whole archive without writing anything, hashing as it goes.
-    pub fn scan(self, path: &Path) -> Result<Scan> {
-        self.walk(path, |_, reader| {
-            io::copy(reader, &mut io::sink()).map_err(Error::Bare)?;
+    pub fn scan(self, archive_path: &Path) -> Result<Scan> {
+        self.walk(archive_path, |_, reader| {
+            io::copy(reader, &mut io::sink()).map_err(Error::PathlessIo)?;
             Ok(())
         })
     }
@@ -230,43 +230,43 @@ impl<'a> Reader<'a> {
     ///
     /// Entries land in a staging directory rather than in the home being restored, so that a
     /// truncated or corrupt archive cannot leave a half-built identity behind.
-    pub fn unpack(self, path: &Path, into: &Path) -> Result<Scan> {
+    pub fn unpack(self, archive_path: &Path, into: &Path) -> Result<Scan> {
         std::fs::create_dir_all(into).map_err(|e| Error::io(into, e))?;
-        self.walk(path, |entry_path, reader| {
+        self.walk(archive_path, |entry_path, reader| {
             let destination = into.join(entry_path);
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
             }
-            let mut file = crate::perms::create_private(&destination)?;
-            io::copy(reader, &mut file).map_err(Error::Bare)?;
-            file.flush().map_err(Error::Bare)?;
+            let mut file = crate::perms::create_private_file(&destination)?;
+            io::copy(reader, &mut file).map_err(Error::PathlessIo)?;
+            file.flush().map_err(Error::PathlessIo)?;
             Ok(())
         })
     }
 
     fn walk(
         mut self,
-        path: &Path,
-        mut sink: impl FnMut(&str, &mut dyn Read) -> Result<()>,
+        archive_path: &Path,
+        mut visit: impl FnMut(&str, &mut dyn Read) -> Result<()>,
     ) -> Result<Scan> {
         let mut manifest = None;
         let mut observed = BTreeMap::new();
 
-        for entry in self.archive.entries().map_err(Error::Bare)? {
-            let mut entry = entry.map_err(Error::Bare)?;
-            let raw = entry.path().map_err(Error::Bare)?.into_owned();
+        for entry in self.archive.entries().map_err(Error::PathlessIo)? {
+            let mut entry = entry.map_err(Error::PathlessIo)?;
+            let entry_name_os = entry.path().map_err(Error::PathlessIo)?.into_owned();
             // Refused rather than lossily converted: two names differing only outside UTF-8
             // both become the same string of replacement characters, so one file would
             // silently overwrite the other and the digest check would still pass. The format
             // says entry names are ASCII paths this tool wrote, so there is nothing to lose.
-            let entry_path = raw
+            let entry_path = entry_name_os
                 .to_str()
                 .ok_or_else(|| Error::NotAnArchive {
-                    path: path.to_path_buf(),
-                    reason: format!("entry name is not valid UTF-8: {}", raw.display()),
+                    path: archive_path.to_path_buf(),
+                    reason: format!("entry name is not valid UTF-8: {}", entry_name_os.display()),
                 })?
                 .to_string();
-            reject_traversal(&entry_path, path)?;
+            reject_traversal(&entry_path, archive_path)?;
 
             // `entry.size()`, not `header().size()`: a PAX header can override the ustar
             // size field, and the override is what bounds the reader. Reading the ustar field
@@ -277,7 +277,7 @@ impl<'a> Reader<'a> {
             if entry_path == MANIFEST_ENTRY {
                 if declared > MAX_MANIFEST_BYTES {
                     return Err(Error::NotAnArchive {
-                        path: path.to_path_buf(),
+                        path: archive_path.to_path_buf(),
                         reason: format!(
                             "{MANIFEST_ENTRY} declares {declared} bytes, more than the \
                              {MAX_MANIFEST_BYTES} this reads"
@@ -285,13 +285,13 @@ impl<'a> Reader<'a> {
                     });
                 }
                 let mut json = String::new();
-                entry.read_to_string(&mut json).map_err(Error::Bare)?;
+                entry.read_to_string(&mut json).map_err(Error::PathlessIo)?;
                 // Named, because serde alone says "expected value at line 1 column 1" and
                 // nothing else, and the file somebody is holding is the whole question when
                 // an archive will not open.
                 manifest = Some(serde_json::from_str::<Manifest>(&json).map_err(|e| {
                     Error::NotAnArchive {
-                        path: path.to_path_buf(),
+                        path: archive_path.to_path_buf(),
                         reason: format!("{MANIFEST_ENTRY} is not a manifest this reads: {e}"),
                     }
                 })?);
@@ -300,7 +300,7 @@ impl<'a> Reader<'a> {
 
             if declared > MAX_ENTRY_BYTES {
                 return Err(Error::NotAnArchive {
-                    path: path.to_path_buf(),
+                    path: archive_path.to_path_buf(),
                     reason: format!(
                         "entry {entry_path} declares {declared} bytes, more than the \
                          {MAX_ENTRY_BYTES} this reads"
@@ -309,12 +309,12 @@ impl<'a> Reader<'a> {
             }
 
             let mut reader = HashingReader::new(entry);
-            sink(&entry_path, &mut reader)?;
+            visit(&entry_path, &mut reader)?;
             observed.insert(entry_path, (reader.bytes_read(), reader.digest()));
         }
 
         let manifest = manifest.ok_or_else(|| Error::NotAnArchive {
-            path: path.to_path_buf(),
+            path: archive_path.to_path_buf(),
             reason: format!("no {MANIFEST_ENTRY} inside"),
         })?;
         if manifest.format > crate::manifest::FORMAT_VERSION {
@@ -324,13 +324,13 @@ impl<'a> Reader<'a> {
             });
         }
         for repo in &manifest.repos {
-            reject_hostile_rid(&repo.rid, path)?;
+            reject_hostile_rid(&repo.rid, archive_path)?;
         }
         Ok(Scan { manifest, observed })
     }
 }
 
-fn header(size: u64, mode: u32) -> tar::Header {
+fn entry_header(size: u64, mode: u32) -> tar::Header {
     let mut header = tar::Header::new_gnu();
     header.set_size(size);
     header.set_mode(mode);
@@ -500,10 +500,10 @@ mod tests {
         let file = std::fs::File::create(path).expect("archive is creatable");
         let mut writer = Writer::create(Box::new(file), encryption).expect("writer opens");
         writer
-            .add_bytes("keys/radicle", b"pretend key material", SECRET_MODE)
+            .add_bytes("keys/radicle", b"pretend key material", MODE_SECRET)
             .expect("entry is writable");
         writer
-            .add_bytes("config.json", b"{\"node\":{}}", DOC_MODE)
+            .add_bytes("config.json", b"{\"node\":{}}", MODE_DOC)
             .expect("entry is writable");
         writer.finish(&mut manifest()).expect("archive closes");
     }
@@ -512,7 +512,7 @@ mod tests {
     fn an_archive_round_trips_and_reports_no_mismatches() {
         let dir = scratch_dir("round-trip");
         let path = dir.join("archive.tar.zst");
-        write_archive(&path, &Encryption::None);
+        write_archive(&path, &Encryption::Plaintext);
 
         let scan = Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
@@ -531,7 +531,7 @@ mod tests {
 
         let dir = scratch_dir("unpack");
         let path = dir.join("archive.tar.zst");
-        write_archive(&path, &Encryption::None);
+        write_archive(&path, &Encryption::Plaintext);
 
         let into = dir.join("staging");
         let scan = Reader::open(&path, None, &crypt::Identities::default())
@@ -549,7 +549,7 @@ mod tests {
             .expect("key is there")
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, SECRET_MODE);
+        assert_eq!(mode & 0o777, MODE_SECRET);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -558,7 +558,7 @@ mod tests {
     fn a_tampered_entry_is_reported_as_a_digest_mismatch() {
         let dir = scratch_dir("tamper");
         let path = dir.join("archive.tar.zst");
-        write_archive(&path, &Encryption::None);
+        write_archive(&path, &Encryption::Plaintext);
 
         // Rewrite the manifest's claim about one entry, which is what a corrupted archive
         // looks like from the reader's side.
@@ -609,7 +609,7 @@ mod tests {
         let mut builder = tar::Builder::new(Vec::new());
         entry(&mut builder);
 
-        let mut header = header(0, DOC_MODE);
+        let mut header = entry_header(0, MODE_DOC);
         let json = serde_json::to_vec(&manifest()).expect("a manifest serialises");
         header.set_size(json.len() as u64);
         header.set_cksum();
@@ -631,7 +631,7 @@ mod tests {
 
         let junk = b"this is not a manifest";
         let mut builder = tar::Builder::new(Vec::new());
-        let mut header = header(junk.len() as u64, DOC_MODE);
+        let mut header = entry_header(junk.len() as u64, MODE_DOC);
         builder
             .append_data(&mut header, MANIFEST_ENTRY, junk.as_slice())
             .expect("the entry appends");
@@ -692,7 +692,7 @@ mod tests {
         let json = serde_json::to_vec(&json).expect("the manifest serialises");
 
         let mut builder = tar::Builder::new(Vec::new());
-        let mut header = header(json.len() as u64, DOC_MODE);
+        let mut header = entry_header(json.len() as u64, MODE_DOC);
         builder
             .append_data(&mut header, MANIFEST_ENTRY, json.as_slice())
             .expect("the entry appends");
@@ -728,7 +728,7 @@ mod tests {
         write_hostile_archive(&path, |builder| {
             let mut header = tar::Header::new_gnu();
             header.set_size(0);
-            header.set_mode(SECRET_MODE);
+            header.set_mode(MODE_SECRET);
             header.set_entry_type(tar::EntryType::Symlink);
             header
                 .set_link_name("../outside.txt")
@@ -768,7 +768,7 @@ mod tests {
             // The tar crate refuses to write `..` through its own path API, which is exactly
             // the archive a hostile writer would not use. The name goes into the header field
             // directly, the way a handwritten tar would have it.
-            let mut header = header(6, SECRET_MODE);
+            let mut header = entry_header(6, MODE_SECRET);
             let name = b"../escaped";
             header.as_old_mut().name[..name.len()].copy_from_slice(name);
             header.set_cksum();

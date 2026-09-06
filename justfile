@@ -32,12 +32,14 @@ audit-map:
     fi
     exit "$missing"
 
-# Two naming rules a reviewer kept having to enforce by hand.
+# Three naming rules a reviewer kept having to enforce by hand.
 #
-# Neither is a matter of taste. A local called `out` next to one called `err` reads as a pair
-# when one is a process and the other a file handle, and `if record.delegate` cannot be checked
-# by eye because it could as easily mean "has a delegate". Both were found across the whole
-# tree in one sweep, so both are worth a gate rather than another sweep later.
+# None of them is a matter of taste. A local called `out` next to one called `err` reads as a
+# pair when one is a process and the other a file handle; `if record.delegate` cannot be
+# checked by eye because it could as easily mean "has a delegate"; and a function that reads
+# the environment behind a pure-sounding name cannot be tested without setting a variable in
+# the process every other test shares. All three were found across the whole tree in one
+# sweep, so all three are worth a gate rather than another sweep later.
 #
 # Shell-only, like the audit map, so it costs nothing on any of the three CI platforms. CI
 # spells this out itself, so a rule added here has to be added there too.
@@ -74,9 +76,35 @@ names:
     fi
     rules=$((rules + 1))
 
+    # A function that reads the environment under a name that sounds pure. `archive_dir` was
+    # one, and it could not be tested at all: setting a variable to check its precedence sets
+    # it for every other test in the process. A constructor is exempt, told by the `Self` in
+    # its return type, because building this program's view of its environment is what one is
+    # for and the type name already says so.
+    env_readers=$(for file in $(git ls-files 'src/*.rs' 'src/cmd/*.rs' 'src/cmd/backup/*.rs'); do
+    	awk -v file="$file" '
+    		/^[[:space:]]*(pub(\([a-z]+\))? )?(async )?fn [a-z_]+/ {
+    			match($0, /fn [a-z_]+/)
+    			name = substr($0, RSTART + 3, RLENGTH - 3)
+    			signature = $0
+    		}
+    		/std::env::var/ {
+    			if (signature ~ /Self/) next
+    			if (name ~ /_from_env$/) next
+    			if (name ~ /^(read|probe|ask|require)_/) next
+    			printf "%s:%d: fn %s reads the environment\n", file, NR, name
+    		}
+    	' "$file"
+    done)
+    if [ -n "$env_readers" ]; then
+    	echo "$env_readers" | sed 's/$/, so its name has to say so (read_, probe_, ask_, require_, _from_env)/' >&2
+    	found=1
+    fi
+    rules=$((rules + 1))
+
     # Zero rules run means the recipe stopped doing anything, not that the tree is clean.
-    if [ "$rules" -ne 2 ]; then
-    	echo "the name check ran $rules of its 2 rules, so it checked less than it claims" >&2
+    if [ "$rules" -ne 3 ]; then
+    	echo "the name check ran $rules of its 3 rules, so it checked less than it claims" >&2
     	found=1
     fi
     exit "$found"

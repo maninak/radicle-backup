@@ -26,7 +26,7 @@ pub enum Error {
     /// Without that, `Io { path, source }` above is the variant somebody has to remember, and
     /// the message that names no file is what a tired afternoon produces.
     #[error("{0}")]
-    Bare(io::Error),
+    PathlessIo(io::Error),
 
     #[error("could not run `{program}`: {source}\nis it installed and on PATH?")]
     Spawn { program: String, source: io::Error },

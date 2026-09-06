@@ -104,14 +104,14 @@ impl Git {
     ///
     /// `--all` covers `refs/*` and `HEAD`, which on a Radicle repository means every peer's
     /// namespace and their `rad/sigrefs`. Verified against real storage rather than assumed.
-    pub fn bundle(&self, git_dir: &Path, out: &Path) -> Result<()> {
+    pub fn bundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
         self.tool.output(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "bundle".as_ref(),
             "create".as_ref(),
             "--quiet".as_ref(),
-            out.as_os_str(),
+            bundle.as_os_str(),
             "--all".as_ref(),
         ])?;
         Ok(())

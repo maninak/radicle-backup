@@ -6,7 +6,7 @@
 
 use crate::archives::{self, Archive};
 use crate::cli::Ls;
-use crate::cmd::{Ctx, archive_dir};
+use crate::cmd::{Ctx, archive_dir_from_env};
 use crate::error::Result;
 use crate::key::Identity;
 use crate::state;
@@ -22,24 +22,24 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
             ),
         ));
     }
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     let identity = Identity::read(ctx.home.public_key())?;
     let stored = state::read(&identity.did())?;
     if let Some(complaint) = stored.complaint() {
         ctx.term.warn(&complaint);
     }
     let record = stored.record();
-    let directory = archive_dir(args.dir.as_deref(), record);
-    let found = archives::in_dir(&directory, &identity.node_id())?;
+    let directory = archive_dir_from_env(args.dir.as_deref(), record);
+    let present = archives::in_dir(&directory, &identity.node_id())?;
 
     if ctx.global.json {
-        let rows: Vec<serde_json::Value> = found
+        let rows: Vec<serde_json::Value> = present
             .iter()
             .map(|archive| {
                 serde_json::json!({
                     "path": archive.path.display().to_string(),
                     "bytes": archive.bytes,
-                    "taken": archive.taken.map(crate::cmd::iso_stamp),
+                    "taken": archive.taken.map(crate::cmd::rfc3339_stamp),
                     "encrypted": archive.encrypted,
                     "recorded": is_recorded(archive, record),
                 })
@@ -52,7 +52,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
         return Ok(());
     }
 
-    if found.is_empty() {
+    if present.is_empty() {
         ctx.term.headline(&format!(
             "no archive of {} in {}",
             identity.did(),
@@ -64,13 +64,13 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
 
     ctx.term.headline(&format!(
         "{} in {}",
-        term::count(found.len(), "archive", "archives"),
+        term::count(present.len(), "archive", "archives"),
         directory.display()
     ));
     ctx.term.blank();
     let now = jiff::Timestamp::now();
-    for archive in &found {
-        let when = archive
+    for archive in &present {
+        let age = archive
             .taken
             // Seconds, not `get_hours`: subtracting two timestamps gives a span whose largest
             // unit is seconds, so the hours COMPONENT of it is always 0 and every archive read
@@ -83,9 +83,9 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
             " "
         };
         ctx.term.print(&format!(
-            "{mark} {:<52} {:>9}  {when}{}",
+            "{mark} {:<52} {:>9}  {age}{}",
             archive.name(),
-            term::bytes(archive.bytes),
+            term::human_bytes(archive.bytes),
             match archive.encrypted {
                 Some(true) => "",
                 Some(false) => "  (not encrypted)",
@@ -93,7 +93,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
             }
         ))?;
     }
-    if found.iter().any(|archive| is_recorded(archive, record)) {
+    if present.iter().any(|archive| is_recorded(archive, record)) {
         ctx.term.blank();
         ctx.term
             .hint("* the one this tool last wrote and checks against");

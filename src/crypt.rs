@@ -16,13 +16,13 @@ use zeroize::Zeroizing;
 use crate::error::{Error, Result};
 
 /// Environment variable holding the archive passphrase, for cron jobs that cannot be asked.
-pub const PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
+pub const ARCHIVE_PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
 /// Environment variable `rad` itself uses for the key passphrase, honoured for the same
 /// reason: so that a scheduled run needs no is_interactive terminal.
 pub const KEY_PASSPHRASE_ENV: &str = "RAD_PASSPHRASE";
 /// Environment variable holding the passphrase that unlocks a `--identity` key file.
 ///
-/// Its own name rather than a share of `PASSPHRASE_ENV`, because the two protect different
+/// Its own name rather than a share of `ARCHIVE_PASSPHRASE_ENV`, because the two protect different
 /// things and swapping them fails silently: the archive passphrase opens the archive, this one
 /// opens the private key an archive was encrypted to. A timer that verifies its own
 /// recipient-encrypted archives needs both, and needs to say which is which.
@@ -37,19 +37,19 @@ pub enum Encryption {
     /// be encrypted to another machine or to a friend holding escrow.
     Recipients(Vec<String>),
     /// No encryption. Only ever chosen explicitly.
-    None,
+    Plaintext,
 }
 
 impl Encryption {
     pub fn is_encrypted(&self) -> bool {
-        !matches!(self, Self::None)
+        !matches!(self, Self::Plaintext)
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::Passphrase(_) => "passphrase",
             Self::Recipients(_) => "recipients",
-            Self::None => "none",
+            Self::Plaintext => "none",
         }
     }
 }
@@ -67,28 +67,28 @@ impl std::fmt::Debug for Encryption {
 /// The writing half of the container. Owns whichever layer sits directly on the output, so
 /// that finishing is a single call whatever the encryption mode is.
 pub enum Sink<'a> {
-    Plain(Box<dyn Write + 'a>),
+    Plaintext(Box<dyn Write + 'a>),
     Encrypted(Box<age::stream::StreamWriter<Box<dyn Write + 'a>>>),
 }
 
 impl<'a> Sink<'a> {
     pub fn new(output: Box<dyn Write + 'a>, encryption: &Encryption) -> Result<Self> {
         let encryptor = match encryption {
-            Encryption::None => return Ok(Self::Plain(output)),
+            Encryption::Plaintext => return Ok(Self::Plaintext(output)),
             Encryption::Passphrase(passphrase) => {
                 age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_string()))
             }
             Encryption::Recipients(specs) => {
                 let recipients = parse_recipients(specs)?;
-                let borrowed: Vec<&dyn age::Recipient> =
+                let recipient_refs: Vec<&dyn age::Recipient> =
                     recipients.iter().map(std::convert::AsRef::as_ref).collect();
-                age::Encryptor::with_recipients(borrowed.into_iter())?
+                age::Encryptor::with_recipients(recipient_refs.into_iter())?
             }
         };
         // Pathless on purpose: `output` is whatever sink the caller opened, and the failure
         // here is age setting up its own stream rather than anything about a file.
         Ok(Self::Encrypted(Box::new(
-            encryptor.wrap_output(output).map_err(Error::Bare)?,
+            encryptor.wrap_output(output).map_err(Error::PathlessIo)?,
         )))
     }
 
@@ -96,10 +96,10 @@ impl<'a> Sink<'a> {
     /// decrypt, so every writing path must end here.
     pub fn finish(self) -> Result<()> {
         match self {
-            Self::Plain(mut output) => output.flush().map_err(Error::Bare),
+            Self::Plaintext(mut output) => output.flush().map_err(Error::PathlessIo),
             Self::Encrypted(writer) => {
-                let mut output = writer.finish().map_err(Error::Bare)?;
-                output.flush().map_err(Error::Bare)
+                let mut output = writer.finish().map_err(Error::PathlessIo)?;
+                output.flush().map_err(Error::PathlessIo)
             }
         }
     }
@@ -108,14 +108,14 @@ impl<'a> Sink<'a> {
 impl Write for Sink<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
-            Self::Plain(w) => w.write(buf),
+            Self::Plaintext(w) => w.write(buf),
             Self::Encrypted(w) => w.write(buf),
         }
     }
 
     fn flush(&mut self) -> io::Result<()> {
         match self {
-            Self::Plain(w) => w.flush(),
+            Self::Plaintext(w) => w.flush(),
             Self::Encrypted(w) => w.flush(),
         }
     }
@@ -157,7 +157,7 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         let passphrase = archive_passphrase.ok_or_else(|| {
             Error::refused(
                 "this archive is passphrase-protected",
-                format!("re-run and enter the passphrase, or set {PASSPHRASE_ENV}"),
+                format!("re-run and enter the passphrase, or set {ARCHIVE_PASSPHRASE_ENV}"),
             )
         })?;
         let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
@@ -167,7 +167,7 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
             // this point every failure is that typo and nothing else. Errors from the payload
             // that follows arrive later, as io errors, and keep their own wording.
             .map_err(|_| Error::WrongPassphrase)?;
-        return Ok(Box::new(Authenticated(reader)));
+        return Ok(Box::new(AuthenticatingReader(reader)));
     }
 
     if identities.files.is_empty() {
@@ -177,7 +177,7 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         ));
     }
     let offered = OfferedKeys::read(identities)?;
-    let borrowed: Vec<&dyn age::Identity> = offered
+    let identity_refs: Vec<&dyn age::Identity> = offered
         .identities
         .iter()
         .map(std::convert::AsRef::as_ref)
@@ -187,9 +187,9 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
     // was asked for. It sent people to retype something that does not exist instead of to the
     // key file the archive was actually encrypted to.
     let reader = decryptor
-        .decrypt(borrowed.into_iter())
+        .decrypt(identity_refs.into_iter())
         .map_err(|failure| offered.explain(failure))?;
-    Ok(Box::new(Authenticated(reader)))
+    Ok(Box::new(AuthenticatingReader(reader)))
 }
 
 /// A reader that says what a failure in the encrypted payload means.
@@ -198,9 +198,9 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
 /// error", which sounds like a wrong passphrase. By the time the payload is being read the
 /// passphrase has already been proven right, so the only remaining explanation is that the
 /// bytes changed after they were written.
-struct Authenticated<R>(R);
+struct AuthenticatingReader<R>(R);
 
-impl<R: Read> Read for Authenticated<R> {
+impl<R: Read> Read for AuthenticatingReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.0.read(buffer).map_err(|e| {
             io::Error::new(
@@ -311,7 +311,7 @@ impl Protects {
     /// The environment variable a run with nobody at the terminal sets instead.
     pub fn env(self) -> &'static str {
         match self {
-            Self::Archive => PASSPHRASE_ENV,
+            Self::Archive => ARCHIVE_PASSPHRASE_ENV,
             Self::IdentityKey => IDENTITY_PASSPHRASE_ENV,
             Self::RadicleKey => KEY_PASSPHRASE_ENV,
         }
@@ -357,8 +357,9 @@ pub fn read_passphrase(
     let remedy = protects.remedy_for_empty();
     if let Some(path) = file {
         // Zeroizing before the trim, not after: the untrimmed copy holds the passphrase too.
-        let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
-        let trimmed = Zeroizing::new(text.trim_end_matches(['\n', '\r']).to_string());
+        let untrimmed =
+            Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
+        let trimmed = Zeroizing::new(untrimmed.trim_end_matches(['\n', '\r']).to_string());
         return refuse_if_empty(trimmed, &format!("{} is empty", path.display()), remedy);
     }
     if let Ok(value) = std::env::var(variable) {
@@ -383,13 +384,14 @@ pub fn read_passphrase(
     }
 
     let first = refuse_if_empty(
-        Zeroizing::new(rpassword::prompt_password(prompt).map_err(Error::Bare)?),
+        Zeroizing::new(rpassword::prompt_password(prompt).map_err(Error::PathlessIo)?),
         "nothing was typed",
         remedy,
     )?;
     if purpose == Purpose::Sealing {
-        let again =
-            Zeroizing::new(rpassword::prompt_password("Repeat passphrase: ").map_err(Error::Bare)?);
+        let again = Zeroizing::new(
+            rpassword::prompt_password("Repeat passphrase: ").map_err(Error::PathlessIo)?,
+        );
         if *first != *again {
             return Err(Error::refused(
                 "the two passphrases do not match",
@@ -861,7 +863,7 @@ mod tests {
         ))
     }
 
-    fn written(name: &str, encryption: &Encryption) -> PathBuf {
+    fn written_archive(name: &str, encryption: &Encryption) -> PathBuf {
         let path = scratch_path(name);
         let file = std::fs::File::create(&path).expect("scratch file is creatable");
         let mut sink = Sink::new(Box::new(file), encryption).expect("sink is buildable");
@@ -886,7 +888,7 @@ mod tests {
             .and_then(|identity| identity.to_openssh())
             .expect("the public half is renderable");
         let path = scratch_path(name);
-        let mut file = crate::perms::create_private(&path).expect("scratch key is creatable");
+        let mut file = crate::perms::create_private_file(&path).expect("scratch key is creatable");
         file.write_all(openssh.as_bytes())
             .expect("scratch key is writable");
         (path, recipient)
@@ -897,7 +899,7 @@ mod tests {
     /// crate that does not follow what SECURITY.md says about passphrase files.
     fn passphrase_file(name: &str, passphrase: &str) -> PathBuf {
         let path = scratch_path(name);
-        let mut file = crate::perms::create_private(&path).expect("scratch file is creatable");
+        let mut file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
         file.write_all(passphrase.as_bytes())
             .expect("scratch passphrase file is writable");
         path
@@ -942,14 +944,16 @@ mod tests {
             },
         )?;
         let mut plaintext = Vec::new();
-        reader.read_to_end(&mut plaintext).map_err(Error::Bare)?;
+        reader
+            .read_to_end(&mut plaintext)
+            .map_err(Error::PathlessIo)?;
         Ok(plaintext)
     }
 
     #[test]
     fn a_passphrase_protected_key_opens_the_archive_it_is_a_recipient_of() {
         let (key, recipient) = ssh_key_file("locked-key", 7, Some("hunter2"));
-        let archive = written("locked", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("locked", &Encryption::Recipients(vec![recipient]));
         let unlocks = passphrase_file("locked-pass", "hunter2\n");
 
         let _scratch = Scratch::keeping([key.clone(), archive.clone(), unlocks.clone()]);
@@ -965,7 +969,7 @@ mod tests {
     #[test]
     fn an_empty_identity_passphrase_file_is_refused_rather_than_offered_to_age() {
         let (key, recipient) = ssh_key_file("empty-pass-key", 13, Some("hunter2"));
-        let archive = written("empty-pass", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("empty-pass", &Encryption::Recipients(vec![recipient]));
         let empty = passphrase_file("empty-pass-file", "");
         let _scratch = Scratch::keeping([key.clone(), archive.clone(), empty.clone()]);
 
@@ -980,7 +984,7 @@ mod tests {
     #[test]
     fn a_wrong_passphrase_for_the_key_is_reported_as_that_and_not_as_a_key_that_does_not_match() {
         let (key, recipient) = ssh_key_file("wrong-pass-key", 8, Some("hunter2"));
-        let archive = written("wrong-pass", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("wrong-pass", &Encryption::Recipients(vec![recipient]));
         let unlocks = passphrase_file("wrong-pass-file", "not hunter2");
 
         let _scratch = Scratch::keeping([key.clone(), archive.clone(), unlocks.clone()]);
@@ -1005,7 +1009,7 @@ mod tests {
         // single --identity-passphrase-file has whenever two locked keys are offered.
         let (first, _) = ssh_key_file("two-first", 14, Some("hunter2"));
         let (second, recipient) = ssh_key_file("two-second", 15, Some("different"));
-        let archive = written("two", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("two", &Encryption::Recipients(vec![recipient]));
         let unlocks = passphrase_file("two-pass", "hunter2");
         let _scratch = Scratch::keeping([
             first.clone(),
@@ -1025,7 +1029,7 @@ mod tests {
     #[test]
     fn a_key_that_stayed_locked_is_named_instead_of_being_called_the_wrong_key() {
         let (key, recipient) = ssh_key_file("no-pass-key", 9, Some("hunter2"));
-        let archive = written("no-pass", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("no-pass", &Encryption::Recipients(vec![recipient]));
 
         // No passphrase file, no variable, nobody to prompt: the case a timer runs in, and the
         // one that used to report a correct key as the wrong one.
@@ -1046,7 +1050,7 @@ mod tests {
     fn an_unrelated_key_is_still_reported_as_a_key_the_archive_was_not_encrypted_to() {
         let (recipient_key, recipient) = ssh_key_file("unrelated-recipient", 10, None);
         let (other, _) = ssh_key_file("unrelated-key", 11, None);
-        let archive = written("unrelated", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("unrelated", &Encryption::Recipients(vec![recipient]));
         let _scratch = Scratch::keeping([recipient_key, other.clone(), archive.clone()]);
 
         let failure = opened_with(&archive, std::slice::from_ref(&other), None)
@@ -1070,7 +1074,7 @@ mod tests {
     #[test]
     fn a_key_age_cannot_use_is_named_as_that_rather_than_as_the_wrong_key() {
         let (recipient_key, recipient) = ssh_key_file("unsupported-recipient", 12, None);
-        let archive = written("unsupported", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("unsupported", &Encryption::Recipients(vec![recipient]));
         let key = scratch_path("unsupported-key");
         std::fs::write(&key, LEGACY_PEM_KEY).expect("scratch key is writable");
         let _scratch = Scratch::keeping([recipient_key, key.clone(), archive.clone()]);
@@ -1094,7 +1098,7 @@ mod tests {
     #[test]
     fn a_key_age_cannot_use_does_not_stop_the_key_beside_it_from_opening_the_archive() {
         let (good, recipient) = ssh_key_file("mixed-good", 16, None);
-        let archive = written("mixed", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("mixed", &Encryption::Recipients(vec![recipient]));
         let legacy = scratch_path("mixed-legacy");
         std::fs::write(&legacy, LEGACY_PEM_KEY).expect("scratch key is writable");
         let _scratch = Scratch::keeping([good.clone(), legacy.clone(), archive.clone()]);
@@ -1111,7 +1115,7 @@ mod tests {
     #[test]
     fn a_run_with_no_usable_key_at_all_says_so_instead_of_reporting_no_match() {
         let (recipient_key, recipient) = ssh_key_file("none-usable-recipient", 17, None);
-        let archive = written("none-usable", &Encryption::Recipients(vec![recipient]));
+        let archive = written_archive("none-usable", &Encryption::Recipients(vec![recipient]));
         let legacy = scratch_path("none-usable-legacy");
         std::fs::write(&legacy, LEGACY_PEM_KEY).expect("scratch key is writable");
         let _scratch = Scratch::keeping([recipient_key, legacy.clone(), archive.clone()]);
@@ -1126,7 +1130,7 @@ mod tests {
 
     #[test]
     fn only_a_passphrase_archive_is_the_one_that_asks_for_a_passphrase() {
-        let passphrase = written(
+        let passphrase = written_archive(
             "passphrase",
             &Encryption::Passphrase(Zeroizing::new("open sesame".to_string())),
         );
@@ -1136,11 +1140,11 @@ mod tests {
         // A recipient archive is opened with its private key. Asking for a passphrase here was
         // the bug: an escrow-key restore on a machine with no terminal had nothing to answer.
         let recipient = age::x25519::Identity::generate().to_public().to_string();
-        let keyed = written("recipient", &Encryption::Recipients(vec![recipient]));
+        let keyed = written_archive("recipient", &Encryption::Recipients(vec![recipient]));
         assert!(!needs_passphrase(&keyed).expect("header is readable"));
 
         // A plaintext archive holds its secret in the clear and has nothing to unlock.
-        let plain = written("plain", &Encryption::None);
+        let plain = written_archive("plain", &Encryption::Plaintext);
         assert!(!needs_passphrase(&plain).expect("header is readable"));
 
         for path in [passphrase, keyed, plain] {
@@ -1159,8 +1163,11 @@ mod tests {
     #[test]
     fn a_plaintext_sink_writes_exactly_what_it_was_given() {
         let mut buffer = Vec::new();
-        let mut sink = Sink::new(Box::new(io::Cursor::new(&mut buffer)), &Encryption::None)
-            .expect("sink is buildable");
+        let mut sink = Sink::new(
+            Box::new(io::Cursor::new(&mut buffer)),
+            &Encryption::Plaintext,
+        )
+        .expect("sink is buildable");
         sink.write_all(b"no secrets here").expect("writable");
         sink.finish().expect("sink finishes");
         assert_eq!(buffer, b"no secrets here");

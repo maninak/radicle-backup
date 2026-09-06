@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::archives::sidecar_path;
 use crate::cli::Create;
-use crate::cmd::{Ctx, Scratch, fill, iso_stamp};
-use crate::container::{DOC_MODE, SECRET_MODE, Writer};
+use crate::cmd::{Ctx, Scratch, fill, rfc3339_stamp};
+use crate::container::{MODE_DOC, MODE_SECRET, Writer};
 use crate::crypt::{self, Encryption};
 use crate::db;
 use crate::error::{Error, Result};
@@ -29,7 +29,7 @@ use crate::term;
 mod destination;
 mod node;
 
-use destination::choose;
+use destination::prepare;
 use node::quiesce;
 
 const RESTORE_DOC: &str = include_str!("../../../assets/RESTORE.md");
@@ -87,7 +87,7 @@ impl Purpose {
 }
 
 pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
-    ctx.home.require()?;
+    ctx.home.require_identity()?;
     let home = &ctx.home;
     let term = &ctx.term;
 
@@ -123,7 +123,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     // had stopped it for nothing. A dry run writes no archive, so it is never asked.
     let encryption = match args.dry_run {
         true => None,
-        false => Some(encryption_for(ctx, args)?),
+        false => Some(ask_encryption(ctx, args)?),
     };
 
     let mut warnings = Vec::new();
@@ -131,8 +131,8 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
 
     term.step("reading policies and inventory");
     let policies = db::read_policies(&home.policies_db())?;
-    let routing = db::routing_counts(&home.node_db(), &node_id)?;
-    let aliases = db::alias_book(&home.node_db())?;
+    let routing = db::read_routing_counts(&home.node_db(), &node_id)?;
+    let aliases = db::read_alias_book(&home.node_db())?;
     let inventory = inventory::collect(
         home,
         &git,
@@ -158,10 +158,10 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
 
     let encryption = encryption.expect("a run that is not a dry run has returned by now");
     let now = jiff::Timestamp::now();
-    let destination = choose(
+    let destination = prepare(
         args,
         &identity,
-        home.alias()?.as_deref(),
+        home.read_alias()?.as_deref(),
         &now,
         &encryption,
         std::io::stdout().is_terminal(),
@@ -178,19 +178,19 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     let mut manifest = Manifest {
         format: manifest::FORMAT_VERSION,
         tool: ToolInfo::default(),
-        created: iso_stamp(now),
+        created: rfc3339_stamp(now),
         tier,
         repo_selection: selection,
         identity: IdentityInfo {
             did: identity.did(),
             node_id: node_id.clone(),
-            alias: home.alias()?,
+            alias: home.read_alias()?,
             public_key: identity.to_openssh()?,
             fingerprint: identity.fingerprint(),
             key_is_encrypted: secret.protection().is_encrypted(),
         },
         source: SourceInfo {
-            host: hostname(),
+            host: read_hostname(),
             rad_home: home.path().display().to_string(),
             rad_version: rad.as_ref().and_then(|rad| rad.version().ok()),
             git_version: git.version().ok(),
@@ -203,7 +203,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
             was_stopped_by_backup: node.was_stopped_by_backup,
         },
         entries: Vec::new(),
-        repos: inventory.described.clone(),
+        repos: inventory.records.clone(),
         policies: PolicySummary {
             seeded: policies.seeded().count(),
             blocked_repos: policies.blocked_repos().count(),
@@ -217,10 +217,10 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     let mut writer = Writer::create(output, &encryption)?;
 
     term.step("archiving the identity");
-    writer.add_file("keys/radicle", &home.secret_key(), SECRET_MODE)?;
-    writer.add_file("keys/radicle.pub", &home.public_key(), DOC_MODE)?;
+    writer.add_file("keys/radicle", &home.secret_key(), MODE_SECRET)?;
+    writer.add_file("keys/radicle.pub", &home.public_key(), MODE_DOC)?;
     if home.config().is_file() {
-        writer.add_file("config.json", &home.config(), DOC_MODE)?;
+        writer.add_file("config.json", &home.config(), MODE_DOC)?;
     } else {
         warnings.push("there is no config.json in this home".to_string());
     }
@@ -230,12 +230,12 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         writer.add_bytes(
             "policies.json",
             &serde_json::to_vec_pretty(&policies)?,
-            DOC_MODE,
+            MODE_DOC,
         )?;
         writer.add_bytes(
             "aliases.json",
             &serde_json::to_vec_pretty(&aliases)?,
-            DOC_MODE,
+            MODE_DOC,
         )?;
         snapshot_into(
             &mut writer,
@@ -285,7 +285,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     writer.add_bytes(
         manifest::RESTORE_DOC_ENTRY,
         restore_doc.as_bytes(),
-        DOC_MODE,
+        MODE_DOC,
     )?;
     writer.add_bytes(
         manifest::RESTORE_SCRIPT_ENTRY,
@@ -350,7 +350,7 @@ fn dry_run(
     let mut total = 0;
     let mut unreadable = 0;
     let mut selected = Vec::new();
-    for record in &inventory.described {
+    for record in &inventory.records {
         if !inventory.selected.contains(&record.rid) {
             continue;
         }
@@ -396,7 +396,7 @@ fn dry_run(
         term.print(&format!(
             "  {:<40} {:>9}{}",
             record.display_name(),
-            term::bytes(*bytes),
+            term::human_bytes(*bytes),
             if record.is_private() { "  private" } else { "" }
         ))?;
     }
@@ -407,7 +407,7 @@ fn dry_run(
     term.ok(&format!(
         "{} selected, about {} of git storage before compression",
         term::count(inventory.selected.len(), "repository", "repositories"),
-        term::bytes(total)
+        term::human_bytes(total)
     ));
     // The estimate is meant to run high, so a part of storage nobody could measure has to be
     // said out loud: silently, it is the one thing that makes the number run low.
@@ -473,7 +473,7 @@ fn remember(
     node_id: &str,
     encryption: &Encryption,
 ) {
-    let record = state::Record::of(manifest, path, node_id, encryption.is_encrypted());
+    let record = state::Record::from_manifest(manifest, path, node_id, encryption.is_encrypted());
     if let Err(e) = state::write(&record) {
         ctx.term.warn(&format!(
             "the archive is written, but this tool could not remember it: {e}"
@@ -481,11 +481,11 @@ fn remember(
     }
 }
 
-fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
+fn ask_encryption(ctx: &Ctx, args: &Create) -> Result<Encryption> {
     if args.plaintext {
         ctx.term
             .warn("--plaintext: this archive will hold your private key unencrypted");
-        return Ok(Encryption::None);
+        return Ok(Encryption::Plaintext);
     }
     if !args.recipient.is_empty() {
         return Ok(Encryption::Recipients(args.recipient.clone()));
@@ -508,9 +508,9 @@ fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "database.db".to_string());
-    let copy = scratch.file(&name);
+    let copy = scratch.path_of(&name);
     db::snapshot(source, &copy)?;
-    writer.add_file(entry, &copy, SECRET_MODE)?;
+    writer.add_file(entry, &copy, MODE_SECRET)?;
     std::fs::remove_file(&copy).map_err(|e| Error::io(&copy, e))?;
     Ok(())
 }
@@ -548,7 +548,7 @@ fn archive_repositories(
     ));
 
     let mut archived = 0;
-    let mut failed = Vec::new();
+    let mut bundle_failures = Vec::new();
     // Where each record sits, looked up once. Finding it by scanning the whole vec per
     // bundle is a scan per repository, and a seed archiving thousands of them pays for that
     // twice over: once here and once in whatever reads the result.
@@ -560,28 +560,28 @@ fn archive_repositories(
         .collect();
 
     for rid in &inventory.selected {
-        let repo = ctx.home.repository_path(rid);
-        let bundle = scratch.file("repository.bundle");
+        let repo_path = ctx.home.repository_path(rid);
+        let bundle = scratch.path_of("repository.bundle");
         // One broken repository does not cost the user every other one. A `fatal: bad object`
         // out of `git bundle create` used to abort the whole run, so a home with a single
         // damaged repository could not be backed up at all, which is the opposite of what a
         // backup tool is for. The failure is named, carried into the manifest, and reflected
         // in the exit code, so it can be neither missed nor mistaken for success.
-        if let Err(error) = git.bundle(&repo, &bundle) {
+        if let Err(error) = git.bundle(&repo_path, &bundle) {
             ctx.term
                 .fail(&format!("{}: {error}", inventory.display_name(rid)));
-            failed.push(format!("{rid} could not be bundled: {error}"));
+            bundle_failures.push(format!("{rid} could not be bundled: {error}"));
             let _ = std::fs::remove_file(&bundle);
             continue;
         }
 
         let entry = git::bundle_entry(rid);
-        let stored = writer.add_file(&entry, &bundle, SECRET_MODE)?;
+        let stored = writer.add_file(&entry, &bundle, MODE_SECRET)?;
         std::fs::remove_file(&bundle).map_err(|e| Error::io(&bundle, e))?;
 
-        let config = repo.join("config");
+        let config = repo_path.join("config");
         if config.is_file() {
-            writer.add_file(&git::config_entry(rid), &config, DOC_MODE)?;
+            writer.add_file(&git::config_entry(rid), &config, MODE_DOC)?;
         }
 
         if let Some(record) = by_rid.get(rid).and_then(|at| manifest.repos.get_mut(*at)) {
@@ -593,17 +593,17 @@ fn archive_repositories(
     // Into the run's own vec, NOT `manifest.warnings`: `run` assigns that field wholesale
     // just before `finish`, so anything put there here was dropped on the floor and the
     // archive recorded nothing about the repositories it had lost.
-    warnings.extend(failed.iter().cloned());
-    if !failed.is_empty() {
+    warnings.extend(bundle_failures.iter().cloned());
+    if !bundle_failures.is_empty() {
         ctx.term.warn(&format!(
             "{} of {} selected repositories could not be bundled and are NOT in this archive",
-            failed.len(),
+            bundle_failures.len(),
             inventory.selected.len()
         ));
     }
     Ok(Bundled {
         archived,
-        dropped: failed.len(),
+        dropped: bundle_failures.len(),
     })
 }
 
@@ -618,7 +618,7 @@ fn archive_repositories(
 /// twice and the part a test can hold still.
 fn opening_lines(encryption: &Encryption, file_name: &str) -> (String, String) {
     match encryption {
-        Encryption::None => (
+        Encryption::Plaintext => (
             format!("zstd -dc {file_name} | tar -x"),
             "This archive is not encrypted. Whoever holds the file holds the key inside it."
                 .to_string(),
@@ -665,7 +665,7 @@ fn write_sidecar(
         manifest.tier.as_str(),
         manifest.entries.len(),
         term::count(archived, "repository", "repositories"),
-        term::bytes(manifest.total_bytes())
+        term::human_bytes(manifest.total_bytes())
     );
     let text = fill(
         SIDECAR,
@@ -737,7 +737,7 @@ fn report(
         manifest.identity.alias.as_deref().unwrap_or("unnamed"),
         manifest.identity.did,
         manifest.entries.len(),
-        term::bytes(manifest.total_bytes())
+        term::human_bytes(manifest.total_bytes())
     ));
     term.hint(&format!(
         "tier {}, repositories {} ({archived} carried), policies {} seeded / {} followed",
@@ -754,7 +754,7 @@ fn report(
     // owner may have allowed a peer to hold it, and a peer that holds it can hand it back.
     //
     // Judged on what REACHED the archive, not on what was selected for it.
-    // `inventory.described`
+    // `inventory.records`
     // never has its `bundle` set (that field is filled on `manifest.repos`, a different
     // collection), so the old first clause was a constant true, and a repository whose bundle
     // failed stayed in `selected` and was therefore counted as carried. The one repository
@@ -791,7 +791,7 @@ fn report(
     Ok(())
 }
 
-fn hostname() -> Option<String> {
+fn read_hostname() -> Option<String> {
     std::fs::read_to_string("/etc/hostname")
         .ok()
         .map(|name| name.trim().to_string())
@@ -877,7 +877,7 @@ mod tests {
         let keyed = Encryption::Recipients(vec![
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample backup@laptop".to_string(),
         ]);
-        for encryption in [Encryption::None, sealed, keyed] {
+        for encryption in [Encryption::Plaintext, sealed, keyed] {
             let (manual, _) = opening_lines(&encryption, "alice-z6MkAAA-20260901T000000Z.tar.zst");
             for redirect in ['<', '>'] {
                 assert!(
