@@ -13,6 +13,20 @@ use crate::key::Identity;
 use crate::state;
 use crate::term;
 
+/// The failure to remove the note beside an archive, if there is one to report.
+///
+/// The note describes an archive that is no longer there, so it goes with it. Missing is the
+/// ordinary case, because most archives never had one. Anything else leaves a note standing
+/// over a deletion, which is the one state a reader of that directory is misled by, so it is
+/// said out loud rather than swallowed.
+fn unremoved_sidecar(path: &std::path::Path) -> Option<std::io::Error> {
+    match std::fs::remove_file(path) {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(e),
+    }
+}
+
 pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     ctx.home.require_identity()?;
     refuse_keep_zero(args.keep)?;
@@ -65,8 +79,11 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     }
     for archive in &doomed {
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
-        // The note beside an archive describes an archive that is no longer there.
-        let _ = std::fs::remove_file(sidecar_path(&archive.path));
+        let sidecar = sidecar_path(&archive.path);
+        if let Some(e) = unremoved_sidecar(&sidecar) {
+            ctx.term
+                .warn(&format!("{} could not be removed: {e}", sidecar.display()));
+        }
     }
     ctx.term.ok(&format!(
         "deleted {}, freeing {}",
@@ -74,4 +91,29 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         term::human_bytes(freed)
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unremoved_sidecar;
+    use crate::cmd::Scratch;
+
+    /// A note that is simply not there is the ordinary case and says nothing. A note that is
+    /// there and would not go is a note left standing over a deleted archive, and `prune` used
+    /// to drop that error on the floor, so the directory kept a description of something it no
+    /// longer held and nobody was told why.
+    #[test]
+    fn a_note_that_would_not_go_is_reported_and_one_that_was_never_there_is_not() {
+        let scratch = Scratch::create(std::env::temp_dir().as_path()).expect("a directory");
+
+        assert!(unremoved_sidecar(&scratch.path_of("absent.txt")).is_none());
+
+        // A directory where the note should be: `remove_file` refuses it for a reason that is
+        // not `NotFound`, which is the whole class this guards, without needing a mode change
+        // that a root-run test would not feel.
+        let occupied = scratch.path_of("occupied.txt");
+        std::fs::create_dir(&occupied).expect("a directory in the scratch");
+        let reported = unremoved_sidecar(&occupied).expect("it is reported");
+        assert_ne!(reported.kind(), std::io::ErrorKind::NotFound);
+    }
 }

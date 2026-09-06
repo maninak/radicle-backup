@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 /// Environment variable holding the archive passphrase, for cron jobs that cannot be asked.
 pub const ARCHIVE_PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
 /// Environment variable `rad` itself uses for the key passphrase, honoured for the same
-/// reason: so that a scheduled run needs no is_interactive terminal.
+/// reason: so that a scheduled run needs no terminal to answer on.
 pub const KEY_PASSPHRASE_ENV: &str = "RAD_PASSPHRASE";
 /// Environment variable holding the passphrase that unlocks a `--identity` key file.
 ///
@@ -266,7 +266,7 @@ pub enum Purpose {
     Opening,
 }
 
-/// Which of the three secrets a passphrase protects.
+/// Which secret a passphrase protects.
 ///
 /// They lock different things, and confusing two of them fails quietly: a scheduled run reaches
 /// for the wrong environment variable, finds nothing, and asks a person who is not there.
@@ -289,10 +289,10 @@ impl Protects {
     /// all of them by walking rather than by listing names it has to remember to extend.
     ///
     /// Walked through `after` rather than read out of an array, because an array is not
-    /// something the compiler can check for completeness: a fourth variant would leave a
-    /// three-element `ALL`, the scrubbing loop, and every test that iterates it all green
-    /// while a fourth secret leaked into every child process. `after` is a `match` with no
-    /// wildcard, so the same variant stops the build until somebody says where it goes.
+    /// something the compiler can check for completeness: a new variant would leave a short
+    /// `ALL`, the scrubbing loop, and every test that iterates it all green while the new
+    /// secret leaked into every child process. `after` is a `match` with no wildcard, so the
+    /// same variant stops the build until somebody says where it goes.
     pub fn all() -> impl Iterator<Item = Self> {
         std::iter::successors(Some(Self::Archive), |current| current.after())
     }
@@ -402,7 +402,7 @@ pub fn read_passphrase(
     Ok(first)
 }
 
-/// Refuse an empty passphrase whichever of the three sources it came from.
+/// Refuse an empty passphrase whichever source it came from.
 ///
 /// age accepts one and encrypts to it, so an empty passphrase produces a file that says
 /// `.age`, reports as encrypted everywhere, and opens for anyone who presses Enter.
@@ -519,10 +519,11 @@ impl OfferedKeys {
             // Not "the passphrase was wrong", however much it looks like it. age returns this
             // both for a passphrase that did not decrypt the key and for one that DID, over a
             // key whose inner type age cannot use: an encrypted ecdsa or `sk-ssh-*` key parses
-            // as merely encrypted, because the envelope carries only the cipher, so the check
-            // above cannot see it. age also stops at the first key that fails, so the keys
-            // after it were never tried. Blaming the passphrase alone had someone retyping a
-            // correct secret while the key that opens the archive sat unread beside it.
+            // as merely encrypted, because the envelope carries only the cipher, so the
+            // `Unsupported` check in `read` cannot see it. age also stops at the first key that
+            // fails, so the keys after it were never tried. Blaming the passphrase alone had
+            // someone retyping a correct secret while the key that opens the archive sat unread
+            // beside it.
             age::DecryptError::KeyDecryptionFailed => {
                 let culprit = self.passphrases.last_answered();
                 let named = culprit
@@ -1030,6 +1031,7 @@ mod tests {
     fn a_key_that_stayed_locked_is_named_instead_of_being_called_the_wrong_key() {
         let (key, recipient) = ssh_key_file("no-pass-key", 9, Some("hunter2"));
         let archive = written_archive("no-pass", &Encryption::Recipients(vec![recipient]));
+        let _scratch = Scratch::keeping([key.clone(), archive.clone()]);
 
         // No passphrase file, no variable, nobody to prompt: the case a timer runs in, and the
         // one that used to report a correct key as the wrong one.
@@ -1041,9 +1043,6 @@ mod tests {
         assert!(said.contains(&key.display().to_string()), "{said}");
         assert!(said.contains(IDENTITY_PASSPHRASE_ENV), "{said}");
         assert!(!said.contains("none of the identities"), "{said}");
-        for path in [key, archive] {
-            let _ = std::fs::remove_file(path);
-        }
     }
 
     #[test]
@@ -1085,8 +1084,8 @@ mod tests {
         let said = failure.one_line();
         assert!(said.contains(&key.display().to_string()), "{said}");
         assert!(!said.contains("none of the identities"), "{said}");
-        // In this tool's words, not age's: age writes a four-line block with a rule through it
-        // that recommends `rage`, which is not the program the reader just ran.
+        // In this tool's words, not age's: age writes a multi-line block with a rule through
+        // it that recommends `rage`, which is not the program the reader just ran.
         assert!(!said.contains("rage"), "{said}");
     }
 
@@ -1134,6 +1133,7 @@ mod tests {
             "passphrase",
             &Encryption::Passphrase(Zeroizing::new("open sesame".to_string())),
         );
+        let _passphrase_scratch = Scratch::keeping([passphrase.clone()]);
         // The one case that must ask, and the only one.
         assert!(needs_passphrase(&passphrase).expect("header is readable"));
 
@@ -1141,15 +1141,13 @@ mod tests {
         // the bug: an escrow-key restore on a machine with no terminal had nothing to answer.
         let recipient = age::x25519::Identity::generate().to_public().to_string();
         let keyed = written_archive("recipient", &Encryption::Recipients(vec![recipient]));
+        let _keyed_scratch = Scratch::keeping([keyed.clone()]);
         assert!(!needs_passphrase(&keyed).expect("header is readable"));
 
         // A plaintext archive holds its secret in the clear and has nothing to unlock.
         let plain = written_archive("plain", &Encryption::Plaintext);
+        let _plain_scratch = Scratch::keeping([plain.clone()]);
         assert!(!needs_passphrase(&plain).expect("header is readable"));
-
-        for path in [passphrase, keyed, plain] {
-            let _ = std::fs::remove_file(path);
-        }
     }
 
     #[test]

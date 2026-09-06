@@ -36,6 +36,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - An archive taken while the control socket could not be reached now says so, rather than recording that a node was running as though it had been seen. The far end says "could not tell" instead of telling somebody their identity is being double-signed, and `--stop-node` names the socket it could not ask instead of blaming the node for not stopping.
 - An archive that could not be read is no longer reported as unencrypted. Only a file too short to hold an age header answers that question; an unreadable one now says so.
 - A refusal about a running node names the socket when `RAD_SOCKET` chose it. Restoring into `--home /tmp/other` with one exported for your main node said "the node is running against the home being restored into", about a node serving a different home entirely.
+- The warning a restore prints about a node it could not ask no longer has a hole punched through the middle of it. A line continuation was missing from the message, so twenty-two spaces were printed inside the sentence.
+- `prune` now says when the note beside an archive would not go. The archive was deleted and the note describing it stayed, and the error saying why was dropped, so the directory kept a description of something it no longer held and nobody was told.
+- `prune --dir` and `doctor --dir` now say in `--help` and in `man rad-backup` that they read `RAD_BACKUP_DIR`. They always did, but only `ls --dir` was documented as doing so, so a reader of the other two entries concluded the variable was ignored there.
 
 ### Changed
 

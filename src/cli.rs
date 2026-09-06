@@ -36,9 +36,9 @@ pub struct Cli {
 /// The flags that shape an archive, and so mean nothing to any other verb.
 ///
 /// Asked of clap rather than written out. It was a fixed-length array kept by hand, so every
-/// new `create` flag had to be remembered in a second place, and one that was not simply
-/// stopped being recognised here: the flag was accepted before the verb, quietly ignored, and
-/// nobody was told where it belonged.
+/// new `create` flag had to be remembered in a second place, and one that was not stopped
+/// being recognised here: the flag was accepted before the verb, quietly ignored, and nobody
+/// was told where it belonged.
 fn create_only_flag_ids() -> Vec<String> {
     use clap::CommandFactory as _;
 
@@ -333,7 +333,7 @@ pub struct Prune {
     pub keep: usize,
 
     /// Where to prune. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
-    #[arg(long, short = 'd', value_name = "PATH")]
+    #[arg(long, short = 'd', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub dir: Option<PathBuf>,
 
     /// List what would be deleted, and delete nothing.
@@ -359,8 +359,8 @@ pub struct Schedule {
     /// Encrypt the scheduled archives to an age or ssh public key instead of to a
     /// passphrase. Repeatable.
     ///
-    /// The reason a timer can exist without a passphrase file at all: nothing has to be
-    /// unlocked to write to a recipient, so an unattended run has nothing to be asked for.
+    /// Nothing has to be unlocked to write to a recipient, so a timer set up this way needs
+    /// no passphrase file and an unattended run has nothing to be asked for.
     #[arg(long, value_name = "KEY", action = ArgAction::Append)]
     pub recipient: Vec<String>,
 
@@ -432,18 +432,24 @@ pub struct Doctor {
     /// `--backup-dir` still works: it was this flag's only name until the checks started
     /// reading the archive itself, and a script that schedules `doctor` should not break for
     /// having been written first.
-    #[arg(long, short = 'd', alias = "backup-dir", value_name = "PATH")]
+    #[arg(
+        long,
+        short = 'd',
+        alias = "backup-dir",
+        value_name = "PATH",
+        env = "RAD_BACKUP_DIR"
+    )]
     pub dir: Option<PathBuf>,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Paper {
-    /// Where to write the sheet. Defaults to stdout.
-    ///
-    /// Deliberately not read from `RAD_BACKUP_DIR`, unlike the other `--output` here: that
-    /// variable names a directory to keep archives in, and honouring it here wrote the sheet
-    /// to a file named after somebody's archive directory, skipping the refusal that keeps a
-    /// key off a terminal because stdout was no longer the destination.
+    /// Where to write the sheet. Defaults to stdout. RAD_BACKUP_DIR is not consulted.
+    //
+    // Not read from `RAD_BACKUP_DIR`, unlike the other `--output` flags: that variable names a
+    // directory to keep archives in, and honouring it here wrote the sheet to a file named
+    // after somebody's archive directory, skipping the refusal that keeps a key off a terminal
+    // because stdout was no longer the destination.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
 
@@ -539,11 +545,11 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// clap_mangen renders these only with its `env` feature, which 0.3 introduced and
-    /// defaults off. Without it the man page loses every `RAD_BACKUP_*` line and says nothing
-    /// about it, so the loss is invisible until somebody reads `man rad-backup` looking for
-    /// the variable. The list is walked off the command rather than written out here, so a
-    /// new `env = ` argument is covered from the moment it is added.
+    /// clap_mangen renders these only with its `env` feature, which is off by default. Without
+    /// it the man page loses every `RAD_BACKUP_*` line and says nothing about it, so the loss
+    /// is invisible until somebody reads `man rad-backup` looking for the variable. The list
+    /// is walked off the command rather than written out here, so a new `env = ` argument is
+    /// covered from the moment it is added.
     #[test]
     fn every_option_that_reads_an_environment_variable_says_so_in_the_man_page() {
         let command = Cli::command();
@@ -568,6 +574,60 @@ mod tests {
         assert!(
             man.matches("environment variable").count() >= variables.len(),
             "the man page names fewer environment variables than the command reads"
+        );
+    }
+
+    /// A flag whose help names a `RAD_BACKUP_*` variable has to declare one, so that `--help`
+    /// and the man page say which flags read the environment.
+    ///
+    /// `prune --dir` and `doctor --dir` both promised `RAD_BACKUP_DIR` in their help while
+    /// declaring no `env` at all. They honoured it anyway, because the command reads the
+    /// variable itself when the flag is absent, so the behaviour was right and only the
+    /// documentation was wrong: `man rad-backup` listed the variable under `ls --dir` and not
+    /// under theirs, so a reader of the prune entry concluded it was not honoured there.
+    ///
+    /// Which variable is not asserted, because a help text may name one it does not read:
+    /// `--passphrase-file` describes the whole precedence chain, `RAD_BACKUP_PASSPHRASE`
+    /// included, while reading only `RAD_BACKUP_PASSPHRASE_FILE`.
+    ///
+    /// Walks the subcommands too, unlike the man-page test above, which sees only the global
+    /// arguments.
+    #[test]
+    fn every_flag_that_names_an_environment_variable_declares_one() {
+        fn walk(command: &clap::Command, checked: &mut usize) {
+            for arg in command.get_arguments() {
+                let help = format!(
+                    "{} {}",
+                    arg.get_help()
+                        .map(|help| help.to_string())
+                        .unwrap_or_default(),
+                    arg.get_long_help()
+                        .map(|help| help.to_string())
+                        .unwrap_or_default()
+                );
+                // The one flag that names the variable in order to say it is not consulted.
+                if !help.contains("RAD_BACKUP_") || help.contains("not consulted") {
+                    continue;
+                }
+                assert!(
+                    arg.get_env().is_some(),
+                    "`{} --{}` names a RAD_BACKUP_ variable in its help but declares no `env`, \
+                     so neither --help nor the man page says it reads one",
+                    command.get_name(),
+                    arg.get_id()
+                );
+                *checked += 1;
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, checked);
+            }
+        }
+
+        let mut checked = 0;
+        walk(&Cli::command(), &mut checked);
+        assert!(
+            checked > 0,
+            "no help text names a RAD_BACKUP_ variable, so this test guards nothing"
         );
     }
 
@@ -702,7 +762,7 @@ mod tests {
         let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "create"]);
         let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
         // Not "`create` does not create an archive", which is what the general wording said
-        // here and which is nonsense. The flag cannot simply be allowed either: the
+        // here and which is nonsense. The flag cannot be allowed through either: the
         // subcommand's own defaulted copy is the one dispatch reads, so it would be ignored.
         assert!(complaint.contains("belongs after `create`"), "{complaint}");
     }

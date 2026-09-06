@@ -44,9 +44,9 @@ pub enum Standing {
     NothingToCompare,
     /// The network could not be asked, so what it holds is unknown. A later fetch may answer.
     ///
-    /// Apart from `NothingToCompare` because the two owe the reader different things. Folded
-    /// together, a home with three private repositories was told "3 of 3 could not be compared"
-    /// and sent to run `rad sync <rid> --fetch`, which fails every time by design.
+    /// Kept apart from `NothingToCompare` because the two owe the reader different advice.
+    /// Folded together, a home of only private repositories was told every one "could not be
+    /// compared" and sent to run `rad sync <rid> --fetch`, which fails for those by design.
     CouldNotAsk,
 }
 
@@ -250,9 +250,9 @@ fn read_did_at(path: &Path) -> Option<String> {
 ///
 /// `--force` used to overwrite a live private key with no comparison and no way back, so
 /// pointing it at the wrong archive ended an identity permanently and said `installed the
-/// identity`. Three things change that: replacing an identity that is not the archive's own
-/// has to be confirmed by name, the displaced key is renamed rather than replaced, and a note
-/// is left beside it saying what it is, the way `migrate` does.
+/// identity`. Now replacing an identity that is not the archive's own has to be confirmed by
+/// name, the displaced key is renamed rather than replaced, and a note is left beside it
+/// saying what it is, the way `migrate` does.
 ///
 /// Fails CLOSED. A home whose public key is missing or unreadable cannot be shown to hold the
 /// same identity as the archive, so it is treated as a different one and confirmed for. The
@@ -570,15 +570,16 @@ fn reconcile(
             .detail("run `rad sync <rid> --fetch` for each repository before you write to it");
         return Ok(standings);
     }
-    // The node has to be started here, and this is the only place it can be. Installing over a
-    // live home corrupts both, so restore refuses to begin while the node runs; comparing with
-    // the network needs a node to ask. Held together, those two rules made this check
-    // unreachable: it warned and returned on every single restore, while the README sold the
-    // comparison as the thing that stops you forking your own peer history. So the node is
-    // started once the identity is safely in place, and put back the way it was found.
+    // The node is started here, and this is the only place it can be. Installing over a live
+    // home corrupts both, so restore refuses to begin while the node runs; comparing with the
+    // network needs a node to ask. Held together, those two rules made this check unreachable:
+    // it warned and returned on every restore, while the README sold the comparison as the
+    // thing that stops the user forking their own peer history. So the node is started once
+    // the identity is safely in place, and put back the way it was found.
+    //
     // Started only when the node is known to be down. A doubt here means `rad node start`
-    // would be aimed at a home something else may already be serving, and starting a second
-    // node on one key is the fork the whole comparison exists to prevent.
+    // would be aimed at a home something else may already be serving, and a second node on one
+    // key is the fork the whole comparison exists to prevent.
     let started_here = if !ctx.home.probe_node_state().is_stopped() {
         false
     } else {
@@ -912,10 +913,12 @@ fn report(
                 // Said as a possibility, because that is what it is: the run that wrote this
                 // archive could not reach the socket and wrote the cautious answer.
                 Some(doubt) => term.warn(&format!(
-                    "the machine this archive came from may have had a node running: the run                      that took it could not tell ({doubt})"
+                    "the machine this archive came from may have had a node running: \
+                     the run that took it could not tell ({doubt})"
                 )),
-                None => term
-                    .warn("the machine this archive came from had a node running when it was taken"),
+                None => term.warn(
+                    "the machine this archive came from had a node running when it was taken",
+                ),
             }
             term.detail("never run two nodes with one key: stop the other one first");
         }

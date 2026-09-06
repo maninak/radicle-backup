@@ -5,7 +5,7 @@ default:
 
 # What CI runs on every push, in the order that fails fastest. CI spells the cargo steps
 # out itself rather than calling this, so a gate added here has to be added there too.
-check: fmt-check audit-map names lint nonunix test
+check: fmt-check audit-map names messages lint nonunix test
 
 # Every file SECURITY.md sends a reviewer to still exists.
 #
@@ -31,6 +31,33 @@ audit-map:
     	missing=1
     fi
     exit "$missing"
+
+# No user-facing message carries a run of spaces where a line continuation should be.
+#
+# A message written across two source lines needs a trailing `\` inside the literal, and the
+# `\` is the easy thing to drop: `cargo fmt` will not touch the inside of a literal, so the
+# gap survives every gate and reaches the user as a hole in the middle of a warning. One had
+# been printing that way in `restore` for as long as the warning existed.
+#
+# The pattern deliberately wants a word character on both sides of the run, so the indentation
+# inside the multi-line templates this tool ships (`RESTORE.md`, `restore.sh`, the systemd
+# units, the recovery sheet) is not a hit.
+messages:
+    #!/usr/bin/env sh
+    set -eu
+    gap='"[^"]*[[:alnum:],.:;)]   +[[:alnum:]]'
+    # The pattern is tried against a line known to be bad first. A gate nobody has watched
+    # fail reports a safety it may not be providing, and this one is a single regex.
+    if ! printf '%s\n' 'x("a node running: the run                      that took it")' \
+    	| grep -Eq "$gap"; then
+    	echo "the message check no longer catches a gap it was written for" >&2
+    	exit 1
+    fi
+    gaps=$(grep -rEn "$gap" --include='*.rs' src/ tests/ || true)
+    if [ -n "$gaps" ]; then
+    	echo "$gaps" | sed 's/$/: a run of spaces in a message, so a line continuation was dropped/' >&2
+    	exit 1
+    fi
 
 # Three naming rules a reviewer kept having to enforce by hand.
 #
