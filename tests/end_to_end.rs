@@ -1886,6 +1886,78 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
 
 /// The two readers of an archive must refuse the same `HEAD` values.
 ///
+/// A symlink at a name the script writes sends an archive's contents out of the home.
+///
+/// `cp` follows a symlink at its destination, so a home seeded with one at `config.json` or
+/// at a database name is a home that redirects what an archive holds to wherever that link
+/// points. The key's own name is the sharpest case: a DANGLING symlink there is not `-f`, so
+/// the guard that refuses an occupied home walked past it and the private key landed at
+/// whatever it named, outside the home and at that path's permissions.
+///
+/// The whole shipped script, run as somebody in trouble would run it, stopped at its guard
+/// before it writes anything, so the fixture is a `manifest.json` and the home to refuse.
+#[test]
+fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
+    let fixture = Fixture::create("script-symlinks");
+    let backups = fixture.path("backups");
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking a plaintext archive");
+
+    let extracted = fixture.path("extracted");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let archive = std::fs::read(only_archive(&backups)).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
+    std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
+    let ran = Command::new("tar")
+        .args(["-xf", "archive.tar"])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&ran, "extracting the archive");
+
+    let refuses = |name: &str| {
+        let home = fixture.path(&format!("home-{}", name.replace('/', "-")));
+        std::fs::create_dir_all(home.join("keys")).expect("the keys directory is creatable");
+        std::fs::create_dir_all(home.join("node")).expect("the node directory is creatable");
+        // Pointing at a file that is really there, which is the case every `cp` follows.
+        // GNU coreutils declines to write through a DANGLING one, so a test built on that
+        // shape would pass here and say nothing about the platforms whose `cp` does.
+        let elsewhere = fixture.path(&format!("elsewhere-{}", name.replace('/', "-")));
+        std::fs::write(&elsewhere, b"the file the link points at").expect("it is writable");
+        std::os::unix::fs::symlink(&elsewhere, home.join(name)).expect("a symlink is creatable");
+
+        let ran = Command::new("sh")
+            .args(["restore.sh", &home.to_string_lossy()])
+            .current_dir(&extracted)
+            .env("HOME", fixture.path("fake-home"))
+            .output()
+            .expect("the restore script runs");
+        let said = stderr(&ran);
+        assert_eq!(ran.status.code(), Some(1), "a symlink at {name}: {said}");
+        assert_eq!(
+            std::fs::read(&elsewhere).expect("the file the link points at is still readable"),
+            b"the file the link points at",
+            "the script wrote through the symlink at {name}: {said}"
+        );
+    };
+
+    refuses("keys/radicle");
+    refuses("keys/radicle.pub");
+    refuses("config.json");
+    refuses("node/policies.db");
+}
+
 /// The real `case` is lifted out of `assets/restore.sh` rather than restated, so a change to
 /// one reader that is not made to the other fails here. The table repeats
 /// `git::tests::a_head_under_refs_that_climbs_out_of_the_repository_is_refused` and adds the

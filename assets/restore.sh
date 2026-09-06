@@ -22,10 +22,25 @@ if [ ! -f manifest.json ]; then
 	exit 1
 fi
 
-if [ -f "$RAD_HOME/keys/radicle" ]; then
+# `-e` and `-L`, not `-f`: a dangling symlink at the key's name is not a file, so `-f` alone
+# walked straight past one and the `cp` below then followed it and wrote the private key to
+# whatever it pointed at, outside the home and at whatever permissions that path had.
+if [ -e "$RAD_HOME/keys/radicle" ] || [ -L "$RAD_HOME/keys/radicle" ]; then
 	echo "$RAD_HOME already holds an identity; move it aside first" >&2
 	exit 1
 fi
+
+# The same hazard at every other name this writes. `cp` follows a symlink at its destination,
+# so a home seeded with one is a home that redirects an archive's contents somewhere else, and
+# a `config.json` pointing at a file this user can write is enough. Refused rather than
+# unlinked: this script never destroys anything in a home it did not put there.
+for name in keys/radicle.pub config.json node/policies.db node/notifications.db node/node.db; do
+	if [ -L "$RAD_HOME/$name" ]; then
+		echo "$RAD_HOME/$name is a symlink, so restoring would write through it;" \
+			"move it aside first" >&2
+		exit 1
+	fi
+done
 
 echo "restoring into $RAD_HOME"
 mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node" "$RAD_HOME/storage"
