@@ -70,8 +70,15 @@ impl Standing {
 
     /// Ordered by what it costs to ignore, so that a repository several nodes disagree about
     /// is reported as the answer that most needs acting on. Safe next to one node and unsafe
-    /// next to another is unsafe. `CouldNotAsk` outranks the two benign answers because an
-    /// unknown must not be hidden behind some other node's agreement.
+    /// next to another is unsafe, and an unknown must not be hidden behind another node's
+    /// agreement, so `CouldNotAsk` outranks both benign answers.
+    ///
+    /// `ArchiveIsAhead` losing to `CouldNotAsk` used to lose the advice with it, because the
+    /// report read its "push this first" list off these standings and unpushed work whose only
+    /// other copy is the archive does not come back by fetching later. `Comparison` carries
+    /// that as a fact of its own now, so the ordering here decides only which words go beside
+    /// the repository. `NothingToCompare` is at the bottom and never actually reaches the
+    /// fold: `classify` cannot produce it, and the caller inserts it before any comparison.
     fn severity(self) -> u8 {
         match self {
             Self::NothingToCompare => 0,
@@ -212,14 +219,14 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // leave a home that has been fully restored and believes it has never seen an archive.
     let comparison = if args.no_reconcile {
         term.warn("--no-reconcile: nothing was compared with the network");
-        Ok(BTreeMap::new())
+        Ok(Reconciled::default())
     } else {
         reconcile(ctx, &manifest, &restored.repos)
     };
     remember(ctx, &manifest, &restored.repos, archive, encrypted);
-    let standings = comparison?;
+    let reconciled = comparison?;
 
-    report(ctx, &manifest, &restored, &standings, &policies_missed)
+    report(ctx, &manifest, &restored, &reconciled, &policies_missed)
 }
 
 /// Record the archive this home came from.
@@ -609,6 +616,16 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
     }
 }
 
+/// What a whole run's comparison found.
+///
+/// The standings are one answer per repository; `ahead_of_someone` is a second, orthogonal one
+/// that a single standing cannot carry. See `Comparison`.
+#[derive(Default)]
+pub struct Reconciled {
+    standings: BTreeMap<String, Standing>,
+    ahead_of_someone: BTreeSet<String>,
+}
+
 /// Compare each restored repository with what other nodes hold of its signed refs.
 ///
 /// This is the check that separates a restore from a data-loss event. Signed refs are a chain:
@@ -619,12 +636,8 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
 /// The fetch is what makes the answer current; it is not itself the answer. See `classify` for
 /// why the network's view of our own namespace has to come from the node's record of what
 /// peers announced rather than from the refs sitting in local storage.
-fn reconcile(
-    ctx: &Ctx,
-    manifest: &Manifest,
-    restored: &[RepoRecord],
-) -> Result<BTreeMap<String, Standing>> {
-    let mut standings = BTreeMap::new();
+fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<Reconciled> {
+    let mut standings = Reconciled::default();
     if restored.is_empty() {
         return Ok(standings);
     }
@@ -662,7 +675,14 @@ fn reconcile(
         true
     };
 
-    let outcome = compare_with_network(ctx, manifest, restored, &rad, &mut standings);
+    let outcome = compare_with_network(
+        ctx,
+        manifest,
+        restored,
+        &rad,
+        &mut standings.standings,
+        &mut standings.ahead_of_someone,
+    );
 
     // Put back before the outcome is propagated, so a comparison that fails halfway does not
     // also leave a node running that the user never started.
@@ -713,16 +733,37 @@ fn wait_for_node(ctx: &Ctx) -> bool {
 ///
 /// `is_ancestor` is a closure rather than a value, so a node holding exactly the archived head
 /// costs no `git` at all.
-fn classify<F>(archived: &str, held: &BTreeSet<String>, mut is_ancestor: F) -> Result<Standing>
+/// What one repository's comparison found.
+///
+/// Two answers rather than one, because they are facts about different nodes and folding them
+/// loses the one with a permanent consequence. A repository can be ahead of the seed that has
+/// answered and unknown to the seed that has not; reporting only the worse of those drops it
+/// out of the "push this first" list, and unpushed work whose only other copy is the archive
+/// does not come back by fetching later.
+struct Comparison {
+    standing: Standing,
+    /// Some node's record is an ancestor of what the archive holds, so this repository carries
+    /// work that node has never seen.
+    someone_is_behind: bool,
+}
+
+fn classify<F>(archived: &str, held: &Evidence, mut is_ancestor: F) -> Result<Comparison>
 where
     F: FnMut(&str) -> Result<Answer>,
 {
-    if held.is_empty() {
-        return Ok(Standing::CouldNotAsk);
+    if held.heads.is_empty() {
+        return Ok(Comparison {
+            standing: Standing::CouldNotAsk,
+            someone_is_behind: false,
+        });
     }
     let mut standing = Standing::NothingSaysOtherwise;
-    for head in held {
-        standing = standing.worse_of(if head == archived {
+    let mut someone_is_behind = false;
+    for head in &held.heads {
+        // Case-insensitively, because `names_an_oid` lets either case through and git resolves
+        // either: two spellings of one commit are not two commits, and treating them as two
+        // spends a `git` to report unpushed work that does not exist.
+        standing = standing.worse_of(if head.eq_ignore_ascii_case(archived) {
             Standing::NothingSaysOtherwise
         } else if !git::names_an_oid(head) {
             // A row shaped like a flag would be one to `merge-base`, which takes no `--`. A
@@ -731,16 +772,72 @@ where
         } else {
             match is_ancestor(head)? {
                 // Their head is in our history: they are behind, and we hold the work.
-                Answer::Yes => Standing::ArchiveIsAhead,
+                Answer::Yes => {
+                    someone_is_behind = true;
+                    Standing::ArchiveIsAhead
+                }
+                // Their head is not in our history, whether `git` walked past it or could not
+                // resolve it at all: our own namespace is the one thing a pull never brings,
+                // so a sigrefs commit a peer announced and this disk does not hold is work
+                // signed under this key that is not here. The caller turns the second case
+                // into this one, having first established that `git` can answer anything.
                 Answer::No => Standing::PeerHoldsOther,
-                // `git` could not resolve their head. For our own namespace that means the
-                // object is not on this disk and no pull will bring it, so it is the evidence
-                // rather than a hole in it: they signed something this copy does not have.
-                Answer::CouldNotAsk { .. } => Standing::PeerHoldsOther,
+                // `git` could not run, or could not open the repository. That says nothing
+                // about any peer, and saying it does costs exit 3 and a warning that somebody
+                // has forked their own identity.
+                Answer::CouldNotAsk { .. } => Standing::CouldNotAsk,
             }
         });
     }
-    Ok(standing)
+    Ok(Comparison {
+        standing,
+        someone_is_behind,
+    })
+}
+
+/// What other nodes said they hold of one repository's signed refs, and nothing older.
+///
+/// A restored home's node database is the archive's own, so a row nobody has rewritten says
+/// what a peer held when the backup was taken. Held against the archive's own recorded head it
+/// agrees by construction, which is the archive being compared with itself a second time. Only
+/// a row a peer wrote after the archive was is evidence about the network now.
+#[derive(Default)]
+struct Evidence {
+    heads: BTreeSet<String>,
+}
+
+/// Split what the node recorded into evidence and hearsay, by when each row was written.
+///
+/// `written_after` is `None` when the archive's own stamp does not parse, and then nothing
+/// qualifies: an undateable archive cannot date anything against itself, and reporting no
+/// evidence is the direction that refuses to reassure.
+fn evidence_since(
+    recorded: Option<&BTreeMap<String, i64>>,
+    written_after: Option<i64>,
+) -> Evidence {
+    let (Some(recorded), Some(written_after)) = (recorded, written_after) else {
+        return Evidence::default();
+    };
+    Evidence {
+        heads: recorded
+            .iter()
+            .filter(|(_, said_at)| **said_at > written_after)
+            .map(|(head, _)| head.clone())
+            .collect(),
+    }
+}
+
+/// The repository id in the form heartwood's own tables use, which carries the `rad:` prefix.
+///
+/// `rad::is_identifier` accepts both spellings and the archive is written by whoever wrote it,
+/// so a manifest carrying bare `z...` rids restored, fetched, and then matched no row at all:
+/// every repository quietly became "could not be compared" with nothing saying why.
+fn prefixed_rid(rid: &str) -> String {
+    if rid.starts_with("rad:") {
+        rid.to_string()
+    } else {
+        format!("rad:{rid}")
+    }
 }
 
 fn compare_with_network(
@@ -749,6 +846,7 @@ fn compare_with_network(
     restored: &[RepoRecord],
     rad: &Rad,
     standings: &mut BTreeMap<String, Standing>,
+    ahead_of_someone: &mut BTreeSet<String>,
 ) -> Result<()> {
     let git = Git::new();
     let node_id = &manifest.identity.node_id;
@@ -788,18 +886,44 @@ fn compare_with_network(
         fetched.push((repo, archived));
     }
 
-    // Read once, after the last fetch rather than inside the loop. The rows are written by the
-    // node's own thread as seeds announce over the connections a fetch opens, so every extra
-    // repository fetched is more time for the earlier ones' announcements to land. A node that
-    // has not heard from anybody yet leaves the map empty, which reads as "could not ask".
+    // Read after the last fetch, and best-effort: `rad sync --fetch` returns when the fetches
+    // are done and a peer's refs announcement arrives on its own schedule, so there is no
+    // barrier here and nothing waits for one. That is why a row is only evidence when it was
+    // written after the archive: what has not arrived leaves the row the archive carried, and
+    // that row must not be read as a peer agreeing.
     let held = crate::db::read_synced_heads(&ctx.home.node_db(), node_id)?;
-    let nothing = BTreeSet::new();
+    let written_after = manifest
+        .created
+        .parse::<jiff::Timestamp>()
+        .ok()
+        .map(|at| at.as_millisecond());
     for (repo, archived) in fetched {
         let path = ctx.home.repository_path(&repo.rid);
-        let standing = classify(archived, held.get(&repo.rid).unwrap_or(&nothing), |head| {
-            git.is_ancestor(&path, head, archived)
+        let evidence = evidence_since(held.get(&prefixed_rid(&repo.rid)), written_after);
+        let compared = classify(archived, &evidence, |head| {
+            let answer = git.is_ancestor(&path, head, archived)?;
+            let Answer::CouldNotAsk { said } = &answer else {
+                return Ok(answer);
+            };
+            // `git` failed. About the peer's head, or about this machine? Asked whether the
+            // archived head reaches itself, a working `git` over a readable repository says
+            // yes. So a yes here means the failure was the peer's head, which this disk cannot
+            // resolve because a pull never fetches our own namespace, and that is the fork
+            // hazard. Anything else is `git` or the repository, and blaming a peer for it
+            // costs exit 3 and a warning that somebody's identity may have forked.
+            if git.is_ancestor(&path, archived, archived)? == Answer::Yes {
+                return Ok(Answer::No);
+            }
+            ctx.term.warn(&format!(
+                "git could not compare {} with what other nodes hold: {said}",
+                repo.rid
+            ));
+            Ok(answer)
         })?;
-        standings.insert(repo.rid.clone(), standing);
+        if compared.someone_is_behind {
+            ahead_of_someone.insert(repo.rid.clone());
+        }
+        standings.insert(repo.rid.clone(), compared.standing);
     }
     Ok(())
 }
@@ -898,21 +1022,21 @@ fn report(
     ctx: &Ctx,
     manifest: &Manifest,
     restored: &Restored,
-    standings: &BTreeMap<String, Standing>,
+    reconciled: &Reconciled,
     policies_missed: &[String],
 ) -> Result<std::process::ExitCode> {
     let dropped = &restored.dropped;
     let restored = &restored.repos;
+    let standings = &reconciled.standings;
     let at_risk: Vec<&String> = standings
         .iter()
         .filter(|(_, standing)| **standing == Standing::PeerHoldsOther)
         .map(|(rid, _)| rid)
         .collect();
-    let ahead: Vec<&String> = standings
-        .iter()
-        .filter(|(_, standing)| **standing == Standing::ArchiveIsAhead)
-        .map(|(rid, _)| rid)
-        .collect();
+    // Off the second answer rather than off the standings, because a repository some node is
+    // behind on and another node has said nothing about reports as the unknown, and the work
+    // it holds that nowhere else does would then never be named.
+    let ahead: Vec<&String> = reconciled.ahead_of_someone.iter().collect();
     // Counted and said out loud. A repository the network could not be asked about is not one
     // nothing was said against, and the report used to mention only the fork and the unpushed
     // work, so a comparison that answered nothing at all read as a clean bill.
@@ -930,6 +1054,7 @@ fn report(
                 .map(|(rid, standing)| serde_json::json!({"rid": rid, "standing": standing.as_str()}))
                 .collect::<Vec<_>>(),
             "atRisk": at_risk,
+            "ahead": ahead,
             "notChecked": not_checked,
             "notRestored": dropped,
         }))?;
@@ -961,10 +1086,18 @@ fn report(
             ));
             term.detail("run `rad sync <rid> --fetch` for those before you write to them");
         }
-        // Said on every restore that compared anything, including the quiet ones, because the
-        // absence of a warning here is not the same as a clean bill and the difference is the
-        // whole reason somebody would write in these repositories tonight.
-        if !standings.is_empty() && at_risk.is_empty() {
+        // Only when at least one repository was genuinely held against a row some node wrote.
+        // Gated on the map being non-empty, it printed over a home of private repositories
+        // nobody else can hold, where not one node had been asked anything, and over a run
+        // where every comparison failed: right under the line saying so, which read as a
+        // partial pass.
+        let compared = standings.values().any(|standing| {
+            matches!(
+                standing,
+                Standing::NothingSaysOtherwise | Standing::ArchiveIsAhead
+            )
+        });
+        if compared && at_risk.is_empty() {
             term.detail("no other node has reported holding signed refs of yours missing here");
             term.detail("that is not proof there are none: a fetch never brings your own back");
         }
@@ -1105,8 +1238,24 @@ mod tests {
         }
     }
 
-    fn holding(heads: &[String]) -> BTreeSet<String> {
-        heads.iter().cloned().collect()
+    fn holding(heads: &[String]) -> Evidence {
+        Evidence {
+            heads: heads.iter().cloned().collect(),
+        }
+    }
+
+    /// A row as heartwood writes it: the head, and the epoch milliseconds it was written at.
+    fn recorded(rows: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        rows.iter()
+            .map(|(head, said_at)| ((*head).to_string(), *said_at))
+            .collect()
+    }
+
+    /// Epoch milliseconds for an RFC 3339 instant, the form a manifest's `created` takes.
+    fn millis(at: &str) -> i64 {
+        at.parse::<jiff::Timestamp>()
+            .expect("a valid instant")
+            .as_millisecond()
     }
 
     /// The bug this whole function was rewritten for. The network side used to be read out of
@@ -1117,9 +1266,10 @@ mod tests {
     #[test]
     fn a_node_holding_signed_refs_this_copy_does_not_have_is_the_fork_hazard() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(&oid('a'), &holding(&[oid('b')]), asked(Answer::No, &calls))
+        let compared = classify(&oid('a'), &holding(&[oid('b')]), asked(Answer::No, &calls))
             .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::PeerHoldsOther);
+        assert_eq!(compared.standing, Standing::PeerHoldsOther);
+        assert!(!compared.someone_is_behind);
         assert_eq!(calls.get(), 1);
     }
 
@@ -1127,51 +1277,148 @@ mod tests {
     /// own namespace is the one thing a pull will never fetch, so a sigrefs commit some node
     /// announced and this disk does not hold is work signed under this key that is not here.
     #[test]
-    fn a_head_git_cannot_resolve_is_read_as_refs_this_copy_does_not_have() {
+    fn a_git_that_could_not_answer_at_all_is_an_unknown_and_not_a_fork() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(
+        let compared = classify(
             &oid('a'),
             &holding(&[oid('b')]),
             asked(
                 Answer::CouldNotAsk {
-                    said: "fatal: Not a valid commit name".to_string(),
+                    said: "fatal: not a git repository".to_string(),
                 },
                 &calls,
             ),
         )
         .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::PeerHoldsOther);
+        // A `git` killed by a signal, an unreadable repository and an unresolvable archived
+        // oid all arrive here identically. Reporting the loudest verdict this tool has, and
+        // exiting 3 with it, on any of those is telling somebody their identity may be forked
+        // because a process died. `compare_with_network` establishes that `git` can answer at
+        // all before it lets an unresolvable head mean anything.
+        assert_eq!(compared.standing, Standing::CouldNotAsk);
     }
 
     #[test]
     fn a_node_still_back_at_an_ancestor_is_read_as_the_archive_being_ahead() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(&oid('a'), &holding(&[oid('b')]), asked(Answer::Yes, &calls))
+        let compared = classify(&oid('a'), &holding(&[oid('b')]), asked(Answer::Yes, &calls))
             .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::ArchiveIsAhead);
+        assert_eq!(compared.standing, Standing::ArchiveIsAhead);
+        assert!(compared.someone_is_behind);
     }
 
     /// Safe next to one node and unsafe next to another is unsafe, and the report acts on one
-    /// standing per repository. Taking the first, or the last, would have let a seed that
-    /// happens to agree bury the one that does not.
+    /// standing per repository. Asserted in both iteration orders: `BTreeSet` walks the heads
+    /// sorted, so a single case can pass against "the last one wins" or "the first one wins"
+    /// without the fold doing anything at all.
     #[test]
     fn the_node_that_most_needs_acting_on_is_the_one_reported() {
+        for archived in [oid('a'), oid('b')] {
+            let calls = std::cell::Cell::new(0);
+            let compared = classify(
+                &archived,
+                &holding(&[oid('a'), oid('b')]),
+                asked(Answer::No, &calls),
+            )
+            .expect("the ancestry answer is not an error");
+            assert_eq!(
+                compared.standing,
+                Standing::PeerHoldsOther,
+                "archived {archived}"
+            );
+        }
+    }
+
+    /// The fact that has no other home. A node behind us and a node that said nothing are
+    /// facts about different nodes, and the standing can only carry one of them: folded, the
+    /// repository reports as the unknown and drops out of the "push this first" list, so work
+    /// whose only other copy is the archive is never named. Fetching later recovers a missed
+    /// fork; it does not recover work that exists nowhere.
+    #[test]
+    fn work_a_node_is_behind_on_is_still_reported_when_another_node_said_nothing_usable() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(
-            &oid('a'),
-            &holding(&[oid('a'), oid('b')]),
-            asked(Answer::No, &calls),
+        let mut answers = [Answer::Yes, Answer::No].into_iter();
+        let compared = classify(&oid('c'), &holding(&[oid('a'), oid('b')]), |_| {
+            calls.set(calls.get() + 1);
+            Ok(answers.next().expect("one answer per head"))
+        })
+        .expect("the ancestry answer is not an error");
+
+        assert_eq!(compared.standing, Standing::PeerHoldsOther);
+        assert!(
+            compared.someone_is_behind,
+            "the node that is behind is still a node that is behind"
+        );
+    }
+
+    /// Two spellings of one commit are one commit. `names_an_oid` accepts either case and git
+    /// resolves either, so a byte-exact shortcut sent an uppercase archived oid to `git` and
+    /// came back with "push this first" about work that was already there.
+    #[test]
+    fn one_commit_spelled_in_two_cases_is_not_two_commits() {
+        let calls = std::cell::Cell::new(0);
+        let compared = classify(
+            &oid('a').to_uppercase(),
+            &holding(&[oid('a')]),
+            asked(Answer::Yes, &calls),
         )
         .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::PeerHoldsOther);
+
+        assert_eq!(compared.standing, Standing::NothingSaysOtherwise);
+        assert_eq!(calls.get(), 0, "git was asked about one commit twice");
+    }
+
+    /// The failure the timestamp exists to stop. A restored home's node database is the
+    /// archive's own, so every row in it agrees with the archive by construction. Read as
+    /// evidence, that is the archive compared with itself a second time, and it reports the
+    /// answer that means "safe to write" over an archive the network may be months past.
+    #[test]
+    fn a_row_the_archive_itself_carried_is_not_evidence_about_the_network() {
+        let taken_at = millis("2026-01-01T00:00:00Z");
+        let rows = recorded(&[(&oid('a'), millis("2025-12-30T00:00:00Z"))]);
+
+        let evidence = evidence_since(Some(&rows), Some(taken_at));
+
+        assert!(
+            evidence.heads.is_empty(),
+            "a row written before the archive says what a peer held then, not now"
+        );
+    }
+
+    #[test]
+    fn a_row_a_node_wrote_after_the_archive_is_the_evidence_this_check_runs_on() {
+        let taken_at = millis("2026-01-01T00:00:00Z");
+        let rows = recorded(&[(&oid('b'), millis("2026-06-02T00:00:00Z"))]);
+
+        let evidence = evidence_since(Some(&rows), Some(taken_at));
+
+        assert_eq!(evidence.heads, BTreeSet::from([oid('b')]));
+    }
+
+    /// An archive whose own stamp will not parse cannot date anything against itself, and the
+    /// direction that refuses to reassure is the one to fail in.
+    #[test]
+    fn an_archive_that_cannot_say_when_it_was_taken_dates_nothing_as_evidence() {
+        let rows = recorded(&[(&oid('b'), millis("2026-06-02T00:00:00Z"))]);
+
+        assert!(evidence_since(Some(&rows), None).heads.is_empty());
+    }
+
+    /// `rad::is_identifier` takes both spellings, so a manifest can carry either, and the node
+    /// writes only the prefixed one. Matched exactly, a bare-rid archive found no row for any
+    /// repository and every one of them became "could not be compared" with nothing said.
+    #[test]
+    fn a_repository_id_without_its_prefix_still_finds_the_row_the_node_wrote() {
+        assert_eq!(prefixed_rid("z6MkAAA"), "rad:z6MkAAA");
+        assert_eq!(prefixed_rid("rad:z6MkAAA"), "rad:z6MkAAA");
     }
 
     #[test]
     fn identical_refs_are_in_step_without_asking_git_anything() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(&oid('a'), &holding(&[oid('a')]), asked(Answer::No, &calls))
+        let compared = classify(&oid('a'), &holding(&[oid('a')]), asked(Answer::No, &calls))
             .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::NothingSaysOtherwise);
+        assert_eq!(compared.standing, Standing::NothingSaysOtherwise);
         // Two oids that are the same string are the same commit, and asking `git` to walk
         // between them is a process spawned per repository to learn nothing.
         assert_eq!(calls.get(), 0, "git was asked about two identical oids");
@@ -1182,14 +1429,35 @@ mod tests {
     #[test]
     fn a_recorded_head_that_is_not_an_oid_is_an_unknown_and_never_reaches_git() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(
+        let compared = classify(
             &oid('a'),
             &holding(&["--output=/etc/passwd".to_string()]),
             asked(Answer::No, &calls),
         )
         .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::CouldNotAsk);
+        assert_eq!(compared.standing, Standing::CouldNotAsk);
         assert_eq!(calls.get(), 0, "git was handed a value out of a database");
+    }
+
+    /// A repository is reported as one standing, and these are the pairs whose order decides
+    /// which. Written out rather than left to `severity`'s arms, because reordering those is a
+    /// one-character edit that no other test would notice.
+    #[test]
+    fn the_standing_that_most_needs_acting_on_wins_every_pair() {
+        use Standing::*;
+
+        for (worse, better) in [
+            (PeerHoldsOther, CouldNotAsk),
+            (PeerHoldsOther, ArchiveIsAhead),
+            (PeerHoldsOther, NothingSaysOtherwise),
+            (CouldNotAsk, ArchiveIsAhead),
+            (CouldNotAsk, NothingSaysOtherwise),
+            (ArchiveIsAhead, NothingSaysOtherwise),
+            (NothingSaysOtherwise, NothingToCompare),
+        ] {
+            assert_eq!(worse.worse_of(better), worse, "{worse:?} vs {better:?}");
+            assert_eq!(better.worse_of(worse), worse, "{better:?} vs {worse:?}");
+        }
     }
 
     /// Nobody has said what they hold, which is a different thing from everybody having
@@ -1197,9 +1465,9 @@ mod tests {
     #[test]
     fn a_repository_no_other_node_has_reported_on_could_not_be_compared() {
         let calls = std::cell::Cell::new(0);
-        let standing = classify(&oid('a'), &BTreeSet::new(), asked(Answer::No, &calls))
+        let compared = classify(&oid('a'), &Evidence::default(), asked(Answer::No, &calls))
             .expect("the ancestry answer is not an error");
-        assert_eq!(standing, Standing::CouldNotAsk);
+        assert_eq!(compared.standing, Standing::CouldNotAsk);
         assert_eq!(calls.get(), 0);
     }
 

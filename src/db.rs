@@ -6,7 +6,7 @@
 //! database that is being written to, which is why a backup does not have to stop the node
 //! for these files.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -145,7 +145,10 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
         return Ok(BTreeMap::new());
     };
     let rows = statement.query_map([own_node_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        // `count(*)` is never negative. Converted and not cast, so a value sqlite could
+        // not have produced reads as none instead of wrapping round to billions of seeds.
+        let held_by = u64::try_from(row.get::<_, i64>(1)?).unwrap_or(0);
+        Ok((row.get::<_, String>(0)?, held_by))
     })?;
 
     let mut counts = BTreeMap::new();
@@ -156,12 +159,19 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
     Ok(counts)
 }
 
-/// Which of this peer's sigrefs some other node is known to hold, per repository.
+/// Which of this peer's sigrefs some other node is known to hold, per repository, and when it
+/// last said so.
 ///
 /// The node records, per repository and per peer, the head of *your* `rad/sigrefs` that peer
 /// was last seen to carry. A repository whose current local head appears here against somebody
 /// else is work that has left this machine; one whose head appears against nobody is work that
 /// exists on this disk and nowhere in the world.
+///
+/// The timestamp comes back because a restored home's copy of this table is the archive's own,
+/// and a row that has not moved since then says what a peer held *when the backup was taken*,
+/// not what it holds now. Heartwood writes the column in milliseconds since the epoch. Two
+/// nodes on one head collapse to the later of the two: which node it was is nobody's question
+/// here, and the later timestamp is the stronger claim.
 ///
 /// Empty when the node has never run or the table is not there, which a caller must read as
 /// "not known" rather than as "nothing has propagated". Every repository would otherwise look
@@ -171,7 +181,7 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
 pub fn read_synced_heads(
     node_db: &Path,
     own_node_id: &str,
-) -> Result<BTreeMap<String, BTreeSet<String>>> {
+) -> Result<BTreeMap<String, BTreeMap<String, i64>>> {
     if !node_db.is_file() {
         return Ok(BTreeMap::new());
     }
@@ -179,20 +189,30 @@ pub fn read_synced_heads(
     let Some(mut statement) = prepare_against_heartwood(
         &db,
         node_db,
-        "select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head",
+        "select repo, head, timestamp from \"repo-sync-status\" where node != ?1 \
+         order by repo, head",
         "sync status table",
     )?
     else {
         return Ok(BTreeMap::new());
     };
     let rows = statement.query_map([own_node_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
     })?;
 
-    let mut heads: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut heads: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
     for row in rows {
-        let (repo, head) = row?;
-        heads.entry(repo).or_default().insert(head);
+        let (repo, head, said_at) = row?;
+        heads
+            .entry(repo)
+            .or_default()
+            .entry(head)
+            .and_modify(|seen| *seen = (*seen).max(said_at))
+            .or_insert(said_at);
     }
     Ok(heads)
 }

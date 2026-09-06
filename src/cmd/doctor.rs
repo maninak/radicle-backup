@@ -5,7 +5,7 @@
 //! and every check says what it actually looked at, because a score nobody can audit is a
 //! score nobody should trust.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -838,7 +838,7 @@ fn check_replication(
 /// home with no `rad` on PATH was told to announce repositories that must never be announced.
 fn check_sigrefs_propagation(
     inventory: &Inventory,
-    synced_heads: &BTreeMap<String, BTreeSet<String>>,
+    synced_heads: &BTreeMap<String, BTreeMap<String, i64>>,
     node_id: &str,
     schema_has_moved_on: bool,
 ) -> Check {
@@ -866,9 +866,12 @@ fn check_sigrefs_propagation(
         let Some(mine) = repo.sigrefs.get(node_id) else {
             continue;
         };
+        // When each node said so is not this check's question: a head that reached anybody,
+        // ever, has left this disk. `restore` is the caller that has to date the same rows,
+        // because there the copy of this table came out of the archive being restored.
         let elsewhere = synced_heads
             .get(&repo.rid)
-            .is_some_and(|heads| heads.contains(mine));
+            .is_some_and(|heads| heads.contains_key(mine));
         if !elsewhere {
             here_only.push(repo.display_name());
         }
@@ -1539,10 +1542,13 @@ mod tests {
         // Somebody else has zAAA's current head. Nobody has zBBB's: it was committed and
         // signed here and has reached nothing, which no file copy of the home can tell you.
         let synced = BTreeMap::from([
-            ("rad:zAAA".to_string(), BTreeSet::from(["aaa".to_string()])),
+            (
+                "rad:zAAA".to_string(),
+                BTreeMap::from([("aaa".to_string(), 1_700_000_000_000)]),
+            ),
             (
                 "rad:zBBB".to_string(),
-                BTreeSet::from(["older".to_string()]),
+                BTreeMap::from([("older".to_string(), 1_700_000_000_000)]),
             ),
         ]);
 
@@ -1558,8 +1564,10 @@ mod tests {
         // report the feature working as a fault, on every run, for everyone who has one.
         let mut private = public_repo_signed_at("rad:zPriv", "aaa");
         private.visibility = Some("private".to_string());
-        let synced =
-            BTreeMap::from([("rad:zOther".to_string(), BTreeSet::from(["x".to_string()]))]);
+        let synced = BTreeMap::from([(
+            "rad:zOther".to_string(),
+            BTreeMap::from([("x".to_string(), 1_700_000_000_000)]),
+        )]);
 
         let check = check_sigrefs_propagation(&holding(vec![private]), &synced, ME, false);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
