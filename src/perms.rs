@@ -36,51 +36,6 @@ pub fn copy_doc(from: &Path, to: &Path) -> Result<()> {
     write_atomically(to, &bytes, MODE_DOC)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_replacement_that_cannot_even_be_staged_leaves_the_original_alone() {
-        // Owner-only, like every other fixture in this crate that writes a file named after a
-        // key: this one is a placeholder, and a directory anyone can read is the habit that
-        // puts a real one there.
-        let scratch = crate::key::tests::TestScratch::create("perms-keeps-the-original");
-        let path = scratch.path_of("radicle");
-        std::fs::write(&path, b"the identity already here").expect("a file worth protecting");
-        // Nothing can be created under the staging name, so the replacement fails at its
-        // first step, which is the earliest a failure can happen.
-        std::fs::create_dir(scratch.path_of("radicle.partial"))
-            .expect("the staging name is occupied");
-
-        assert!(write_atomically(&path, b"the identity being restored", MODE_SECRET).is_err());
-
-        // Writing in place unlinked the target first, so any failure after that left a home
-        // holding neither the old identity nor the new one.
-        assert_eq!(
-            std::fs::read(&path).expect("the original is still readable"),
-            b"the identity already here"
-        );
-    }
-
-    #[test]
-    fn a_replacement_that_worked_leaves_no_staging_file_behind() {
-        let scratch = crate::key::tests::TestScratch::create("perms-sweeps-up");
-        let path = scratch.path_of("radicle");
-        write_atomically(&path, b"the identity being restored", MODE_SECRET)
-            .expect("the write lands");
-
-        assert_eq!(
-            std::fs::read(&path).expect("the new content is readable"),
-            b"the identity being restored"
-        );
-        assert!(
-            !scratch.path_of("radicle.partial").exists(),
-            "the staging name must not survive a successful write"
-        );
-    }
-}
-
 /// A private key, and the archives that carry one.
 pub const MODE_SECRET: u32 = 0o600;
 /// A public key, a config, a manifest: what a Radicle home keeps world-readable itself.
@@ -268,4 +223,86 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     // their files did not survive.
     file.write_all(bytes).map_err(|e| Error::io(path, e))?;
     file.flush().map_err(|e| Error::io(path, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replacement_that_cannot_even_be_staged_leaves_the_original_alone() {
+        // Owner-only, like every other fixture in this crate that writes a file named after a
+        // key: this one is a placeholder, and a directory anyone can read is the habit that
+        // puts a real one there.
+        let scratch = crate::key::tests::TestScratch::create("perms-keeps-the-original");
+        let path = scratch.path_of("radicle");
+        std::fs::write(&path, b"the identity already here").expect("a file worth protecting");
+        // Nothing can be created under the staging name, so the replacement fails at its
+        // first step, which is the earliest a failure can happen.
+        std::fs::create_dir(scratch.path_of("radicle.partial"))
+            .expect("the staging name is occupied");
+
+        assert!(write_atomically(&path, b"the identity being restored", MODE_SECRET).is_err());
+
+        // Writing in place unlinked the target first, so any failure after that left a home
+        // holding neither the old identity nor the new one.
+        assert_eq!(
+            std::fs::read(&path).expect("the original is still readable"),
+            b"the identity already here"
+        );
+    }
+
+    #[test]
+    fn a_replacement_that_worked_leaves_no_staging_file_behind() {
+        let scratch = crate::key::tests::TestScratch::create("perms-sweeps-up");
+        let path = scratch.path_of("radicle");
+        write_atomically(&path, b"the identity being restored", MODE_SECRET)
+            .expect("the write lands");
+
+        assert_eq!(
+            std::fs::read(&path).expect("the new content is readable"),
+            b"the identity being restored"
+        );
+        assert!(
+            !scratch.path_of("radicle.partial").exists(),
+            "the staging name must not survive a successful write"
+        );
+    }
+
+    /// The values, not the names. Every other test in the tree compares a mode it read back
+    /// with the constant it was written from, which passes just as well when the constant is
+    /// wrong: turning `MODE_DIR` into `0o755` leaves the whole suite green. This is the one
+    /// place the numbers are written down a second time.
+    #[test]
+    fn a_secret_and_a_directory_are_owner_only_and_a_document_is_not() {
+        assert_eq!(MODE_SECRET, 0o600);
+        assert_eq!(MODE_DIR, 0o700);
+        assert_eq!(MODE_DOC, 0o644);
+    }
+
+    /// The staging file is created owner-only whatever the caller asked for, so the mode the
+    /// caller asked for is applied afterwards or not at all. Dropping that one line left the
+    /// suite green while every `config.json` a restore put back came out `0600`, which is a
+    /// home subtly unlike one `rad` built.
+    #[cfg(unix)]
+    #[test]
+    fn a_document_lands_at_the_mode_a_native_home_would_have() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let scratch = crate::key::tests::TestScratch::create("perms-carries-the-mode");
+        let secret = scratch.path_of("radicle");
+        let doc = scratch.path_of("config.json");
+        write_atomically(&secret, b"a key", MODE_SECRET).expect("the key lands");
+        write_atomically(&doc, b"{}", MODE_DOC).expect("the config lands");
+
+        let mode_of = |path: &std::path::Path| {
+            std::fs::metadata(path)
+                .expect("the file was just written")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode_of(&secret), MODE_SECRET);
+        assert_eq!(mode_of(&doc), MODE_DOC);
+    }
 }

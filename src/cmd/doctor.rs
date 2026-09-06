@@ -1112,7 +1112,21 @@ mod tests {
     }
 
     /// Every topic the report can print, one per check, whatever the verdict turns out to be.
-    fn every_topic() -> Vec<String> {
+    /// How many checks `examine` runs. Pinned because `every_topic` below is built by hand:
+    /// a tenth check pushed into `examine` would be swept by none of the rules that read this
+    /// list, silently. The integration suite asks the real command for its `total` and pins
+    /// the same number, so adding a check turns that red first and this one straight after.
+    const CHECKS_THE_COMMAND_RUNS: usize = 9;
+
+    #[test]
+    fn the_sweep_reaches_every_check_the_command_runs() {
+        assert_eq!(every_topic("doctor-sweep").len(), CHECKS_THE_COMMAND_RUNS);
+    }
+
+    /// The scratch name comes from the caller: two tests calling this with one name inside it
+    /// ask `TestScratch` for the same parent, which it refuses, and the refusal names the
+    /// helper rather than either test.
+    fn every_topic(scratch: &str) -> Vec<String> {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
         let empty = Inventory {
             records: Vec::new(),
@@ -1123,7 +1137,7 @@ mod tests {
         // one of the checks it exists to police reports a conformance it is not checking.
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
-        let scratch = TestScratch::create("doctor-topics");
+        let scratch = TestScratch::create(scratch);
         let path = scratch.path_of("radicle");
         secret_file(&path, &openssh);
         let secret = SecretKey::read(&path).expect("key is readable");
@@ -1172,7 +1186,7 @@ mod tests {
             " on ",
             "elsewhere",
         ];
-        for topic in every_topic() {
+        for topic in every_topic("doctor-topics") {
             let padded = format!(" {topic} ");
             for claim in CLAIMS {
                 assert!(

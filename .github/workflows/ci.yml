@@ -42,9 +42,14 @@ jobs:
       # The restore-script parity test runs the archive's own `case` under every shell it
       # finds. Only `dash` ships on the runner, and `busybox ash` is the one with its own
       # pattern matcher, so without this the leg that fix exists for never runs.
-      - name: Shells the shipped script must agree under
+      #
+      # `jq` is what the shipped script reads `head` with, and the tests that exercise it skip
+      # themselves on a machine without one. Installed rather than assumed present, because
+      # those tests turn the skip into a failure on this leg and a runner image is somebody
+      # else's to change.
+      - name: What the shipped script needs
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y busybox
+        run: sudo apt-get update && sudo apt-get install -y busybox jq
       - name: Formatting
         run: cargo fmt --check
       # The shell gates live in `ci/` and the justfile calls the same scripts. Spelled out in

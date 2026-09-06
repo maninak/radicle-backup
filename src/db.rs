@@ -420,6 +420,19 @@ pub fn drain_schema_drift() -> Vec<SchemaDrift> {
         .unwrap_or_default()
 }
 
+/// Held by every test that reads or drains the touched list.
+///
+/// Same shape as `while_reading_drift` below and for the same reason: `drain_touched` empties
+/// a process-wide list for everybody, so one test draining between another's read and its
+/// assertion turns a database that was touched into one that was not.
+#[cfg(test)]
+pub(crate) fn while_reading_touched() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Held by every test that reads or drains the drift list.
 ///
 /// The list is process-wide, a test binary is one process, and `drain_schema_drift` empties it
@@ -486,7 +499,10 @@ mod tests {
     }
 
     fn write_policies_fixture(path: &Path) {
-        let db = Connection::open(path).expect("scratch database opens");
+        write_policies_fixture_into(&Connection::open(path).expect("scratch database opens"));
+    }
+
+    fn write_policies_fixture_into(db: &Connection) {
         db.execute_batch(
             "create table seeding (id text primary key, scope text, policy text);
              create table following (id text primary key, alias text, policy text);
@@ -523,6 +539,7 @@ mod tests {
             "the log must be hot"
         );
 
+        let _reading_touched = while_reading_touched();
         let _ = drain_touched();
         open_read_only(&quiet).expect("a database with no log reads");
         open_read_only(&noisy).expect("a database with a log reads");
@@ -593,19 +610,49 @@ mod tests {
         assert!(policies.following.is_empty());
     }
 
+    /// A hot write-ahead log, because that is the only shape in which this function differs
+    /// from `std::fs::copy`. Written against a closed database the two are indistinguishable,
+    /// and deleting the backup API left the test green. A `policies.db` on a machine whose
+    /// node is up is exactly this: rows committed, the main file not yet holding them.
     #[test]
-    fn a_snapshot_is_a_complete_copy_of_the_source_database() {
+    fn a_snapshot_carries_rows_a_plain_file_copy_would_lose() {
         let source = scratch("snapshot-source");
         let destination = scratch("snapshot-destination");
-        write_policies_fixture(&source);
+        let by_hand = scratch("snapshot-by-hand");
 
+        // Held to the end of the test: closing the last connection checkpoints the log into
+        // the database, and the two copies become the same thing again.
+        let live = Connection::open(&source).expect("scratch database opens");
+        live.pragma_update(None, "journal_mode", "wal")
+            .expect("the journal mode is settable");
+        write_policies_fixture_into(&live);
+        assert!(
+            source.with_extension("db-wal").exists(),
+            "the log must be hot or this test proves nothing"
+        );
+
+        let _reading_touched = while_reading_touched();
         snapshot(&source, &destination).expect("snapshot succeeds");
+        std::fs::copy(&source, &by_hand).expect("the source file is copyable");
+
         let copied = read_policies(&destination).expect("the copy is a database");
         assert_eq!(copied.seeding.len(), 2);
         assert_eq!(copied.following.len(), 3);
 
-        let _ = std::fs::remove_file(source);
-        let _ = std::fs::remove_file(destination);
+        // The control: what a `cp` of the file alone hands a reader, and the reason the
+        // backup API is here rather than one.
+        let lost = read_policies(&by_hand).unwrap_or_default();
+        assert!(
+            lost.seeding.is_empty() && lost.following.is_empty(),
+            "a plain copy of a database with a hot log must not hold the rows: {lost:?}"
+        );
+
+        drop(live);
+        for path in [&source, &destination, &by_hand] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(path.with_extension("db-shm"));
+        }
     }
 
     /// The bug: only `read_synced_heads` tolerated a table heartwood had renamed. The other

@@ -342,6 +342,33 @@ fn assert_success(ran: &Output, what: &str) {
     );
 }
 
+/// Whether this machine has `jq`, refusing on the CI leg whose workflow installs it.
+///
+/// The shipped script reads `head` out of the manifest with `jq`, so a machine without one
+/// restores every repository with no HEAD. That difference surfaces far from its cause, as a
+/// HEAD comparison the two readers appear to disagree on: nix hit exactly this, its check
+/// environment having no jq. Off CI it is a fact about the machine and the caller says what
+/// it skipped; on Linux CI the workflow installs jq, so an absence is a broken workflow and
+/// a silent skip there would report coverage nobody has.
+///
+/// One helper rather than three: the three callers had three different policies, and two of
+/// them skipped without a word.
+///
+/// Unix only, like every caller: each runs the shipped POSIX script, which Windows has no
+/// shell for.
+#[cfg(unix)]
+fn probe_jq(what: &str) -> bool {
+    if Command::new("jq").arg("--version").output().is_ok() {
+        return true;
+    }
+    assert!(
+        !(std::env::var_os("CI").is_some() && cfg!(target_os = "linux")),
+        "CI installs jq, and without it this checks nothing: {what}"
+    );
+    eprintln!("skipping {what}: no jq here, which is what reads `head` in the shipped script");
+    false
+}
+
 fn only_archive(directory: &Path) -> PathBuf {
     let mut archives: Vec<PathBuf> = std::fs::read_dir(directory)
         .expect("the backup directory is readable")
@@ -1183,15 +1210,9 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
 #[cfg(unix)]
 #[test]
 fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
-    // Stated rather than assumed: the script reads `head` out of the manifest with `jq`, and
-    // without one it puts every repository back with no HEAD. That difference then surfaces
-    // at the HEAD comparison far below as though the two readers disagreed, which they do
-    // not. Nix hit exactly this, its check environment having no jq.
-    assert!(
-        Command::new("jq").arg("--version").output().is_ok(),
-        "this compares what the shipped script restores against this tool, and the script \
-         needs jq to read the manifest; install jq and run it again"
-    );
+    if !probe_jq("what the shipped script restores against what this tool restores") {
+        return;
+    }
     let fixture = Fixture::create("parity");
     let backups = fixture.path("backups");
 
@@ -1482,11 +1503,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     );
     assert!(refs.contains("/refs/rad/sigrefs"), "{refs}");
     assert!(refs.contains("/refs/heads/master"), "{refs}");
-    if Command::new("sh")
-        .args(["-c", "command -v jq"])
-        .output()
-        .is_ok_and(|ran| ran.status.success())
-    {
+    if probe_jq("the HEAD the shipped script sets from the manifest") {
         let head = git(
             &[
                 "--git-dir",
@@ -1594,8 +1611,7 @@ fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
 /// is the same refusal in the script that runs when `rad-backup` is not there.
 #[test]
 fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
-    if Command::new("jq").arg("--version").output().is_err() {
-        eprintln!("skipping: this check needs jq, which is what reads `head` in the script");
+    if !probe_jq("the shipped script's refusal of a head that names no ref") {
         return;
     }
     let fixture = Fixture::create("script-head");
@@ -2016,6 +2032,14 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     // machine to warn about.
     let ran = fixture.run(&["doctor", "--json"], &fixture.home());
     assert_eq!(verdict_of(&ran, "key copies"), "pass");
+
+    // How many checks the command runs, asked of the command itself. `doctor.rs` keeps a
+    // hand-written list of every check for the rules that sweep their topics, and a tenth
+    // check added to `examine` alone would be swept by none of them: this is the half of the
+    // pair that notices. Raise both when a check is added, and put it in `every_topic` too.
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
+    assert_eq!(report["total"], 9, "{report}");
 
     let restored = fixture.path("restored");
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
