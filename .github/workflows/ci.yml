@@ -47,163 +47,30 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y busybox
       - name: Formatting
         run: cargo fmt --check
-      # Here as well as in `just check`, because CI runs the cargo commands directly rather
-      # than the recipe: a gate that only one of the two enforces is a gate that lands broken
-      # on whichever side nobody ran. Shell-only, so it costs nothing on any of the three.
+      # The shell gates live in `ci/` and the justfile calls the same scripts. Spelled out in
+      # both places they drifted, and a gate only one side enforces lands broken on whichever
+      # side nobody ran.
+      #
+      # Linux only: each of them reads tracked text and asks nothing of the platform, so the
+      # other two runners would spend a shell on the same answer.
       - name: Audit map
-        shell: bash
-        run: |
-          missing=0
-          rows=0
-          for path in $(grep -o '`src/[^`]*`' SECURITY.md | tr -d '`'); do
-            if [ ! -e "$path" ]; then
-              echo "::error::SECURITY.md sends a reviewer to $path, which is not there"
-              missing=1
-            fi
-            rows=$((rows + 1))
-          done
-          # Zero paths means the map stopped matching the pattern, not that it is clean.
-          if [ "$rows" -eq 0 ]; then
-            echo "::error::the audit map in SECURITY.md matched no rows, so nothing was checked"
-            missing=1
-          fi
-          exit "$missing"
-      # Five naming rules, spelled out here for the same reason the audit map above is. The
-      # rationale for each is in the `names` recipe in the justfile; a rule added there has
-      # to be added here too.
+        if: matrix.os == 'ubuntu-latest'
+        run: ci/audit-map.sh
       - name: Names
-        shell: bash
-        run: |
-          found=0
-          rules=0
-          placeholders='out|err|res|ret|val|tmp|data|thing|item|result'
-          named_for_nothing=$(grep -rEn "let (mut )?($placeholders)( |:|=)" src/ || true)
-          if [ -n "$named_for_nothing" ]; then
-            echo "$named_for_nothing" | sed 's/$/: a local named after how it arrived, not what it holds/' | sed 's/^/::error::/'
-            found=1
-          fi
-          rules=$((rules + 1))
-          claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
-          visibility='(pub(\([a-z]+\))? )?'
-          not_a_claim=$(grep -rEn "^[[:space:]]+${visibility}[a-z_]+: bool,$" src/ \
-            | grep -v '^src/cli.rs:' \
-            | grep -vE ":[[:space:]]+${visibility}([a-z_]+_)?${claims}_" || true)
-          if [ -n "$not_a_claim" ]; then
-            echo "$not_a_claim" | sed 's/$/: a bool has to read as a claim (is_, has_, was_, uses_, ...)/' | sed 's/^/::error::/'
-            found=1
-          fi
-          rules=$((rules + 1))
-          env_readers=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
-            awk -v file="$file" '
-              {
-                if ($0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?(const |unsafe |async )*fn [a-z_]+/) {
-                  match($0, /fn [a-z_]+/)
-                  name = substr($0, RSTART + 3, RLENGTH - 3)
-                  signature = $0
-                  collecting = (index($0, "{") == 0 && index($0, ";") == 0)
-                } else if (collecting) {
-                  signature = signature " " $0
-                  if (index($0, "{") || index($0, ";")) collecting = 0
-                }
-                if ($0 ~ /env::var/) {
-                  if (signature ~ /->[^{]*Self/) next
-                  if (name ~ /_from_env$/) next
-                  if (name ~ /^(read|probe|ask|require)_/) next
-                  printf "%s:%d: fn %s reads the environment\n", file, NR, name
-                }
-              }
-            ' "$file"
-          done)
-          if [ -n "$env_readers" ]; then
-            echo "$env_readers" | sed 's/$/, so its name has to say so (read_, probe_, ask_, require_, _from_env)/' | sed 's/^/::error::/'
-            found=1
-          fi
-          rules=$((rules + 1))
-          shared_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$' | grep -v '^src/key.rs$'); do
-            if tr '\n' ' ' < "$file" | grep -qE 'Scratch::create\([^)]*temp_dir'; then
-              echo "$file"
-            fi
-          done)
-          if [ -n "$shared_scratch" ]; then
-            echo "$shared_scratch" | sed 's/$/: two tests cannot share one scratch parent; use TestScratch::create("name")/' | sed 's/^/::error::/'
-            found=1
-          fi
-          rules=$((rules + 1))
-          duplicate_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
-            # `|| true` because `set -e` ends the whole subshell at the first file with no
-          # match, which is most of them: the list came back holding whatever had been
-          # collected before it, and the rule reported a clean tree without reading one.
-          tr '\n' ' ' < "$file" | grep -oE 'TestScratch::create\([[:space:]]*"[^"]+"' || true
-          done | sed 's/.*"\(.*\)"/\1/' | sort | uniq -d)
-          if [ -n "$duplicate_scratch" ]; then
-            echo "$duplicate_scratch" | sed 's/$/: two tests ask TestScratch for this name, so one of them is refused/' | sed 's/^/::error::/'
-            found=1
-          fi
-          rules=$((rules + 1))
-          # Zero rules run means the step stopped doing anything, not that the tree is clean.
-          if [ "$rules" -ne 5 ]; then
-            echo "::error::the name check ran $rules of its 5 rules, so it checked less than it claims"
-            found=1
-          fi
-          exit "$found"
-      # `just messages`, spelled out like the gates above. A message written across two source
-      # lines needs a trailing `\` inside the literal, and nothing else in this file would
-      # notice it missing: `cargo fmt` does not reach inside a literal, so the gap reaches the
-      # user as a hole in the middle of a warning.
+        if: matrix.os == 'ubuntu-latest'
+        run: ci/names.sh
       - name: Messages
-        shell: bash
-        run: |
-          gap='"[^"]*[[:alnum:],.:;)]   +[[:alnum:]]'
-          # Tried against a line known to be bad first, so a pattern that stopped matching
-          # anything cannot report the tree as clean.
-          if ! printf '%s\n' 'x("a node running: the run                      that took it")' \
-            | grep -Eq "$gap"; then
-            echo "::error::the message check no longer catches a gap it was written for"
-            exit 1
-          fi
-          gaps=$(grep -rEn "$gap" --include='*.rs' src/ tests/ || true)
-          if [ -n "$gaps" ]; then
-            echo "$gaps" | sed 's/$/: a run of spaces in a message, so a line continuation was dropped/' | sed 's/^/::error::/'
-            exit 1
-          fi
+        if: matrix.os == 'ubuntu-latest'
+        run: ci/messages.sh
       # `--locked`, so a Cargo.toml requirement widened without updating Cargo.lock is an error
       # rather than a silent re-resolve. Without it the dependency-age gate below sees no added
       # versions while the build pulls and runs a crate published this morning.
       - name: Lints
         run: cargo clippy --all-targets --locked
-      # `just nonunix`, spelled out for the same reason the audit map above is: CI runs the
-      # commands rather than the recipe. Linux only, because it is a simulation of what the
-      # windows job compiles for real. Every tracked `.rs` file: reading only the integration
-      # suite left `src/` out, and `src/home.rs` alone carries eight of the gates.
+      # Linux only, because it is a simulation of what the windows job compiles for real.
       - name: Non-unix gates
         if: matrix.os == 'ubuntu-latest'
-        shell: bash
-        run: |
-          files=$(git ls-files 'src/' 'tests/' | grep '\.rs$')
-          if [ -z "$files" ]; then
-            echo "::error::no rust files were listed, so nothing was compiled"
-            exit 1
-          fi
-          saved=$(mktemp -d)
-          trap 'for file in $files; do cp "$saved/$(echo "$file" | tr / _)" "$file"; done; rm -rf "$saved"' EXIT
-          gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' $files | awk -F: '{total += $2} END {print total+0}')
-          if [ "$gates" -eq 0 ]; then
-            echo "::error::no '#[cfg(unix)]' gates matched, so nothing was checked"
-            exit 1
-          fi
-          # The second expression drops `#[cfg(not(unix))]` so its item compiles unconditionally:
-          # switching only the unix half of a platform pair off would take both arms away. The
-          # third makes every `not(unix)` still standing come out true, which is what applies a
-          # `#[cfg_attr(not(unix), ...)]` over an item this simulation has just switched off.
-          # A token and not a line, because `rustfmt` wraps a long attribute over four lines.
-          for file in $files; do
-            cp "$file" "$saved/$(echo "$file" | tr / _)"
-            sed -e 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' \
-              -e '/^[[:space:]]*#\[cfg(not(unix))\]$/d' \
-              -e 's/not(unix)/all()/g' \
-              "$saved/$(echo "$file" | tr / _)" > "$file"
-          done
-          cargo clippy --all-targets --locked
+        run: ci/nonunix.sh
       # The integration suite drives the real binary against a real git, which is what makes
       # it worth running on every platform rather than only where it was written. Windows is
       # where the "this cannot be restricted to one user" path is the live one, so a green run

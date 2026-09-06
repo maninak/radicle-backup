@@ -11,7 +11,7 @@ homepage = "https://radicle.tools"
 readme = "README.md"
 keywords = ["radicle", "backup", "restore", "git", "identity"]
 categories = ["command-line-utilities"]
-exclude = ["/.github", "/packaging", "/tests/fixtures"]
+exclude = ["/.github", "/ci", "/packaging", "/tests/fixtures"]
 
 # The crate is `radicle-backup`, matching the repository and the rest of the Radicle crates,
 # but the binary must be `rad-backup`: `rad backup` works by exec'ing NAME-SUBCOMMAND, so the

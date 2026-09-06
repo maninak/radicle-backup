@@ -3,252 +3,26 @@
 default:
     @just --list
 
-# What CI runs on every push, in the order that fails fastest. CI spells the cargo steps
-# out itself rather than calling this, so a gate added here has to be added there too.
+# What CI runs on every push, in the order that fails fastest. The shell gates live in `ci/`
+# and both this file and the workflow call them there: spelled out in two places they drifted,
+# and a gate only one side enforces is one that lands broken on whichever side nobody ran.
 check: fmt-check audit-map names messages lint nonunix test
 
-# Every file SECURITY.md sends a reviewer to still exists.
-#
-# The audit map is the one document that promises "here is where the secrets are handled",
-# and a rename breaks it silently: renaming `archive.rs` to `container.rs` left a reviewer
-# following the map to a file that was not there, which is worse than no map at all.
+# Every file SECURITY.md sends a reviewer to still exists. Why, in `ci/audit-map.sh`.
 audit-map:
-    #!/usr/bin/env sh
-    set -eu
-    missing=0
-    rows=0
-    # Every backticked `src/...` in the file, not just the first of a row: the anchored form
-    # checked one path per line, so a row naming two files was half unchecked.
-    for path in $(grep -o '`src/[^`]*`' SECURITY.md | tr -d '`'); do
-    	if [ ! -e "$path" ]; then
-    		echo "SECURITY.md sends a reviewer to $path, which is not there" >&2
-    		missing=1
-    	fi
-    	rows=$((rows + 1))
-    done
-    # Zero rows means the table stopped matching the pattern, not that the map is clean. A
-    # gate that passes while checking nothing reports a safety it is not providing.
-    if [ "$rows" -eq 0 ]; then
-    	echo "the audit map in SECURITY.md matched no rows, so nothing was checked" >&2
-    	missing=1
-    fi
-    exit "$missing"
+    ci/audit-map.sh
 
-# No user-facing message carries a run of spaces where a line continuation should be.
-#
-# `cargo fmt` will not touch the inside of a literal, so a message hand-joined from two lines
-# keeps whatever whitespace the join left and reaches the user as a hole in the middle of a
-# sentence. One had been printing that way in `restore` for as long as the warning existed.
-#
-# Line-based, so it catches the run of spaces WITHIN one source line, which is the shape the
-# real defect had. A literal continued to the next line with the trailing `\` dropped is a
-# different shape and this does not see it: telling a literal that spans lines from a comment,
-# a char literal or a raw string needs a Rust parser, and a gate that guesses would fire on
-# the templates this tool ships. Revisit if that shape ever occurs.
-#
-# The pattern deliberately wants a word character on both sides of the run, so the indentation
-# inside the multi-line templates this tool ships (`RESTORE.md`, `restore.sh`, the systemd
-# units, the recovery sheet) is not a hit.
+# No user-facing message has a hole in the middle of it. Why, in `ci/messages.sh`.
 messages:
-    #!/usr/bin/env sh
-    set -eu
-    gap='"[^"]*[[:alnum:],.:;)]   +[[:alnum:]]'
-    # The pattern is tried against a line known to be bad first. A gate nobody has watched
-    # fail reports a safety it may not be providing, and this one is a single regex.
-    if ! printf '%s\n' 'x("a node running: the run                      that took it")' \
-    	| grep -Eq "$gap"; then
-    	echo "the message check no longer catches a gap it was written for" >&2
-    	exit 1
-    fi
-    gaps=$(grep -rEn "$gap" --include='*.rs' src/ tests/ || true)
-    if [ -n "$gaps" ]; then
-    	echo "$gaps" | sed 's/$/: a run of spaces in a message, so a line continuation was dropped/' >&2
-    	exit 1
-    fi
+    ci/messages.sh
 
-# Five naming rules a reviewer kept having to enforce by hand.
-#
-# None of them is a matter of taste. A local called `out` next to one called `err` reads as a
-# pair when one is a process and the other a file handle; `if record.delegate` cannot be
-# checked by eye because it could as easily mean "has a delegate"; and a function that reads
-# the environment behind a pure-sounding name cannot be tested without setting a variable in
-# the process every other test shares. All three were found across the whole tree in one
-# sweep, so all three are worth a gate rather than another sweep later.
-#
-# Shell-only, like the audit map, so it costs nothing on any of the three CI platforms. CI
-# spells this out itself, so a rule added here has to be added there too.
+# Six naming rules a reviewer kept having to enforce by hand. Why, in `ci/names.sh`.
 names:
-    #!/usr/bin/env sh
-    set -eu
-    found=0
-    rules=0
+    ci/names.sh
 
-    # A local named after how the value arrived rather than what it holds. Every one of these
-    # in this tree turned out to have a real name waiting: `stdout`, `stderr`, `printed`,
-    # `finished`, `said`, `read_back`.
-    placeholders='out|err|res|ret|val|tmp|data|thing|item|result'
-    named_for_nothing=$(grep -rEn "let (mut )?($placeholders)( |:|=)" src/ || true)
-    if [ -n "$named_for_nothing" ]; then
-    	echo "$named_for_nothing" | sed 's/$/: a local named after how it arrived, not what it holds/' >&2
-    	found=1
-    fi
-    rules=$((rules + 1))
-
-    # A bool that does not read as a claim, so a call site cannot be checked by eye.
-    #
-    # `src/cli.rs` is exempt: a field there IS the long flag clap derives from it, so its name
-    # belongs to the command line and renaming one breaks somebody's script. A field that goes
-    # on the wire is renamed here and pinned there with `#[serde(rename = ...)]`, because an
-    # archive is read by versions that were never built.
-    claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
-    visibility='(pub(\([a-z]+\))? )?'
-    not_a_claim=$(grep -rEn "^[[:space:]]+${visibility}[a-z_]+: bool,$" src/ \
-    	| grep -v '^src/cli.rs:' \
-    	| grep -vE ":[[:space:]]+${visibility}([a-z_]+_)?${claims}_" || true)
-    if [ -n "$not_a_claim" ]; then
-    	echo "$not_a_claim" | sed 's/$/: a bool has to read as a claim (is_, has_, was_, uses_, ...)/' >&2
-    	found=1
-    fi
-    rules=$((rules + 1))
-
-    # A function that reads the environment under a name that sounds pure. `archive_dir` was
-    # one, and it could not be tested at all: setting a variable to check its precedence sets
-    # it for every other test in the process. A constructor is exempt, told by `Self` in the
-    # RETURN position and not merely somewhere on the signature, because building this
-    # program's view of its environment is what one is for and the type name already says so.
-    #
-    # The signature is collected across the lines rustfmt wrapped it over, so a long
-    # constructor is not read as a plain function. `env::var` is matched however the module was
-    # brought into scope; `use std::env as e` would still slip past, which is a spelling
-    # nothing in this tree uses and no reviewer would let through.
-    env_readers=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
-    	awk -v file="$file" '
-    		{
-    			if ($0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?(const |unsafe |async )*fn [a-z_]+/) {
-    				match($0, /fn [a-z_]+/)
-    				name = substr($0, RSTART + 3, RLENGTH - 3)
-    				signature = $0
-    				collecting = (index($0, "{") == 0 && index($0, ";") == 0)
-    			} else if (collecting) {
-    				signature = signature " " $0
-    				if (index($0, "{") || index($0, ";")) collecting = 0
-    			}
-    			if ($0 ~ /env::var/) {
-    				if (signature ~ /->[^{]*Self/) next
-    				if (name ~ /_from_env$/) next
-    				if (name ~ /^(read|probe|ask|require)_/) next
-    				printf "%s:%d: fn %s reads the environment\n", file, NR, name
-    			}
-    		}
-    	' "$file"
-    done)
-    if [ -n "$env_readers" ]; then
-    	echo "$env_readers" | sed 's/$/, so its name has to say so (read_, probe_, ask_, require_, _from_env)/' >&2
-    	found=1
-    fi
-    rules=$((rules + 1))
-
-    # A test staging its files straight into the shared temporary directory. `Scratch` names
-    # its directory after the process id alone and refuses one that is already there, and the
-    # whole test binary is one process, so two such tests running at once refuse each other:
-    # a failure that depends on how the runner interleaves them and names neither cause.
-    # `TestScratch` exists for this and gives each test a parent of its own.
-    #
-    # Read with the newlines squeezed out, because a line-based grep is evaded by rustfmt
-    # alone: a longer receiver wraps the argument onto its own line and the pattern stops
-    # matching, with nobody having decided anything. `key.rs` is where `TestScratch` itself
-    # reaches for the temporary directory, which is the one place that may.
-    shared_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$' | grep -v '^src/key.rs$'); do
-    	if tr '\n' ' ' < "$file" | grep -qE 'Scratch::create\([^)]*temp_dir'; then
-    		echo "$file"
-    	fi
-    done)
-    if [ -n "$shared_scratch" ]; then
-    	echo "$shared_scratch" | sed 's/$/: two tests cannot share one scratch parent; use TestScratch::create("name")/' >&2
-    	found=1
-    fi
-    rules=$((rules + 1))
-
-    # Two tests handed the same name share one parent directory, and `TestScratch` refuses the
-    # second: the interleaving-dependent failure rule four exists to stop, one layer further in.
-    # Names squeezed of newlines for the same reason rule four is.
-    duplicate_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
-    	# `|| true` because `set -e` ends the whole subshell at the first file with no
-    # match, which is most of them: the list came back holding whatever had been
-    # collected before it, and the rule reported a clean tree without reading one.
-    tr '\n' ' ' < "$file" | grep -oE 'TestScratch::create\([[:space:]]*"[^"]+"' || true
-    done | sed 's/.*"\(.*\)"/\1/' | sort | uniq -d)
-    if [ -n "$duplicate_scratch" ]; then
-    	echo "$duplicate_scratch" | sed 's/$/: two tests ask TestScratch for this name, so one of them is refused/' >&2
-    	found=1
-    fi
-    rules=$((rules + 1))
-
-    # Zero rules run means the recipe stopped doing anything, not that the tree is clean.
-    if [ "$rules" -ne 5 ]; then
-    	echo "the name check ran $rules of its 5 rules, so it checked less than it claims" >&2
-    	found=1
-    fi
-    exit "$found"
-
-# Compile the suite the way a target that is not unix sees it.
-#
-# A helper without `#[cfg(unix)]` that calls one which has it builds here and fails on
-# Windows, and that has now reached CI three times. There is no local windows build to catch
-# it with, because zstd's C code wants `lib.exe`, so this turns the gates off and compiles
-# that instead.
-#
-# Every tracked `.rs` file, not just the integration suite. Reading one file left `src/` out,
-# which is where eight of the gates in `src/home.rs` alone live: a change that made two
-# `NodeState` variants unreachable off unix passed this recipe and would have failed the
-# Windows job, and only a hand-run of the same two `sed` expressions over `src/` found it.
-#
-# Files are rewritten in place and put back by the trap, so a failing compile or a Ctrl-C
-# leaves the working tree as it found it.
+# Compile the suite the way a target that is not unix sees it. Why, in `ci/nonunix.sh`.
 nonunix:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    files=$(git ls-files 'src/' 'tests/' | grep '\.rs$')
-    # An empty list is a checkout this recipe cannot read, not a tree with nothing to check.
-    if [ -z "$files" ]; then
-    	echo "no rust files were listed, so nothing was compiled" >&2
-    	exit 1
-    fi
-    saved=$(mktemp -d)
-    trap 'for file in $files; do cp "$saved/$(echo "$file" | tr / _)" "$file"; done; rm -rf "$saved"' EXIT
-    # Zero gates means the pattern stopped matching, not that there is nothing to check.
-    gates=$(grep -c '^[[:space:]]*#\[cfg(unix)\]$' $files | awk -F: '{total += $2} END {print total+0}')
-    if [ "$gates" -eq 0 ]; then
-    	echo "no '#[cfg(unix)]' gates matched, so nothing was checked" >&2
-    	exit 1
-    fi
-    # Indented gates count: a method inside an `impl` carries one, and leaving it while its
-    # caller goes reports the caller's absence as dead code, which is this check inventing a
-    # failure windows would never see.
-    #
-    # The second expression drops `#[cfg(not(unix))]` so its item compiles unconditionally.
-    # A platform pair has two arms, and switching only the unix one off would take both away,
-    # reporting an absence windows would never see.
-    #
-    # The third makes every `not(unix)` still standing come out true, which is what applies a
-    # `#[cfg_attr(not(unix), ...)]`. `unix` holds here, so without it the simulation switches
-    # an item off and then declines to apply the very attribute that says why the item is
-    # gone, reporting a failure windows would never see. It runs after the deletion above, so
-    # the only `not(unix)` left to rewrite is one inside a `cfg_attr`. Substituting the token
-    # rather than matching the line, because `rustfmt` wraps a long attribute over four lines
-    # on a width it does not document, and a line-shaped pattern quietly stops matching the
-    # day a reason gets longer.
-    #
-    # Reading a saved copy and writing the file, rather than `sed -i`, which spells its backup
-    # suffix differently on GNU and BSD and so breaks on the macOS checkouts.
-    for file in $files; do
-    	cp "$file" "$saved/$(echo "$file" | tr / _)"
-    	sed -e 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' \
-    		-e '/^[[:space:]]*#\[cfg(not(unix))\]$/d' \
-    		-e 's/not(unix)/all()/g' \
-    		"$saved/$(echo "$file" | tr / _)" > "$file"
-    done
-    RUSTFLAGS="-D warnings" cargo clippy --all-targets --locked
+    ci/nonunix.sh
 
 fmt:
     cargo fmt
