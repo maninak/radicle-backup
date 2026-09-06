@@ -353,10 +353,15 @@ pub(crate) mod tests {
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .find(|path| path.extension().is_some_and(|kind| kind == "pack"))
             .expect("repack wrote a pack");
-        // Rewritten rather than truncated in place, because `repack` leaves the file read
-        // only and this has to work without a mode change on every platform the tests run on.
-        let short = std::fs::read(&pack).expect("the pack is readable")[..60].to_vec();
-        std::fs::remove_file(&pack).expect("the pack is removable");
+        // `repack` leaves the pack read only, and on Windows that is a file attribute a write
+        // will not clear for itself, so the mode goes back first. Owner-only rather than
+        // `set_readonly(false)`, which on unix hands the file to everybody.
+        crate::perms::set_mode(&pack, crate::perms::MODE_SECRET)
+            .expect("the pack's mode is settable");
+        // Truncated to whatever is there when the pack is shorter than the cut, because a
+        // slice index that panicked would report a broken test as a broken assertion.
+        let whole = std::fs::read(&pack).expect("the pack is readable");
+        let short = whole[..whole.len().min(60)].to_vec();
         std::fs::write(&pack, short).expect("the pack is writable");
     }
 

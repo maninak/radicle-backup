@@ -40,22 +40,18 @@ pub fn copy_doc(from: &Path, to: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("rad-backup-perms-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
-        dir
-    }
-
     #[test]
     fn a_replacement_that_cannot_even_be_staged_leaves_the_original_alone() {
-        let dir = scratch("replace-keeps-the-original");
-        let path = dir.join("radicle");
+        // Owner-only, like every other fixture in this crate that writes a file named after a
+        // key: this one is a placeholder, and a directory anyone can read is the habit that
+        // puts a real one there.
+        let scratch = crate::key::tests::TestScratch::create("perms-keeps-the-original");
+        let path = scratch.path_of("radicle");
         std::fs::write(&path, b"the identity already here").expect("a file worth protecting");
         // Nothing can be created under the staging name, so the replacement fails at its
         // first step, which is the earliest a failure can happen.
-        std::fs::create_dir(dir.join("radicle.partial")).expect("the staging name is occupied");
+        std::fs::create_dir(scratch.path_of("radicle.partial"))
+            .expect("the staging name is occupied");
 
         assert!(write_atomically(&path, b"the identity being restored", MODE_SECRET).is_err());
 
@@ -65,13 +61,12 @@ mod tests {
             std::fs::read(&path).expect("the original is still readable"),
             b"the identity already here"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_replacement_that_worked_leaves_no_staging_file_behind() {
-        let dir = scratch("replace-sweeps-up");
-        let path = dir.join("radicle");
+        let scratch = crate::key::tests::TestScratch::create("perms-sweeps-up");
+        let path = scratch.path_of("radicle");
         write_atomically(&path, b"the identity being restored", MODE_SECRET)
             .expect("the write lands");
 
@@ -80,10 +75,9 @@ mod tests {
             b"the identity being restored"
         );
         assert!(
-            !dir.join("radicle.partial").exists(),
+            !scratch.path_of("radicle.partial").exists(),
             "the staging name must not survive a successful write"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

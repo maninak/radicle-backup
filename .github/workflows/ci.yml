@@ -68,7 +68,7 @@ jobs:
             missing=1
           fi
           exit "$missing"
-      # Four naming rules, spelled out here for the same reason the audit map above is. The
+      # Five naming rules, spelled out here for the same reason the audit map above is. The
       # rationale for each is in the `names` recipe in the justfile; a rule added there has
       # to be added here too.
       - name: Names
@@ -129,9 +129,20 @@ jobs:
             found=1
           fi
           rules=$((rules + 1))
+          duplicate_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
+            # `|| true` because `set -e` ends the whole subshell at the first file with no
+          # match, which is most of them: the list came back holding whatever had been
+          # collected before it, and the rule reported a clean tree without reading one.
+          tr '\n' ' ' < "$file" | grep -oE 'TestScratch::create\([[:space:]]*"[^"]+"' || true
+          done | sed 's/.*"\(.*\)"/\1/' | sort | uniq -d)
+          if [ -n "$duplicate_scratch" ]; then
+            echo "$duplicate_scratch" | sed 's/$/: two tests ask TestScratch for this name, so one of them is refused/' | sed 's/^/::error::/'
+            found=1
+          fi
+          rules=$((rules + 1))
           # Zero rules run means the step stopped doing anything, not that the tree is clean.
-          if [ "$rules" -ne 4 ]; then
-            echo "::error::the name check ran $rules of its 4 rules, so it checked less than it claims"
+          if [ "$rules" -ne 5 ]; then
+            echo "::error::the name check ran $rules of its 5 rules, so it checked less than it claims"
             found=1
           fi
           exit "$found"

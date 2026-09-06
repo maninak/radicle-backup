@@ -66,7 +66,7 @@ messages:
     	exit 1
     fi
 
-# Three naming rules a reviewer kept having to enforce by hand.
+# Five naming rules a reviewer kept having to enforce by hand.
 #
 # None of them is a matter of taste. A local called `out` next to one called `err` reads as a
 # pair when one is a process and the other a file handle; `if record.delegate` cannot be
@@ -169,9 +169,24 @@ names:
     fi
     rules=$((rules + 1))
 
+    # Two tests handed the same name share one parent directory, and `TestScratch` refuses the
+    # second: the interleaving-dependent failure rule four exists to stop, one layer further in.
+    # Names squeezed of newlines for the same reason rule four is.
+    duplicate_scratch=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
+    	# `|| true` because `set -e` ends the whole subshell at the first file with no
+    # match, which is most of them: the list came back holding whatever had been
+    # collected before it, and the rule reported a clean tree without reading one.
+    tr '\n' ' ' < "$file" | grep -oE 'TestScratch::create\([[:space:]]*"[^"]+"' || true
+    done | sed 's/.*"\(.*\)"/\1/' | sort | uniq -d)
+    if [ -n "$duplicate_scratch" ]; then
+    	echo "$duplicate_scratch" | sed 's/$/: two tests ask TestScratch for this name, so one of them is refused/' >&2
+    	found=1
+    fi
+    rules=$((rules + 1))
+
     # Zero rules run means the recipe stopped doing anything, not that the tree is clean.
-    if [ "$rules" -ne 4 ]; then
-    	echo "the name check ran $rules of its 4 rules, so it checked less than it claims" >&2
+    if [ "$rules" -ne 5 ]; then
+    	echo "the name check ran $rules of its 5 rules, so it checked less than it claims" >&2
     	found=1
     fi
     exit "$found"
