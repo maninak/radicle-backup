@@ -196,8 +196,7 @@ impl Drop for Scratch {
 /// An over-estimate, since a substituted marker also removes the `{{KEY}}` it replaced, and a
 /// buffer larger than needed is the harmless direction.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let room = template.len() + values.iter().map(|(_, value)| value.len()).sum::<usize>();
-    let mut filled = String::with_capacity(room);
+    let mut filled = String::with_capacity(room_for(template, values));
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];
@@ -218,6 +217,23 @@ pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
     }
     filled.push_str(rest);
     filled
+}
+
+/// How much room [`fill`] needs before it writes anything.
+///
+/// Each value is counted once per marker that asks for it, not once: `{{ALIAS}}` is in the
+/// recovery sheet twice and `{{FILE}}` is in the sidecar four times, so counting a value once
+/// leaves the buffer short of an alias long enough to matter, and it grows in the middle of
+/// the document, freeing a heap block that already holds the key and the QR code.
+fn room_for(template: &str, values: &[(&str, &str)]) -> usize {
+    template.len()
+        + values
+            .iter()
+            .map(|(name, value)| {
+                let marker = format!("{{{{{name}}}}}");
+                template.matches(marker.as_str()).count() * value.len()
+            })
+            .sum::<usize>()
 }
 
 /// Refuse a retention of zero, wherever it was spelled.
@@ -312,6 +328,24 @@ mod tests {
             &[("ALIAS", "{{SECRET}}"), ("SECRET", "the 24 words")],
         );
         assert_eq!(filled, "{{SECRET}} holds the 24 words");
+    }
+
+    #[test]
+    fn a_document_is_sized_for_every_marker_that_asks_for_the_same_value() {
+        // The sheet `paper` prints carries `{{ALIAS}}` in its title and again in its table,
+        // and the sidecar carries `{{FILE}}` four times. Room for one copy is room the key
+        // and the QR outgrow halfway down the document.
+        let template = "{{ALIAS}} .. {{ALIAS}}";
+        let values = [("ALIAS", "a name long enough to matter")];
+        assert!(room_for(template, &values) >= fill(template, &values).len());
+    }
+
+    #[test]
+    fn a_document_is_sized_without_counting_a_value_no_marker_asks_for() {
+        // The over-estimate is deliberate but it is not unbounded: a value passed to a
+        // template that does not name it is a marker count of zero, so the sheet is not
+        // sized for a mnemonic it never prints.
+        assert_eq!(room_for("nothing here", &[("SECRET", "the 24 words")]), 12);
     }
 
     #[test]

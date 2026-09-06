@@ -53,7 +53,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - The signed-ref oids in a manifest are checked before they reach `git`, and a manifest whose node id is not the key it carries is refused. `merge-base` takes no `--`, so a value out of an archive nobody vouched for could be read as one of its own flags; and a node id that disagreed with the key made every repository come back with nothing to compare, so a restore exited `0` having compared nothing.
 - A restore now says when the git it is using checks nothing inside a bundle. Both readers pass `fetch.fsckObjects`, which is the whole of what stops a bundle writing a tree entry named `.git` into storage, and git consults it on a bundle only from 2.46: every older git accepted the setting and ignored it. `restore` and the shipped `restore.sh` both say so now, and name the git that runs the check.
 - The note written beside a recipient-encrypted archive gave a command that cannot open it. It printed `age -d <file>`, which asks for a passphrase such an archive does not have, and the `rad-backup` lines beside it left out `--identity`. It now names the keys the archive was encrypted to, and how to give one.
-- `paper` no longer leaves plaintext copies of the key on the heap while escaping it and rendering its QR code. The sheet it prints is byte for byte the same.
+- `paper` no longer leaves plaintext copies of the key on the heap while escaping it, rendering its QR code, or filling the sheet. The buffer was sized counting each value once, and the sheet names the alias twice, so a long enough alias grew it halfway through and freed a block already holding the key. The sheet it prints is byte for byte the same.
 
 ## [0.2.1] - 2026-08-22
 
