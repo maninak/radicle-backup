@@ -14,7 +14,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const EXIT_CHECKS_FAILED: u8 = 3;
 /// Exit code for a run that stopped on purpose to avoid destroying something.
 pub const EXIT_REFUSED: u8 = 4;
-/// Exit code for a run that simply failed. `ExitCode::FAILURE` in a name the tests can compare.
+/// Exit code for a run that simply failed. `ExitCode::FAILURE` in a name the tests can
+/// compare.
 pub const EXIT_FAILURE: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]

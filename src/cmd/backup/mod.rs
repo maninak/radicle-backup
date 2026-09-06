@@ -41,11 +41,11 @@ const SCRIPT_MODE: u32 = 0o755;
 
 /// What a run produced, and whether it produced all of it.
 ///
-/// `is_incomplete` exists because a backup that lost a repository still writes a usable archive:
-/// refusing the whole run over one damaged repository is worse for the user than carrying the
-/// rest. So the loss travels out as a flag and becomes exit 3, which is what an unattended
-/// timer can actually see. Without it, `rad backup` exited 0 on a run that dropped the one
-/// repository nothing else has a copy of.
+/// `is_incomplete` exists because a backup that lost a repository still writes a usable
+/// archive: refusing the whole run over one damaged repository is worse for the user than
+/// carrying the rest. So the loss travels out as a flag and becomes exit 3, which is what an
+/// unattended timer can actually see. Without it, `rad backup` exited 0 on a run that dropped
+/// the one repository nothing else has a copy of.
 pub struct Outcome {
     pub path: Option<PathBuf>,
     pub is_incomplete: bool,

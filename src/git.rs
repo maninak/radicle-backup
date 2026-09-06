@@ -295,12 +295,12 @@ fn parse_version(said: &str) -> Option<(u32, u32)> {
 ///
 /// The signed-ref oids in a manifest reach `git merge-base --is-ancestor <a> <b>`, which takes
 /// no `--` and reads a leading `-` as one of its own flags. The rid and the `HEAD` in the same
-/// manifest are already gated (`reject_hostile_rid`, `names_a_ref`) and these were not, so this
-/// closes the last argv position an unvouched-for archive reaches.
+/// manifest are already gated (`reject_hostile_rid`, `names_a_ref`) and these were not, so
+/// this closes the last argv position an unvouched-for archive reaches.
 ///
 /// Hexadecimal and nothing else, at sha1 or sha256 length, because that is what a sigref oid
-/// is. Not a revision expression: `HEAD@{1}`, `master^`, and every other thing git resolves are
-/// values a real archive never carries, and accepting them would put a parser between an
+/// is. Not a revision expression: `HEAD@{1}`, `master^`, and every other thing git resolves
+/// are values a real archive never carries, and accepting them would put a parser between an
 /// archive and a command line for no gain. Revisit if Radicle ever writes a sigref as anything
 /// but a full oid.
 pub fn names_an_oid(value: &str) -> bool {

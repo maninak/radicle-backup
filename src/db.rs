@@ -332,10 +332,10 @@ pub fn touched_warning(path: &Path) -> String {
 /// reader to start a node that is already running.
 ///
 /// One function for every reader, because the tolerance used to live in `read_synced_heads`
-/// alone and a heartwood release that renamed `routing` or `nodes` failed `rad backup` outright
-/// with an sqlite error. The absence is recorded for `drain_schema_drift`, because the empty
-/// map a reader hands back is the same answer as "the node has never run", and the two want
-/// different remedies.
+/// alone and a heartwood release that renamed `routing` or `nodes` failed `rad backup`
+/// outright with an sqlite error. The absence is recorded for `drain_schema_drift`, because
+/// the empty map a reader hands back is the same answer as "the node has never run", and the
+/// two want different remedies.
 fn prepare_against_heartwood<'db>(
     db: &'db Connection,
     path: &Path,

@@ -780,9 +780,9 @@ fn check_sole_delegate(inventory: &Inventory) -> Check {
 /// What to tell somebody an empty table sent here.
 ///
 /// "Start the node" is right when the node has never gossiped and wrong when it is running
-/// perfectly against a schema this build cannot read, and the two arrive as the same empty map.
-/// The warning naming the file and the sqlite reason is printed by the command layer either
-/// way; this is only about not sending a reader to start a node that is already up.
+/// perfectly against a schema this build cannot read, and the two arrive as the same empty
+/// map. The warning naming the file and the sqlite reason is printed by the command layer
+/// either way; this is only about not sending a reader to start a node that is already up.
 fn empty_because(schema_has_moved_on: bool, then: &str) -> String {
     if schema_has_moved_on {
         "this build cannot read part of the node's schema; see the warnings below".to_string()
@@ -1318,10 +1318,10 @@ mod tests {
     }
 
     /// A same-disk archive may still be replicated. A directory a cloud client watches shares
-    /// a filesystem with nothing that copies it locally, and is carried off the machine all the
-    /// same. Only the person running this knows, so the check reports the fact and leaves the
-    /// verdict short of a failure. Exiting 3 at somebody who is covered trains them to ignore
-    /// the 3.
+    /// a filesystem with nothing that copies it locally, and is carried off the machine all
+    /// the same. Only the person running this knows, so the check reports the fact and leaves
+    /// the verdict short of a failure. Exiting 3 at somebody who is covered trains them to
+    /// ignore the 3.
     #[test]
     fn an_archive_on_the_same_filesystem_warns_rather_than_fails_because_it_may_still_be_synced() {
         let dir = std::env::temp_dir().join(format!("rad-backup-locality-{}", std::process::id()));
@@ -1343,8 +1343,9 @@ mod tests {
 
     /// A real archive on disk, sealed as asked, plus the record a directory scan makes of it.
     ///
-    /// Every one of these checks reads the file now, so a fixture that is only a `state::Record`
-    /// would test the reading of a claim rather than the reading of an archive.
+    /// Every one of these checks reads the file now, so a fixture that is only a
+    /// `state::Record` would test the reading of a claim rather than the reading of an
+    /// archive.
     fn archive_at(
         dir: &std::path::Path,
         name: &str,
@@ -1624,8 +1625,9 @@ mod tests {
     }
 
     /// An empty table has two causes, and only one of them is answered by starting a node. A
-    /// reader whose node is running fine against a schema this build cannot read was being sent
-    /// to start it again, which does nothing and makes the report look wrong about everything.
+    /// reader whose node is running fine against a schema this build cannot read was being
+    /// sent to start it again, which does nothing and makes the report look wrong about
+    /// everything.
     #[test]
     fn a_table_this_build_cannot_read_is_not_answered_by_starting_the_node() {
         let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);

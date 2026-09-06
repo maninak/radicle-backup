@@ -329,8 +329,8 @@ pub(crate) mod tests {
     }
 
     /// The defect this guards: fixtures wrote key material into `/tmp` at the umask default,
-    /// through calls that follow a symlink planted under the guessable name. Every fixture file
-    /// now sits in a directory only its owner can enter.
+    /// through calls that follow a symlink planted under the guessable name. Every fixture
+    /// file now sits in a directory only its owner can enter.
     #[test]
     #[cfg(unix)]
     fn a_fixture_key_file_sits_in_a_directory_nobody_else_can_enter() {

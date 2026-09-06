@@ -22,10 +22,10 @@ pub const ARCHIVE_PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
 pub const KEY_PASSPHRASE_ENV: &str = "RAD_PASSPHRASE";
 /// Environment variable holding the passphrase that unlocks a `--identity` key file.
 ///
-/// Its own name rather than a share of `ARCHIVE_PASSPHRASE_ENV`, because the two protect different
-/// things and swapping them fails silently: the archive passphrase opens the archive, this one
-/// opens the private key an archive was encrypted to. A timer that verifies its own
-/// recipient-encrypted archives needs both, and needs to say which is which.
+/// Its own name rather than a share of `ARCHIVE_PASSPHRASE_ENV`, because the two protect
+/// different things and swapping them fails silently: the archive passphrase opens the
+/// archive, this one opens the private key an archive was encrypted to. A timer that verifies
+/// its own recipient-encrypted archives needs both, and needs to say which is which.
 pub const IDENTITY_PASSPHRASE_ENV: &str = "RAD_BACKUP_IDENTITY_PASSPHRASE";
 
 /// How an archive is protected.
@@ -124,9 +124,9 @@ impl Write for Sink<'_> {
 /// The private keys offered for an archive encrypted to a recipient, and what unlocks one that
 /// is itself passphrase-protected.
 ///
-/// An ssh key with a passphrase on it is the normal and recommended state of an ssh key, so the
-/// second half is not an extra: without it the common case of `--recipient <ssh pubkey>` writes
-/// an archive that the holder of the right key cannot open.
+/// An ssh key with a passphrase on it is the normal and recommended state of an ssh key, so
+/// the second half is not an extra: without it the common case of `--recipient <ssh pubkey>`
+/// writes an archive that the holder of the right key cannot open.
 #[derive(Clone, Default)]
 pub struct Identities {
     /// The key files named by `--identity`, in the order they were given.
@@ -268,10 +268,11 @@ pub enum Purpose {
 
 /// Which secret a passphrase protects.
 ///
-/// They lock different things, and confusing two of them fails quietly: a scheduled run reaches
-/// for the wrong environment variable, finds nothing, and asks a person who is not there.
-/// Taken as an enum so that the variable, the flag a failure sends the reader to, and the
-/// sentence about what an empty one costs all come from one place instead of from each caller.
+/// They lock different things, and confusing two of them fails quietly: a scheduled run
+/// reaches for the wrong environment variable, finds nothing, and asks a person who is not
+/// there. Taken as an enum so that the variable, the flag a failure sends the reader to, and
+/// the sentence about what an empty one costs all come from one place instead of from each
+/// caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protects {
     /// The archive, when it is locked with a passphrase rather than to a recipient.
@@ -445,8 +446,8 @@ fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {
 ///
 /// The record is what lets a failure name its cause. age answers `NoMatchingKeys` both for a
 /// key that is not a recipient of the archive and for one it could not unlock, which is the
-/// difference between "wrong key" and "right key, still locked": told the first when the second
-/// is true, someone holding the correct key gives up on it in the middle of a recovery.
+/// difference between "wrong key" and "right key, still locked": told the first when the
+/// second is true, someone holding the correct key gives up on it in the middle of a recovery.
 struct OfferedKeys {
     identities: Vec<Box<dyn age::Identity>>,
     /// The key file behind each entry of `identities`, in the same order age tries them.
@@ -520,10 +521,10 @@ impl OfferedKeys {
             // both for a passphrase that did not decrypt the key and for one that DID, over a
             // key whose inner type age cannot use: an encrypted ecdsa or `sk-ssh-*` key parses
             // as merely encrypted, because the envelope carries only the cipher, so the
-            // `Unsupported` check in `read` cannot see it. age also stops at the first key that
-            // fails, so the keys after it were never tried. Blaming the passphrase alone had
-            // someone retyping a correct secret while the key that opens the archive sat unread
-            // beside it.
+            // `Unsupported` check in `read` cannot see it. age also stops at the first key
+            // that fails, so the keys after it were never tried. Blaming the passphrase alone
+            // had someone retyping a correct secret while the key that opens the archive sat
+            // unread beside it.
             age::DecryptError::KeyDecryptionFailed => {
                 let culprit = self.passphrases.last_answered();
                 let named = culprit
@@ -864,8 +865,8 @@ mod tests {
         scratch.path_of(&format!("{name}.age"))
     }
 
-    /// Owner-only like the other two fixtures, because an archive holds the same secret its key
-    /// unlocks, and `File::create` would have followed a symlink planted under the name.
+    /// Owner-only like the other two fixtures, because an archive holds the same secret its
+    /// key unlocks, and `File::create` would have followed a symlink planted under the name.
     fn written_archive(scratch: &TestScratch, name: &str, encryption: &Encryption) -> PathBuf {
         let path = scratch_path(scratch, name);
         let file = crate::perms::create_private_file(&path).expect("scratch file is creatable");

@@ -183,9 +183,9 @@ pub struct SourceInfo {
     /// which only `move` does.
     ///
     /// A home restored from an archive where this is false may not be the only one holding the
-    /// identity, and two nodes signing under one peer id fork that peer's history. `None` in an
-    /// archive written before this field existed, which is the case nothing here can resolve
-    /// either way.
+    /// identity, and two nodes signing under one peer id fork that peer's history. `None` in
+    /// an archive written before this field existed, which is the case nothing here can
+    /// resolve either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retires_key: Option<bool>,
 }

@@ -215,8 +215,9 @@ impl Home {
     }
 
     /// Whether `path` is a directory with nothing in it. `rad auth` leaves an empty `storage`
-    /// and an empty `node`, and refusing over those would refuse the ordinary case of restoring
-    /// into a home somebody has just created. A directory that cannot be listed is not empty.
+    /// and an empty `node`, and refusing over those would refuse the ordinary case of
+    /// restoring into a home somebody has just created. A directory that cannot be listed is
+    /// not empty.
     fn is_empty_dir(&self, path: &Path) -> bool {
         match std::fs::read_dir(path) {
             Ok(mut entries) => entries.next().is_none(),

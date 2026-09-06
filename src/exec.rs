@@ -181,8 +181,8 @@ impl Tool {
         }
         // No pager and no credential prompt, because this tool parses git's output and runs
         // unattended: a `[pager] log = less` in the user's config, or a prompt for a password,
-        // would hang the run. The system-wide config is skipped for the same reason; the user's
-        // own config, aliases and hooks are still read.
+        // would hang the run. The system-wide config is skipped for the same reason; the
+        // user's own config, aliases and hooks are still read.
         cmd.env("GIT_PAGER", "cat");
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.env("GIT_TERMINAL_PROMPT", "0");

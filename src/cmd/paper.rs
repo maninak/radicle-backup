@@ -159,11 +159,11 @@ fn mnemonic(seed: &Zeroizing<[u8; 32]>) -> Result<Zeroizing<String>> {
 ///
 /// Not everything on the way there is wiped. `QrCode::new` encodes the key into a `Vec<Color>`
 /// module matrix through its own intermediates (the data bits, the codewords, the canvas), and
-/// the SVG renderer grows its `String` with `write!`, so every reallocation on the way leaves a
-/// partial copy of the drawing behind. All of that is private to `qrcode`, `Color` is a foreign
-/// type that implements no `Zeroize`, and `unsafe` is forbidden here, so none of it can be
-/// wiped from this side. What this function owns, it wipes: the finished SVG is taken over by
-/// move and trimmed in place, so no copy of the whole drawing is dropped intact.
+/// the SVG renderer grows its `String` with `write!`, so every reallocation on the way leaves
+/// a partial copy of the drawing behind. All of that is private to `qrcode`, `Color` is a
+/// foreign type that implements no `Zeroize`, and `unsafe` is forbidden here, so none of it
+/// can be wiped from this side. What this function owns, it wipes: the finished SVG is taken
+/// over by move and trimmed in place, so no copy of the whole drawing is dropped intact.
 fn qr_svg(text: &str) -> Result<Zeroizing<String>> {
     let code = QrCode::new(text.as_bytes()).map_err(|e| {
         Error::refused(
@@ -182,8 +182,9 @@ fn qr_svg(text: &str) -> Result<Zeroizing<String>> {
             .build(),
     );
     // The renderer emits an XML prolog, which is fine in a .svg file and wrong inside an HTML
-    // document, where it renders as visible text. The sheet is HTML, so it goes. Drained rather
-    // than sliced and copied, because the copy would leave the original to drop unwiped.
+    // document, where it renders as visible text. The sheet is HTML, so it goes. Drained
+    // rather than sliced and copied, because the copy would leave the original to drop
+    // unwiped.
     if let Some(start) = rendered.find("<svg") {
         rendered.drain(..start);
     }
@@ -205,8 +206,8 @@ fn key_block(key: &str) -> Zeroizing<String> {
 
 /// Numbered words, so a person reading them aloud and a person writing them down stay in step.
 ///
-/// Built in one buffer that wipes itself, because those words are the key: a `format!` per word
-/// would drop 24 small plaintext copies of it on the way.
+/// Built in one buffer that wipes itself, because those words are the key: a `format!` per
+/// word would drop 24 small plaintext copies of it on the way.
 fn word_grid(mnemonic: &str) -> Zeroizing<String> {
     const OPEN: &str = "<ol class=\"words\">";
     const CLOSE: &str = "</ol>";
@@ -289,7 +290,8 @@ mod tests {
     #[test]
     fn markup_in_an_alias_or_a_key_cannot_break_out_of_the_sheet() {
         assert_eq!(escape("<script>&").as_str(), "&lt;script&gt;&amp;");
-        // The same answer the `replace` chain it replaced gave, on every awkward shape at once.
+        // The same answer the `replace` chain it replaced gave, on every awkward shape at
+        // once.
         let text = "<&>&&<<>> plain & <x> \"q\" 'a' é\n";
         let reference = text
             .replace('&', "&amp;")

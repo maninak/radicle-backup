@@ -75,9 +75,9 @@ pub struct Restored {
 ///
 /// `rad backup --output backups/nightly.tar.zst` is written down as given, and the record is
 /// read back by a `doctor` or an `ls` run from somebody's home directory or by a timer with no
-/// working directory to speak of: they went looking in the wrong place and reported the archive
-/// missing. Falls back to the path as given when the current directory cannot be read, because
-/// a relative path is still better than no record at all.
+/// working directory to speak of: they went looking in the wrong place and reported the
+/// archive missing. Falls back to the path as given when the current directory cannot be read,
+/// because a relative path is still better than no record at all.
 fn absolute_as_far_as_it_goes(path: &Path) -> String {
     std::path::absolute(path)
         .unwrap_or_else(|_| path.to_path_buf())

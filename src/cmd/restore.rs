@@ -824,8 +824,8 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
 ///
 /// `rad node start` returns as soon as the daemon forks, so every query fired straight after
 /// it fails on a machine where the node takes a moment: the comparison then filled with
-/// `CouldNotAsk` for every repository and the restore reported success having compared nothing.
-/// `backup`'s `quiesce` waits the same way for the same reason.
+/// `CouldNotAsk` for every repository and the restore reported success having compared
+/// nothing. `backup`'s `quiesce` waits the same way for the same reason.
 #[cfg(unix)]
 fn wait_for_node(ctx: &Ctx) -> bool {
     let deadline = std::time::Instant::now() + NODE_START_TIMEOUT;
