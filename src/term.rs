@@ -22,6 +22,13 @@ pub struct Term {
 
 impl Term {
     pub fn new(verbosity: Verbosity, assume_yes: bool, force_no_colour: bool) -> Self {
+        // Both, and deliberately not `/dev/tty`, which is what rpassword would actually read
+        // from and which stays open through a redirect. A tool that opened `/dev/tty` would
+        // prompt a person who redirected stderr, which is friendlier, and would also HANG
+        // forever in any unattended run that happens to keep a controlling terminal, which
+        // for a backup means the backups quietly stop. Failing fast with a remedy line is the
+        // trade this makes. Revisit if a `--batch` flag ever gives unattended runs their own
+        // way to say there is nobody here.
         let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
         // NO_COLOR is honoured for any non-empty value, per the no-color.org convention.
         let no_colour_env = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());

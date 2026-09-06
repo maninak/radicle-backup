@@ -106,7 +106,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
 pub fn open(ctx: &Ctx, args: &Target) -> Result<Manifest> {
     let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
     let passphrase = crate::cmd::archive_passphrase(ctx, &archive)?;
-    let reader = Reader::open(&archive, passphrase.as_ref(), ctx.identity_files())?;
+    let reader = Reader::open(&archive, passphrase.as_ref(), &ctx.identities())?;
     Ok(reader.scan(&archive)?.manifest)
 }
 

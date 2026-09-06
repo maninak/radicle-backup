@@ -13,7 +13,7 @@ use std::process::{Command, Output, Stdio};
 
 use crate::error::{Error, Result};
 
-/// What a child process is allowed to inherit of the two passphrases this tool may hold.
+/// What a child process is allowed to inherit of the passphrases this tool may hold.
 ///
 /// A child inherits the whole environment unless something takes things out of it, and an
 /// environment is readable by anything that process goes on to run: a git hook, a credential
@@ -23,9 +23,9 @@ use crate::error::{Error, Result};
 enum Secrets {
     /// Nothing. What `git` and every other helper gets.
     None,
-    /// The Radicle key passphrase, and only that. `rad node start`, `rad seed` and `rad
-    /// follow` sign with the key, so `rad` is the one program that has a use for it.
-    KeyPassphrase,
+    /// One passphrase, and nothing else. `rad node start`, `rad seed` and `rad follow` sign
+    /// with the Radicle key, so `rad` is the one program that has a use for one.
+    Only(crate::crypt::Protects),
 }
 
 /// What a program said, kept apart from whether it succeeded.
@@ -48,7 +48,7 @@ impl Tool {
         Self {
             program: std::env::var("RAD").unwrap_or_else(|_| "rad".to_string()),
             home: Some(home.to_string_lossy().into_owned()),
-            secrets: Secrets::KeyPassphrase,
+            secrets: Secrets::Only(crate::crypt::Protects::RadicleKey),
         }
     }
 
@@ -156,12 +156,15 @@ impl Tool {
         cmd.env("GIT_PAGER", "cat");
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.env("GIT_TERMINAL_PROMPT", "0");
-        // The archive passphrase is never any child's business, and the key passphrase is
-        // only `rad`'s. Removed here, in the one place every spawn goes through, rather than
-        // at each call site where the next one added would forget.
-        cmd.env_remove(crate::crypt::PASSPHRASE_ENV);
-        if self.secrets == Secrets::None {
-            cmd.env_remove(crate::crypt::KEY_PASSPHRASE_ENV);
+        // Removed here, in the one place every spawn goes through, and by walking `Protects`
+        // rather than by naming variables: a fourth secret added to that enum is scrubbed by
+        // this loop on the day it appears, where a list here would have to be remembered. The
+        // walk is a `match` chain and not an array precisely so the compiler asks.
+        for protects in crate::crypt::Protects::all() {
+            if self.secrets == Secrets::Only(protects) {
+                continue;
+            }
+            cmd.env_remove(protects.env());
         }
         cmd
     }
@@ -213,25 +216,31 @@ mod tests {
     }
 
     #[test]
-    fn no_child_inherits_the_archive_passphrase() {
-        for tool in [
-            Tool::git(),
-            Tool::on_path("systemctl"),
-            Tool::rad(Path::new("/nowhere")),
-        ] {
-            assert!(
-                removed_by(&tool).contains(&crate::crypt::PASSPHRASE_ENV.to_string()),
-                "{} would have inherited the archive passphrase",
-                tool.program
-            );
+    fn a_helper_that_needs_no_secret_inherits_none_of_them() {
+        for tool in [Tool::git(), Tool::on_path("systemctl")] {
+            let removed = removed_by(&tool);
+            for protects in crate::crypt::Protects::all() {
+                assert!(
+                    removed.contains(&protects.env().to_string()),
+                    "{} would have inherited {}",
+                    tool.program,
+                    protects.env()
+                );
+            }
         }
     }
 
     #[test]
-    fn only_rad_inherits_the_key_passphrase_because_only_rad_signs_with_the_key() {
-        let key = crate::crypt::KEY_PASSPHRASE_ENV.to_string();
-        assert!(removed_by(&Tool::git()).contains(&key));
-        assert!(removed_by(&Tool::on_path("systemctl")).contains(&key));
-        assert!(!removed_by(&Tool::rad(Path::new("/nowhere"))).contains(&key));
+    fn rad_inherits_the_radicle_key_passphrase_and_still_none_of_the_others() {
+        let removed = removed_by(&Tool::rad(Path::new("/nowhere")));
+        for protects in crate::crypt::Protects::all() {
+            let inherited = !removed.contains(&protects.env().to_string());
+            assert_eq!(
+                inherited,
+                protects == crate::crypt::Protects::RadicleKey,
+                "rad and {}",
+                protects.env()
+            );
+        }
     }
 }

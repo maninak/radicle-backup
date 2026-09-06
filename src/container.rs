@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -201,7 +201,7 @@ impl<'a> Reader<'a> {
     pub fn open(
         path: &Path,
         passphrase: Option<&Zeroizing<String>>,
-        identities: &[PathBuf],
+        identities: &crypt::Identities,
     ) -> Result<Self> {
         let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
         let stream: Box<dyn Read> = if crypt::looks_encrypted(path)? {
@@ -452,6 +452,8 @@ impl<R: Read> Read for HashingReader<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::manifest::{IdentityInfo, NodeInfo, RepoSelection, SourceInfo, Tier, ToolInfo};
 
@@ -512,7 +514,7 @@ mod tests {
         let path = dir.join("archive.tar.zst");
         write_archive(&path, &Encryption::None);
 
-        let scan = Reader::open(&path, None, &[])
+        let scan = Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
             .scan(&path)
             .expect("archive scans");
@@ -532,7 +534,7 @@ mod tests {
         write_archive(&path, &Encryption::None);
 
         let into = dir.join("staging");
-        let scan = Reader::open(&path, None, &[])
+        let scan = Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
             .unpack(&path, &into)
             .expect("archive unpacks");
@@ -560,7 +562,7 @@ mod tests {
 
         // Rewrite the manifest's claim about one entry, which is what a corrupted archive
         // looks like from the reader's side.
-        let scan = Reader::open(&path, None, &[])
+        let scan = Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
             .scan(&path)
             .expect("archive scans");
@@ -591,9 +593,9 @@ mod tests {
         write_archive(&path, &Encryption::Passphrase(passphrase.clone()));
 
         assert!(crypt::looks_encrypted(&path).expect("header is readable"));
-        assert!(Reader::open(&path, None, &[]).is_err());
+        assert!(Reader::open(&path, None, &crypt::Identities::default()).is_err());
 
-        let scan = Reader::open(&path, Some(&passphrase), &[])
+        let scan = Reader::open(&path, Some(&passphrase), &crypt::Identities::default())
             .expect("archive opens with the passphrase")
             .scan(&path)
             .expect("archive scans");
@@ -639,7 +641,7 @@ mod tests {
         encoder.write_all(&tar).expect("the tar compresses");
         encoder.finish().expect("the encoder closes");
 
-        let failed = Reader::open(&path, None, &[])
+        let failed = Reader::open(&path, None, &crypt::Identities::default())
             .expect("the outer layers still open")
             .scan(&path);
         let failed = match failed {
@@ -703,7 +705,7 @@ mod tests {
         // Refused by `scan`, which is what every verb calls before it writes anything: the
         // entry names are checked elsewhere, and this is the second, separate place an
         // archive gets to state a path.
-        let refused = Reader::open(&path, None, &[])
+        let refused = Reader::open(&path, None, &crypt::Identities::default())
             .expect("the outer layers still open")
             .scan(&path);
         let refused = match refused {
@@ -738,7 +740,7 @@ mod tests {
         });
 
         let into = dir.join("staging");
-        Reader::open(&path, None, &[])
+        Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
             .unpack(&path, &into)
             .expect("archive unpacks");
@@ -776,7 +778,7 @@ mod tests {
         });
 
         let into = dir.join("staging");
-        let refused = Reader::open(&path, None, &[])
+        let refused = Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
             .unpack(&path, &into);
         assert!(matches!(refused, Err(Error::NotAnArchive { .. })));

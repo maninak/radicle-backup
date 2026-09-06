@@ -438,7 +438,7 @@ fn encryption_for(ctx: &Ctx, args: &Create) -> Result<Encryption> {
         return Ok(Encryption::Recipients(args.recipient.clone()));
     }
     let passphrase = crypt::read_passphrase(
-        crypt::PASSPHRASE_ENV,
+        crypt::Protects::Archive,
         ctx.global.passphrase_file.as_deref(),
         "Passphrase for the archive: ",
         crypt::Purpose::Sealing,
@@ -554,6 +554,48 @@ fn archive_repositories(
     })
 }
 
+/// The two lines of the sidecar that depend on how the archive was sealed: the shell command
+/// that opens it, and the paragraph above it saying what that command will want.
+///
+/// `age -d` with nothing else asks for a passphrase, which an archive encrypted to a recipient
+/// does not have: printed for one of those, the line fails for a reason that reads like the
+/// archive is broken. Each kind gets the line that actually opens it.
+///
+/// Pure, and separate from writing the note, because this is the part that has been wrong
+/// twice and the part a test can hold still.
+fn opening_lines(encryption: &Encryption, file_name: &str) -> (String, String) {
+    match encryption {
+        Encryption::None => (
+            format!("zstd -dc {file_name} | tar -x"),
+            "This archive is not encrypted. Whoever holds the file holds the key inside it."
+                .to_string(),
+        ),
+        Encryption::Passphrase(_) => (
+            format!("age -d {file_name} | zstd -dc | tar -x"),
+            "Each of those asks for the passphrase this archive was sealed with.".to_string(),
+        ),
+        // KEYFILE and PASSFILE, never `<key file>`: a reader pastes these lines into a shell,
+        // and `age -d -i <key file> archive.tar.zst.age` is not a template with a placeholder
+        // in it, it is an input redirect from `key`, the word `file`, and an OUTPUT redirect
+        // that truncates the archive to nothing. The one file holding a key that cannot be
+        // reissued must not be destroyed by following its own instructions.
+        Encryption::Recipients(recipients) => (
+            format!("age -d -i KEYFILE {file_name} | zstd -dc | tar -x"),
+            format!(
+                "Each of those needs --identity KEYFILE, naming the private half of one of the \
+                 keys this archive was encrypted to:\n\n{}\n\nAdd --identity-passphrase-file \
+                 PASSFILE when that key has a passphrase of its own, which is a different \
+                 secret from an archive passphrase.",
+                recipients
+                    .iter()
+                    .map(|recipient| format!("    {recipient}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        ),
+    }
+}
+
 fn write_sidecar(
     archive: &Path,
     manifest: &Manifest,
@@ -564,10 +606,7 @@ fn write_sidecar(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let manual = match encryption {
-        Encryption::None => format!("zstd -dc {file_name} | tar -x"),
-        _ => format!("age -d {file_name} | zstd -dc | tar -x"),
-    };
+    let (manual, opening) = opening_lines(encryption, &file_name);
     let summary = format!(
         "the {} tier: {} entries, {}, {}",
         manifest.tier.as_str(),
@@ -587,6 +626,7 @@ fn write_sidecar(
             ("CREATED", &manifest.created),
             ("SUMMARY", &summary),
             ("ENCRYPTION", encryption.label()),
+            ("OPENING", &opening),
             ("MANUAL", &manual),
         ],
     );
@@ -718,4 +758,46 @@ fn hostname() -> Option<String> {
                 .map(|said| said.stdout)
                 .filter(|name| !name.is_empty())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug: the recipient line read `age -d -i <key file> archive.tar.zst.age`, which a
+    /// shell does not read as a template. `<key` redirects input, `file` is an argument, and
+    /// `>archive.tar.zst.age` TRUNCATES the archive. Somebody following the note beside their
+    /// only copy of an unreissuable key would have destroyed it.
+    #[test]
+    fn nothing_the_sidecar_offers_to_run_carries_a_shell_redirect() {
+        let sealed = Encryption::Passphrase(zeroize::Zeroizing::new("hunter2".to_string()));
+        let keyed = Encryption::Recipients(vec![
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample backup@laptop".to_string(),
+        ]);
+        for encryption in [Encryption::None, sealed, keyed] {
+            let (manual, _) = opening_lines(&encryption, "alice-z6MkAAA-20260901T000000Z.tar.zst");
+            for redirect in ['<', '>'] {
+                assert!(
+                    !manual.contains(redirect),
+                    "{manual:?} would redirect when pasted into a shell"
+                );
+            }
+        }
+    }
+
+    /// The other half of the same bug: the paragraph was built from a `format!` whose source
+    /// indentation went into the string, so the note printed a line of prose followed by
+    /// seventeen spaces. Only the recipient arm was ever wrapped, so only it could drift.
+    #[test]
+    fn the_note_beside_the_archive_is_not_indented_by_the_source_that_wrote_it() {
+        let keyed = Encryption::Recipients(vec!["ssh-ed25519 AAAAExample me@laptop".to_string()]);
+        let (_, opening) = opening_lines(&keyed, "alice.tar.zst.age");
+        for line in opening.lines() {
+            // The recipients themselves are indented on purpose, as a block to read down.
+            assert!(
+                !line.starts_with("     ") && line.trim_end() == line,
+                "{line:?} carries the layout of the code that built it"
+            );
+        }
+    }
 }

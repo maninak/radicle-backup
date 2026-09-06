@@ -13,9 +13,9 @@ This program holds an ed25519 key that cannot be rotated, revoked or reissued. E
 | Read this | To satisfy yourself that |
 |---|---|
 | `src/key.rs` | The key is parsed, decrypted and re-encrypted in memory only, and every buffer holding seed or passphrase bytes is a `Zeroizing` one. |
-| `src/crypt.rs` | Archives are age, the passphrase comes from three places only, an empty one is refused, and a wrong one is told apart from a damaged file. |
+| `src/crypt.rs` | Archives are age, each passphrase comes from three places only and knows which of the three secrets it protects, an empty one is refused, and a wrong one is told apart from a damaged file and from a key that stayed locked. |
 | `src/perms.rs` | "Owner only" is defined once, applied at creation rather than after it, and admits out loud when a platform cannot promise it. |
-| `src/exec.rs` | Nothing is run through a shell, and no child process inherits a passphrase it has no use for. |
+| `src/exec.rs` | Nothing is run through a shell, and no child process inherits a passphrase it has no use for. The list of secrets to scrub is walked through a `match`, so a new one cannot be added without the compiler asking where it goes. |
 | `src/container.rs` | An archive from anywhere is hostile input: no absolute paths, no `..`, regular files only, no repository id that would not stay a single directory under `storage/`, and every entry digested against the manifest in both directions. |
 | `src/cmd/paper.rs` | The recovery sheet is the key in the clear: the mnemonic, the key file, and the HTML that carries them are all `Zeroizing`, and the one untrusted field (the alias) is HTML-escaped. |
 | `src/cmd/words.rs` | The 24 words typed to rebuild an identity arrive on a `Zeroizing` line and stay in `Zeroizing` buffers through to the key file, written at `0600`. |

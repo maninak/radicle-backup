@@ -101,8 +101,8 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     let staging = scratch.file("home");
 
     term.step(&format!("unpacking {}", archive.display()));
-    let scan = Reader::open(archive, passphrase.as_ref(), ctx.identity_files())?
-        .unpack(archive, &staging)?;
+    let scan =
+        Reader::open(archive, passphrase.as_ref(), &ctx.identities())?.unpack(archive, &staging)?;
 
     let problems = scan.mismatches();
     if !problems.is_empty() {

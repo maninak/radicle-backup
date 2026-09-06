@@ -196,6 +196,24 @@ pub struct Global {
     /// An age or ssh private key file to decrypt an archive that was encrypted to a key.
     #[arg(long, global = true, value_name = "PATH", action = ArgAction::Append)]
     pub identity: Vec<PathBuf>,
+
+    /// Read the passphrase for the --identity key from a file instead of asking for it.
+    ///
+    /// This is the passphrase on the private KEY, not the one on the archive: an archive
+    /// encrypted to a recipient has no passphrase of its own. A file is checked first, then
+    /// RAD_BACKUP_IDENTITY_PASSPHRASE, then a hidden prompt. Prefer the file: an environment
+    /// variable is readable by anything that can see the process.
+    ///
+    /// One passphrase for every --identity given. age stops at the first key it cannot
+    /// unlock, so an unattended run should offer the one key the archive was encrypted to
+    /// rather than a directory of them.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        env = "RAD_BACKUP_IDENTITY_PASSPHRASE_FILE"
+    )]
+    pub identity_passphrase_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

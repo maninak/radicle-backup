@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html). The archive format has its own version, tracked in `ARCHIVE-FORMAT.md`.
 
+## [Unreleased]
+
+### Added
+
+- `--identity-passphrase-file` and `RAD_BACKUP_IDENTITY_PASSPHRASE`, for the passphrase on a `--identity` key. It is a different secret from the archive's, so it has its own flag and its own variable, and `--help` says which is which.
+
+### Fixed
+
+- A passphrase-protected ssh key now opens an archive encrypted to it. It never had: no prompt appeared, and the run said the key did not open the archive, which was false and is the worst thing to tell someone in the middle of a recovery. `--recipient <ssh pubkey>` is what the README recommends for an unattended timer, and a passphrase on that key is the normal state of an ssh key, so the flow the tool recommends could not be completed with the tool. A key that stayed locked, a key with the wrong passphrase, a key age cannot use, and a key the archive was simply not encrypted to are now four different messages.
+- The note written beside a recipient-encrypted archive gave a command that cannot open it. It printed `age -d <file>`, which asks for a passphrase that such an archive does not have, and the `rad-backup` lines beside it left out `--identity`. It now names the keys the archive was encrypted to, and how to give one.
+- That same note offered a command that would have destroyed the archive it sits beside. `age -d -i <key file> archive.tar.zst.age` is not a template to a shell: `<key` redirects input, and `>archive.tar.zst.age` truncates the archive to nothing. It now says `KEYFILE`, and no command the note offers carries a redirect.
+- A key age cannot read no longer ends a run that has a usable key beside it. Passing every key in `~/.ssh` is ordinary, and one `id_ecdsa` next to the right `id_ed25519` refused the whole restore. Unusable keys are now named as a footnote on the failure that follows, and only a run with no usable key at all stops.
+- A key that failed to unlock is now named on its own. The message used to list every key a passphrase had been supplied for, so a key that unlocked perfectly well appeared as part of the fault, and it blamed the passphrase for a failure that is equally a key type age cannot use. It now names the one key, says both possibilities, and says which keys were never reached.
+
 ## [0.2.1] - 2026-08-22
 
 ### Fixed

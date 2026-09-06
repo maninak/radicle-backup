@@ -27,7 +27,7 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         let passphrase = match secret.protection() {
             Protection::Plaintext => None,
             Protection::Encrypted { .. } => Some(crypt::read_passphrase(
-                crypt::KEY_PASSPHRASE_ENV,
+                crypt::Protects::RadicleKey,
                 None,
                 "Passphrase for the key: ",
                 crypt::Purpose::Opening,

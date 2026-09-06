@@ -93,7 +93,7 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
     let mut checks = Vec::new();
     let mut problems = Vec::new();
 
-    let reader = Reader::open(archive, passphrase.as_ref(), ctx.identity_files())?;
+    let reader = Reader::open(archive, passphrase.as_ref(), &ctx.identities())?;
     let scan = if args.deep {
         let parent = ctx
             .global

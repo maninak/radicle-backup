@@ -16,6 +16,8 @@ Open it with rad-backup:
     rad-backup show    {{FILE}}     # see what is inside
     rad-backup restore {{FILE}}     # put it back
 
+{{OPENING}}
+
 Open it without rad-backup:
 
     {{MANUAL}}

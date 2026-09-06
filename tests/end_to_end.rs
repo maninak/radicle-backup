@@ -1941,3 +1941,117 @@ fn verdict_of(out: &Output, topic: &str) -> String {
         .unwrap_or_else(|| panic!("no check named {topic} in {}", stdout(out)))
         .to_string()
 }
+
+/// The flow the README recommends for an unattended timer, proven end to end: an archive
+/// encrypted to a machine's own ssh public key, opened again with the private half. That half
+/// is passphrase-protected, because that is the normal state of an ssh key and what `rad auth`
+/// writes.
+///
+/// It did not work. age reports a key it could not unlock exactly as it reports a key that is
+/// not a recipient at all, so someone holding the correct key, in a real recovery, was told
+/// the key was wrong and no prompt ever appeared.
+#[test]
+fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphrase() {
+    let fixture = Fixture::create("recipient-round-trip");
+    let backups = fixture.path("backups");
+    let secret_key = fixture.home().join("keys/radicle");
+    let recipient = std::fs::read_to_string(fixture.home().join("keys/radicle.pub"))
+        .expect("the fixture public key is readable");
+
+    let out = fixture.run(
+        &[
+            "create",
+            "--tier",
+            "identity",
+            "--recipient",
+            recipient.trim(),
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a backup encrypted to an ssh recipient");
+    let archive = only_archive(&backups);
+
+    // The note beside the archive is what a person who no longer has this tool reads. For a
+    // recipient archive a bare `age -d` asks for a passphrase that does not exist, so the note
+    // has to name the key instead, on both the with-tool and the without-tool path.
+    let sidecar_path = archive.with_file_name(format!(
+        "{}.README.txt",
+        archive
+            .file_name()
+            .expect("it has a name")
+            .to_string_lossy()
+    ));
+    let sidecar = std::fs::read_to_string(&sidecar_path).expect("the sidecar note is readable");
+    assert!(sidecar.contains("--identity"), "{sidecar}");
+    assert!(sidecar.contains("age -d -i"), "{sidecar}");
+    assert!(sidecar.contains(recipient.trim()), "{sidecar}");
+
+    // Nothing to unlock the key with, which is where a timer lands. The run must name the key
+    // it could not open rather than call it the wrong one.
+    let locked = fixture.run(
+        &[
+            "verify",
+            "--identity",
+            &secret_key.to_string_lossy(),
+            &archive.to_string_lossy(),
+        ],
+        &fixture.home(),
+    );
+    let said = stderr(&locked);
+    assert!(!locked.status.success(), "{said}");
+    assert!(said.contains("stayed locked"), "{said}");
+    assert!(
+        said.contains(&secret_key.to_string_lossy().to_string()),
+        "{said}"
+    );
+
+    let passphrase_file = fixture.path("identity-passphrase");
+    std::fs::write(&passphrase_file, KEY_PASSPHRASE).expect("the passphrase file is writable");
+    let opened = fixture.run(
+        &[
+            "verify",
+            "--deep",
+            "--identity",
+            &secret_key.to_string_lossy(),
+            "--identity-passphrase-file",
+            &passphrase_file.to_string_lossy(),
+            &archive.to_string_lossy(),
+        ],
+        &fixture.home(),
+    );
+    assert_success(
+        &opened,
+        "verifying an archive encrypted to an ssh recipient",
+    );
+    assert!(stderr(&opened).contains(DID), "{}", stderr(&opened));
+
+    // The other two ways in. RAD_BACKUP_IDENTITY_PASSPHRASE is what the CHANGELOG offers a
+    // timer, and RAD_BACKUP_IDENTITY_PASSPHRASE_FILE is the flag's own variable: both are
+    // read by clap and by `read_passphrase` rather than by anything a unit test can see, so
+    // if they are wrong nothing else here would notice.
+    for (variable, value) in [
+        ("RAD_BACKUP_IDENTITY_PASSPHRASE", KEY_PASSPHRASE.to_string()),
+        (
+            "RAD_BACKUP_IDENTITY_PASSPHRASE_FILE",
+            passphrase_file.to_string_lossy().into_owned(),
+        ),
+    ] {
+        let out = fixture
+            .command(
+                &[
+                    "verify",
+                    "--identity",
+                    &secret_key.to_string_lossy(),
+                    &archive.to_string_lossy(),
+                ],
+                &fixture.home(),
+            )
+            .env(variable, value)
+            .output()
+            .expect("rad-backup runs");
+        assert_success(&out, &format!("verifying with {variable}"));
+    }
+}

@@ -63,7 +63,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     }
 
     let passphrase = crypt::read_passphrase(
-        crypt::KEY_PASSPHRASE_ENV,
+        crypt::Protects::RadicleKey,
         // No file: `--passphrase-file` holds the ARCHIVE passphrase, and reading it here gave
         // the restored key the same secret, silently, without ever asking for a new one.
         None,

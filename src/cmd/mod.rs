@@ -29,8 +29,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn identity_files(&self) -> &[PathBuf] {
-        &self.global.identity
+    /// The private keys offered for an archive encrypted to a recipient, and what unlocks one
+    /// that is itself passphrase-protected.
+    pub fn identities(&self) -> crate::crypt::Identities {
+        crate::crypt::Identities {
+            files: self.global.identity.clone(),
+            passphrase_file: self.global.identity_passphrase_file.clone(),
+            interactive: self.term.is_interactive(),
+        }
     }
 
     /// The node id of the identity being worked on, for finding its archives.
@@ -50,7 +56,7 @@ pub fn archive_passphrase(ctx: &Ctx, archive: &Path) -> Result<Option<zeroize::Z
         return Ok(None);
     }
     Ok(Some(crate::crypt::read_passphrase(
-        crate::crypt::PASSPHRASE_ENV,
+        crate::crypt::Protects::Archive,
         ctx.global.passphrase_file.as_deref(),
         "Passphrase for the archive: ",
         crate::crypt::Purpose::Opening,
