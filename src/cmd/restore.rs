@@ -14,7 +14,6 @@ use crate::crypt;
 use crate::db::Policies;
 use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
 use crate::git::{self, Git};
-use crate::home::NodeState;
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
 use crate::perms::{copy_owner_only, copy_plain, set_owner_only};
@@ -39,8 +38,16 @@ pub enum Standing {
     ArchiveIsAhead,
     /// Two histories that are not ancestors of each other. Writing here forks the identity.
     Diverged,
-    /// Nothing to compare: the repository has no signed refs of ours, or nothing answered.
-    NotChecked,
+    /// There was nothing on the other side to hold this against: the archive carries no signed
+    /// refs of ours for it, nothing came back, or it is private and therefore announced to
+    /// nobody. No fetch changes any of those, so this is safe to write to.
+    NothingToCompare,
+    /// The network could not be asked, so what it holds is unknown. A later fetch may answer.
+    ///
+    /// Apart from `NothingToCompare` because the two owe the reader different things. Folded
+    /// together, a home with three private repositories was told "3 of 3 could not be compared"
+    /// and sent to run `rad sync <rid> --fetch`, which fails every time by design.
+    CouldNotAsk,
 }
 
 impl Standing {
@@ -50,7 +57,8 @@ impl Standing {
             Self::NetworkWasAhead => "the network was ahead, and has been taken",
             Self::ArchiveIsAhead => "holds work the network has not seen",
             Self::Diverged => "diverged from the network",
-            Self::NotChecked => "not checked",
+            Self::NothingToCompare => "nothing to compare it with",
+            Self::CouldNotAsk => "could not be compared",
         }
     }
 }
@@ -69,17 +77,27 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     let home = &ctx.home;
     let term = &ctx.term;
 
-    if home.holds_identity() && !args.force {
+    if home.holds_identity()? && !args.force {
         return Err(Error::refused(
             format!("{} already holds an identity", home.path().display()),
             "move it aside, restore into a different --home, or pass --force to overwrite it",
         ));
     }
-    if home.node_state() == NodeState::Running {
-        return Err(Error::refused(
-            "the node is running against the home being restored into",
-            "run `rad node stop` first: a node writing to a home mid-restore corrupts both",
-        ));
+    // Anything but a node proven stopped refuses. A socket that cannot be reached is not a
+    // node that is down, and this guard exists precisely because being wrong about that costs
+    // the home it was protecting.
+    if !home.node_state().is_stopped() {
+        let state = home.node_state();
+        return Err(match state.doubt() {
+            Some(doubt) => Error::refused(
+                format!("whether a node is running against this home cannot be told: {doubt}"),
+                "make sure no node is running, then restore into this home again",
+            ),
+            None => Error::refused(
+                "the node is running against the home being restored into",
+                "run `rad node stop` first: a node writing to a home mid-restore corrupts both",
+            ),
+        });
     }
 
     // Read while the archive is certainly still there, because `remember` below records it
@@ -334,11 +352,21 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     // in between, and a node writing to the home while this copies its databases over corrupts
     // both. The check up front is the courtesy that fails before the work; this is the one
     // that matters.
-    if home.node_state() == NodeState::Running {
-        return Err(Error::refused(
-            "the node started against this home while the archive was being read",
-            "run `rad node stop` and restore again: nothing has been written yet",
-        ));
+    let state = home.node_state();
+    if !state.is_stopped() {
+        return Err(match state.doubt() {
+            Some(doubt) => Error::refused(
+                format!(
+                    "whether a node started against this home while the archive was being \
+                     read cannot be told: {doubt}"
+                ),
+                "make sure no node is running, then restore again: nothing has been written yet",
+            ),
+            None => Error::refused(
+                "the node started against this home while the archive was being read",
+                "run `rad node stop` and restore again: nothing has been written yet",
+            ),
+        });
     }
     for directory in [home.path().to_path_buf(), home.keys_dir(), home.node_dir()] {
         std::fs::create_dir_all(&directory).map_err(|e| Error::io(&directory, e))?;
@@ -524,7 +552,10 @@ fn reconcile(
     // unreachable: it warned and returned on every single restore, while the README sold the
     // comparison as the thing that stops you forking your own peer history. So the node is
     // started once the identity is safely in place, and put back the way it was found.
-    let started_here = if ctx.home.node_state() == NodeState::Running {
+    // Started only when the node is known to be down. A doubt here means `rad node start`
+    // would be aimed at a home something else may already be serving, and starting a second
+    // node on one key is the fork the whole comparison exists to prevent.
+    let started_here = if !ctx.home.node_state().is_stopped() {
         false
     } else {
         ctx.term
@@ -562,12 +593,12 @@ fn reconcile(
 ///
 /// `rad node start` returns as soon as the daemon forks, so every query fired straight after
 /// it fails on a machine where the node takes a moment: the comparison then filled with
-/// `NotChecked` for every repository and the restore reported success having compared nothing.
+/// `CouldNotAsk` for every repository and the restore reported success having compared nothing.
 /// `backup`'s `quiesce` waits the same way for the same reason.
 fn wait_for_node(ctx: &Ctx) -> bool {
     let deadline = std::time::Instant::now() + NODE_START_TIMEOUT;
     while std::time::Instant::now() < deadline {
-        if ctx.home.node_state() == NodeState::Running {
+        if ctx.home.node_state().is_running() {
             return true;
         }
         std::thread::sleep(NODE_START_POLL);
@@ -600,7 +631,7 @@ where
     F: FnOnce(&str) -> Result<Ancestry>,
 {
     let Some(current) = current else {
-        return Ok(Standing::NotChecked);
+        return Ok(Standing::NothingToCompare);
     };
     if current == archived {
         return Ok(Standing::Same);
@@ -628,12 +659,19 @@ fn compare_with_network(
         term::count(restored.len(), "repository", "repositories")
     ));
     for repo in restored {
+        // Announced to nobody on purpose, so there is no network side and never will be.
+        // Asking anyway spends a fetch per repository to fail, and reports the feature working
+        // as a fault.
+        if repo.is_private() {
+            standings.insert(repo.rid.clone(), Standing::NothingToCompare);
+            continue;
+        }
         let Some(archived) = repo.sigrefs.get(node_id) else {
-            standings.insert(repo.rid.clone(), Standing::NotChecked);
+            standings.insert(repo.rid.clone(), Standing::NothingToCompare);
             continue;
         };
         if !rad.fetch(&repo.rid)? {
-            standings.insert(repo.rid.clone(), Standing::NotChecked);
+            standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
         }
 
@@ -767,7 +805,7 @@ fn report(
     // `ArchiveIsAhead`, so a comparison that answered nothing at all read as a clean bill.
     let unchecked = standings
         .values()
-        .filter(|standing| **standing == Standing::NotChecked)
+        .filter(|standing| **standing == Standing::CouldNotAsk)
         .count();
 
     if ctx.global.json {
@@ -790,11 +828,17 @@ fn report(
             manifest.identity.alias.as_deref().unwrap_or("unnamed"),
             ctx.home.path().display()
         ));
+        // Counted off the database now in the home, not off the manifest. `backup` fills the
+        // manifest's policy summary at every tier, but only the tiers above `identity` carry
+        // `policies.db`, so an identity-tier restore reported "45 seeding and 3 following
+        // policies" over a home that seeds nothing, and `remember` then wrote those numbers
+        // into the state record for the next `diff` to blame as drift.
+        let installed = crate::db::read_policies(&ctx.home.policies_db())?;
         term.hint(&format!(
             "{}, {} seeding and {} following policies",
             term::count(restored.len(), "repository", "repositories"),
-            manifest.policies.seeded,
-            manifest.policies.followed
+            installed.seeded().count(),
+            installed.followed().count()
         ));
         if unchecked > 0 {
             term.warn(&format!(
@@ -953,13 +997,13 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_with_no_signed_refs_of_ours_here_is_left_unchecked() {
+    fn a_repository_with_no_signed_refs_of_ours_here_has_nothing_to_be_compared_with() {
         let calls = std::cell::Cell::new(0);
         let standing = classify("aaaa", None, asked(Ancestry::Unrelated, &calls))
             .expect("the ancestry answer is not an error");
         // Not `Same`, and not `Diverged`: nothing was compared, and saying either would be a
         // verdict this run has no evidence for.
-        assert_eq!(standing, Standing::NotChecked);
+        assert_eq!(standing, Standing::NothingToCompare);
         assert_eq!(calls.get(), 0);
     }
 

@@ -173,7 +173,12 @@ pub fn synced_heads(
         .prepare("select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head")
     {
         Ok(statement) => statement,
-        Err(_) => return Ok(BTreeMap::new()),
+        // Only the table being absent. Anything else, a database that will not open or an
+        // image that is corrupt, is propagated: rendered as an empty map it reached `doctor`
+        // as "the node has no record of what any other node holds", which sent the reader to
+        // start a node that is already running.
+        Err(e) if is_missing_table(&e) => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e.into()),
     };
     let rows = statement.query_map([own_node_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -281,6 +286,20 @@ pub fn touched_warning(path: &Path) -> String {
          directory it sits in",
         path.display()
     )
+}
+
+/// Whether sqlite refused a statement because the table is not in this schema.
+///
+/// The node's schema is heartwood's, and this tool is not entitled to a release every time
+/// heartwood adds or renames a table. Every other sqlite failure is a real one and says so.
+fn is_missing_table(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error(),
+        Some(rusqlite::ffi::Error {
+            code: rusqlite::ffi::ErrorCode::Unknown,
+            ..
+        })
+    ) && e.to_string().contains("no such table")
 }
 
 #[cfg(test)]

@@ -11,10 +11,45 @@ use crate::error::{Error, Result};
 ///
 /// The socket file survives a stopped node, so its presence proves nothing and connecting is
 /// the only honest test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeState {
     Running,
     Stopped,
+    /// The socket answered neither way: it is there and cannot be connected to, or the answer
+    /// came back as something other than "nothing is listening".
+    ///
+    /// Never folded into `Stopped`, which is what a bare `is_ok()` did. Everything that writes
+    /// to a home asks this first, and the whole point of asking is that two writers in one
+    /// home fork the identity: a permission error read as "the node is stopped" is a restore
+    /// that overwrites storage a live node is holding open.
+    Unknown {
+        socket: PathBuf,
+        why: String,
+    },
+}
+
+impl NodeState {
+    /// Whether a node is known to be running. False for `Unknown`, so a caller that only wants
+    /// to warn does not warn on a doubt.
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
+    }
+
+    /// Whether it is safe to write into this home. Only a node proven stopped is: `Unknown`
+    /// means nobody established that nothing else is writing.
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, Self::Stopped)
+    }
+
+    /// What could not be established, for a caller that must refuse rather than guess.
+    pub fn doubt(&self) -> Option<String> {
+        match self {
+            Self::Unknown { socket, why } => {
+                Some(format!("{} could not be reached: {why}", socket.display()))
+            }
+            Self::Running | Self::Stopped => None,
+        }
+    }
 }
 
 pub struct Home {
@@ -90,33 +125,72 @@ impl Home {
         self.node_dir().join("node.db")
     }
 
-    /// The socket a running node listens on. The file survives a stopped node, so
-    /// `node_state` below connects to it rather than trusting that it is there. Only a unix
-    /// node has one, and only `node_state` asks for it.
+    /// The socket a running node listens on, as this home would place it. Pure.
     #[cfg(unix)]
-    pub fn control_socket(&self) -> PathBuf {
+    pub fn control_socket_at(&self) -> PathBuf {
         self.node_dir().join("control.sock")
     }
 
-    /// A home is real once it holds a secret key. Everything else `rad` recreates.
-    pub fn holds_identity(&self) -> bool {
-        self.secret_key().is_file()
+    /// The socket a running node listens on, given whatever `RAD_SOCKET` was set to. Pure.
+    ///
+    /// The override wins, because that is what heartwood's own `socket_from_env` does, and a
+    /// node started under it is listening somewhere this home's own path does not name. Asking
+    /// the wrong path answers "nothing is listening" about a node that is: a backup then
+    /// records `--stop-node` as having stopped a node it never touched, and the restore on the
+    /// far end skips the warning that two nodes must never share one key.
+    #[cfg(unix)]
+    pub fn control_socket_given(&self, override_path: Option<PathBuf>) -> PathBuf {
+        override_path.unwrap_or_else(|| self.control_socket_at())
+    }
+
+    /// The socket a running node listens on, as `rad` would find it here.
+    #[cfg(unix)]
+    pub fn control_socket(&self) -> PathBuf {
+        self.control_socket_given(std::env::var_os("RAD_SOCKET").map(PathBuf::from))
+    }
+
+    /// Whether a home is real, which it is once it holds a secret key. Everything else `rad`
+    /// recreates.
+    ///
+    /// An error, not a `false`, when the key is there and cannot be looked at. Every caller is
+    /// asking the same question, "would going on here overwrite somebody's identity", and
+    /// `is_file()` answered no to it for an unsearchable directory or a mount that had gone
+    /// away. `restore --force` is not the only way to lose a key.
+    pub fn holds_identity(&self) -> Result<bool> {
+        let key = self.secret_key();
+        match std::fs::metadata(&key) {
+            Ok(meta) => Ok(meta.is_file()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(Error::io(&key, e)),
+        }
     }
 
     pub fn require(&self) -> Result<()> {
-        if self.holds_identity() {
-            return Ok(());
+        match self.holds_identity()? {
+            true => Ok(()),
+            false => Err(Error::NotAHome {
+                path: self.path.clone(),
+            }),
         }
-        Err(Error::NotAHome {
-            path: self.path.clone(),
-        })
     }
 
     #[cfg(unix)]
     pub fn node_state(&self) -> NodeState {
-        match std::os::unix::net::UnixStream::connect(self.control_socket()) {
+        use std::io::ErrorKind;
+
+        let socket = self.control_socket();
+        match std::os::unix::net::UnixStream::connect(&socket) {
             Ok(_) => NodeState::Running,
-            Err(_) => NodeState::Stopped,
+            // The two answers that mean nothing is listening: no socket file at all, and a
+            // socket file left behind by a node that is gone. Everything else, permission
+            // denied above all, says only that this process could not ask.
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
+                NodeState::Stopped
+            }
+            Err(e) => NodeState::Unknown {
+                socket,
+                why: e.to_string(),
+            },
         }
     }
 
@@ -220,5 +294,62 @@ mod tests {
         let without = home.repository_path("z3gqcJUoA1n9HaHKufZs5FCSGazv5");
         assert_eq!(with, without);
         assert!(with.ends_with("storage/z3gqcJUoA1n9HaHKufZs5FCSGazv5"));
+    }
+
+    /// The bug this guards: `UnixStream::connect(..).is_ok()` read every error as "the node is
+    /// stopped". A control socket is created `srwxrwxr-x` inside a directory, so a home
+    /// reached over a mount another user owns answers "stopped" about a node that is up.
+    /// `restore --force` then wrote over storage a live node was holding, and `--stop-node`
+    /// recorded a stop it never performed.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_that_could_not_be_asked_is_not_reported_as_a_stopped_node() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!("rad-backup-socket-{}", std::process::id()));
+        let home = Home::at(&root);
+        std::fs::create_dir_all(home.node_dir()).expect("scratch home is creatable");
+
+        // Nothing there at all, which is the ordinary shape of a machine with no node, and a
+        // stale socket file left by one that died: both mean nothing is listening.
+        assert_eq!(home.node_state(), NodeState::Stopped);
+
+        // The directory holding the socket cannot be entered, so this process cannot ask.
+        // Running as root defeats it, and root is the one user for whom the old bug was
+        // invisible, so the assertion is skipped rather than made to lie.
+        let unreadable = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(home.node_dir(), unreadable).expect("mode is settable");
+        let state = home.node_state();
+        std::fs::set_permissions(home.node_dir(), std::fs::Permissions::from_mode(0o700))
+            .expect("mode is settable back");
+
+        if state != NodeState::Stopped {
+            assert!(!state.is_running(), "{state:?}");
+            assert!(
+                state
+                    .doubt()
+                    .is_some_and(|doubt| doubt.contains("control.sock")),
+                "{state:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// heartwood resolves `RAD_SOCKET` before the home-relative default, so a node started
+    /// under it listens somewhere this home's own path does not name. This tool asked the
+    /// home-relative path unconditionally, and got "nothing is listening" about a node that
+    /// was, which is the answer that lets a second writer into a home.
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_asked_about_is_the_one_rad_itself_would_use() {
+        let home = Home::at("/var/lib/radicle");
+        let default = PathBuf::from("/var/lib/radicle/node/control.sock");
+        assert_eq!(home.control_socket_at(), default);
+        assert_eq!(home.control_socket_given(None), default);
+        assert_eq!(
+            home.control_socket_given(Some(PathBuf::from("/run/user/1000/radicle.sock"))),
+            PathBuf::from("/run/user/1000/radicle.sock")
+        );
     }
 }

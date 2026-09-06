@@ -328,12 +328,30 @@ fn write_environment(
     Ok(())
 }
 
+/// Write one unit file, refusing to overwrite anything this tool did not write.
+///
+/// The three-way split matters: `is_ok_and` folded "not there" together with "there and
+/// unreadable" and overwrote both. A hand-written unit saved mode 000, or holding bytes that
+/// are not UTF-8, is exactly the file the marker check exists to protect, and it was the one
+/// file the check could not see.
 fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
-    if std::fs::read_to_string(path).is_ok_and(|existing| !existing.contains(MARKER_MARK)) {
-        return Err(Error::refused(
-            format!("{} was not written by this tool", path.display()),
-            "edit it yourself, or move it aside and run this again",
-        ));
+    match std::fs::read_to_string(path) {
+        Ok(existing) if !existing.contains(MARKER_MARK) => {
+            return Err(Error::refused(
+                format!("{} was not written by this tool", path.display()),
+                "edit it yourself, or move it aside and run this again",
+            ));
+        }
+        Ok(_) => {}
+        // Nothing there, so there is nothing to protect.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::refused(
+                format!("{} is there and could not be read ({e})", path.display()),
+                "this tool will not overwrite a unit it cannot recognise; move it aside and \
+                 run this again",
+            ));
+        }
     }
     std::fs::write(path, contents).map_err(|e| Error::io(path, e))?;
     ctx.term.step(&format!("wrote {}", path.display()));

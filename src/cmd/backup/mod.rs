@@ -333,13 +333,15 @@ fn dry_run(
 ) -> Result<()> {
     let term = &ctx.term;
     let mut total = 0;
+    let mut unreadable = 0;
     let mut selected = Vec::new();
     for record in &inventory.described {
         if !inventory.selected.contains(&record.rid) {
             continue;
         }
-        let bytes = directory_size(&ctx.home.repository_path(&record.rid));
+        let (bytes, missed) = directory_size(&ctx.home.repository_path(&record.rid));
         total += bytes;
+        unreadable += missed;
         selected.push((record, bytes));
     }
 
@@ -392,6 +394,14 @@ fn dry_run(
         term::count(inventory.selected.len(), "repository", "repositories"),
         term::bytes(total)
     ));
+    // The estimate is meant to run high, so a part of storage nobody could measure has to be
+    // said out loud: silently, it is the one thing that makes the number run low.
+    if unreadable > 0 {
+        term.warn(&format!(
+            "{} could not be measured, so that size is a floor and not an estimate",
+            term::count(unreadable, "directory or file", "directories and files")
+        ));
+    }
     for warning in warnings {
         term.warn(warning);
     }
@@ -399,20 +409,33 @@ fn dry_run(
     Ok(())
 }
 
-/// What a directory occupies, following no symlinks and crossing no filesystems it was not
-/// pointed at. Used only for the estimate a dry run prints.
-fn directory_size(path: &Path) -> u64 {
+/// What a directory occupies, and how many directories under it could not be read.
+///
+/// Following no symlinks and crossing no filesystems it was not pointed at. Used only for the
+/// estimate a dry run prints, which over-estimates on purpose because "will this fit" is the
+/// question and over is the safe side of it. A directory that cannot be read is the other
+/// direction, so it is counted and said rather than silently costing bytes off the total.
+fn directory_size(path: &Path) -> (u64, usize) {
     let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
+        return (0, 1);
     };
-    entries
-        .filter_map(std::result::Result::ok)
-        .map(|entry| match entry.file_type() {
-            Ok(kind) if kind.is_dir() => directory_size(&entry.path()),
-            Ok(kind) if kind.is_file() => entry.metadata().map(|meta| meta.len()).unwrap_or(0),
-            _ => 0,
-        })
-        .sum()
+    let mut bytes = 0;
+    let mut unreadable = 0;
+    for entry in entries.filter_map(std::result::Result::ok) {
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                let (under, missed) = directory_size(&entry.path());
+                bytes += under;
+                unreadable += missed;
+            }
+            Ok(kind) if kind.is_file() => match entry.metadata() {
+                Ok(meta) => bytes += meta.len(),
+                Err(_) => unreadable += 1,
+            },
+            _ => {}
+        }
+    }
+    (bytes, unreadable)
 }
 
 /// Record what was written, for `doctor` and `diff` to read later.

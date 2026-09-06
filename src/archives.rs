@@ -25,7 +25,13 @@ pub struct Archive {
     /// When the name says it was taken. `None` when the stamp does not parse, which is not an
     /// error: the file is still an archive, it just cannot be sorted by its own claim.
     pub taken: Option<jiff::Timestamp>,
-    pub encrypted: bool,
+    /// Whether the file begins with an age header. `None` when it could not be opened to
+    /// look, which `ls` prints as unknown.
+    ///
+    /// Read off the bytes, never off the `.age` suffix. `rad backup --stdout > name.tar.zst`
+    /// writes an encrypted archive under a name that says otherwise, and `ls` printed "(not
+    /// encrypted)" beside it: a claim about who can read a file, made from its name.
+    pub encrypted: Option<bool>,
 }
 
 impl Archive {
@@ -66,7 +72,9 @@ pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
             Some(Archive {
                 bytes: entry.metadata().map(|meta| meta.len()).unwrap_or_default(),
                 taken: parse_stamp(&stamp),
-                encrypted: *suffix == SUFFIXES[0],
+                // Nineteen bytes per archive in a directory listing, which is cheaper than
+                // being wrong about whether somebody's key is readable.
+                encrypted: crate::crypt::looks_encrypted(&path).ok(),
                 path,
             })
         })
@@ -151,8 +159,30 @@ mod tests {
         dir
     }
 
+    /// A file with an age header in it, so `in_dir` reads it as encrypted the way it reads a
+    /// real archive: from the bytes rather than from the name.
+    fn touch_encrypted(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), b"age-encryption.org/v1\n").expect("fixture is writable");
+    }
+
     fn touch(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"x").expect("the fixture file is writable");
+    }
+
+    /// The bug: `encrypted` was set from the `.age` suffix, and `ls` printed "(not encrypted)"
+    /// from it. `rad backup --stdout > name.tar.zst` writes an encrypted archive under a name
+    /// that says otherwise, and the listing told its owner it could be read by anyone.
+    #[test]
+    fn whether_an_archive_is_encrypted_is_read_from_it_and_not_from_its_name() {
+        let dir = scratch("header");
+        touch_encrypted(&dir, "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst");
+        touch(&dir, "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst.age");
+
+        let found = in_dir(&dir, NODE).expect("the directory is readable");
+        assert_eq!(found[0].encrypted, Some(true), "the header says so");
+        assert_eq!(found[1].encrypted, Some(false), "the suffix does not");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -180,8 +210,10 @@ mod tests {
                 "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst.age",
             ]
         );
-        assert!(found[0].encrypted);
-        assert!(!found[1].encrypted, "a .tar.zst is not encrypted");
+        assert_eq!(found[1].encrypted, Some(false), "no age header in it");
+        // The name says `.age` and the bytes do not, and the bytes win. A name is not
+        // evidence about who can read a file.
+        assert_eq!(found[0].encrypted, Some(false), "a name is not a header");
         assert_eq!(
             in_dir(&dir, OTHER)
                 .expect("the directory is readable")

@@ -20,8 +20,19 @@ All notable changes to this project are documented here. The format follows [Kee
 - `doctor`'s `key copies` check no longer passes a home it knows nothing about. `sudo rad-backup restore` writes its record into root's state directory and `restore.sh` writes none at all, so the two people most likely to be holding a second copy of their key were the ones told they were not.
 - `rad backup move --keep-source` no longer writes an archive claiming the source machine retires its key. The home restored from it was told the machine it came from was safe, which is the exact fork this tool exists to prevent, announced as a pass.
 
+- Whether a node is running is now answered from the socket `rad` itself would use, and a socket that could not be asked is no longer read as a stopped node. `RAD_SOCKET` was ignored, so a node started under it was invisible, and a permission error on the socket answered "stopped" about a node that was up. `restore` and `move` refuse rather than guess, and a backup that cannot tell says so in the archive instead of recording that the node was down.
+- A restore no longer reports seeding and following policies an identity-tier archive never carried. The numbers came from the manifest, which is filled at every tier, rather than from the database that was installed, and the next `diff` then blamed the difference as drift.
+- A repository the network could not be asked about is now told apart from one there is nothing to compare with. Three private repositories, which are announced to nobody by design, were reported as "3 of 3 could not be compared" and the reader was sent to run a command that fails every time.
+- `schedule` no longer overwrites a unit file it cannot read. A hand-written unit saved unreadable, or holding bytes that are not UTF-8, was the one file the "not written by this tool" check could not see, and it was overwritten with a note saying it had been written.
+- `ls` now reads whether an archive is encrypted from the file rather than from its name. `rad backup --stdout > name.tar.zst` writes an encrypted archive under a name that says otherwise, and the listing told its owner it could be read by anyone.
+- A repository whose `packed-refs` cannot be read is now named rather than treated as somebody else's. With `rad` also unavailable, `--repos mine` wrote an archive missing it and exited 0.
+- A home whose key is there and cannot be looked at is no longer treated as an empty home. `restore --force` and `words --restore` both decided on `is_file()`, which is false for an unreadable directory as well as for an absent key.
+- `doctor` no longer reports "the node has no record of what any other node holds" when the node database is there and will not open.
+- A dry run now says when part of storage could not be measured. The estimate is meant to run high, and an unreadable directory silently counted as zero was the one thing making it run low.
+
 ### Changed
 
+- `restore --json` renames one standing. `not checked` is now `nothing to compare it with` or `could not be compared`, which are different answers with different fixes.
 - `doctor --backup-dir` is now `doctor --dir`, matching `ls` and `prune`, and it is now where the checks actually look rather than a path printed in a remedy. `--backup-dir` still works.
 
 ## [0.2.1] - 2026-08-22

@@ -86,10 +86,10 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
             "{mark} {:<52} {:>9}  {when}{}",
             archive.name(),
             term::bytes(archive.bytes),
-            if archive.encrypted {
-                ""
-            } else {
-                "  (not encrypted)"
+            match archive.encrypted {
+                Some(true) => "",
+                Some(false) => "  (not encrypted)",
+                None => "  (could not be read)",
             }
         ))?;
     }

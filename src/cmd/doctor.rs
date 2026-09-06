@@ -841,7 +841,7 @@ mod tests {
             ),
             bytes: 4096,
             taken: Some(when.parse().expect("a valid instant")),
-            encrypted: false,
+            encrypted: Some(false),
         }
     }
 
@@ -1088,7 +1088,7 @@ mod tests {
         crate::archives::Archive {
             bytes: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
             taken: None,
-            encrypted: !matches!(encryption, crate::crypt::Encryption::None),
+            encrypted: Some(!matches!(encryption, crate::crypt::Encryption::None)),
             path,
         }
     }

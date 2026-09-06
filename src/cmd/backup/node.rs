@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use crate::cli::Create;
 use crate::cmd::Ctx;
 use crate::error::{Error, Result};
-use crate::home::NodeState;
 use crate::rad::Rad;
 
 /// How long to wait for a node to let go of its control socket after being asked to stop.
@@ -76,7 +75,20 @@ pub(super) fn quiesce<'a>(
     rad: Option<&'a Rad>,
     warnings: &mut Vec<String>,
 ) -> Result<NodeGuard<'a>> {
-    let was_running = ctx.home.node_state() == NodeState::Running;
+    // A doubt is said out loud and then treated as "running", which is the cautious half:
+    // the warning about refs fetched mid-run is printed, and `--stop-node` still tries. Read
+    // as stopped, this wrote `node.was_running: false` into the manifest over a home whose
+    // node was up, and the restore on the far end skipped the warning that costs an identity.
+    let state = ctx.home.node_state();
+    if let Some(doubt) = state.doubt() {
+        warnings.push(format!(
+            "whether the node is running could not be established ({doubt}), so this archive \
+             was taken as though it were"
+        ));
+        ctx.term
+            .warn(&format!("cannot tell whether the node is running: {doubt}"));
+    }
+    let was_running = !state.is_stopped();
     if !was_running {
         return Ok(NodeGuard {
             ctx,
@@ -134,7 +146,7 @@ pub(super) fn quiesce<'a>(
             Duration::ZERO
         };
     loop {
-        if ctx.home.node_state() == NodeState::Stopped {
+        if ctx.home.node_state().is_stopped() {
             return Ok(node);
         }
         if Instant::now() >= deadline {

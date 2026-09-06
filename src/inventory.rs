@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use crate::db::{Policies, SeedingPolicy};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::git::{self, Git};
 use crate::home::Home;
 use crate::manifest::{RepoRecord, RepoSelection};
@@ -259,8 +259,19 @@ fn own_repository_ids(
     }
 
     for rid in stored {
-        if has_namespace_at(&home.repository_path(rid), node_id) {
-            mine.insert(rid.clone());
+        // Said out loud rather than propagated: one unreadable `packed-refs` must not stop a
+        // backup of everything else, and a repository this could not judge is one the reader
+        // has to decide about, not one to drop in silence.
+        match has_namespace_at(&home.repository_path(rid), node_id) {
+            Ok(true) => {
+                mine.insert(rid.clone());
+            }
+            Ok(false) => {}
+            Err(e) => warnings.push(format!(
+                "{rid} could not be checked for refs of this identity, so it was left out: \
+                 {}",
+                e.one_line()
+            )),
         }
     }
     // A listing can name a repository that is no longer in storage; the archive can only carry
@@ -371,15 +382,21 @@ fn sigrefs_by_peer(refs: &[git::Ref]) -> BTreeMap<String, String> {
 ///
 /// Loose refs are a directory; packed refs are one file. Checking both is what keeps this from
 /// spawning a process per repository on a seed.
-pub fn has_namespace_at(repo: &Path, node_id: &str) -> bool {
+///
+/// An error when `packed-refs` is there and unreadable, which used to be a `false`: a
+/// repository whose refs are all packed then looked like a repository that is not ours, and
+/// with `rad` also unavailable `--repos mine` wrote an archive missing it and exited 0.
+pub fn has_namespace_at(repo: &Path, node_id: &str) -> Result<bool> {
     let loose = repo.join("refs").join("namespaces").join(node_id);
     if loose.is_dir() {
-        return true;
+        return Ok(true);
     }
     let packed = repo.join("packed-refs");
-    match std::fs::read_to_string(packed) {
-        Ok(text) => text.contains(&format!("refs/namespaces/{node_id}/")),
-        Err(_) => false,
+    match std::fs::read_to_string(&packed) {
+        Ok(text) => Ok(text.contains(&format!("refs/namespaces/{node_id}/"))),
+        // No packed-refs at all means every ref is loose, and the check above already looked.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::io(&packed, e)),
     }
 }
 
@@ -524,8 +541,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("refs/namespaces/z6MkLoose"))
             .expect("loose ref directory is creatable");
-        assert!(has_namespace_at(&dir, "z6MkLoose"));
-        assert!(!has_namespace_at(&dir, "z6MkPacked"));
+        let held = |id| has_namespace_at(&dir, id).expect("the repository is readable");
+        assert!(held("z6MkLoose"));
+        assert!(!held("z6MkPacked"));
 
         std::fs::write(
             dir.join("packed-refs"),
@@ -533,8 +551,44 @@ mod tests {
              aaa refs/namespaces/z6MkPacked/refs/rad/sigrefs\n",
         )
         .expect("packed-refs is writable");
-        assert!(has_namespace_at(&dir, "z6MkPacked"));
-        assert!(!has_namespace_at(&dir, "z6MkAbsent"));
+        assert!(held("z6MkPacked"));
+        assert!(!held("z6MkAbsent"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The bug: an unreadable `packed-refs` was read as "this repository is not ours". With
+    /// `rad` also unavailable, which is the same machine's likely second problem, `--repos
+    /// mine` wrote an archive missing that repository and exited 0.
+    #[cfg(unix)]
+    #[test]
+    fn a_repository_whose_refs_cannot_be_read_is_not_reported_as_somebody_elses() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir =
+            std::env::temp_dir().join(format!("rad-backup-unreadable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch repository is creatable");
+        let packed = dir.join("packed-refs");
+        std::fs::write(&packed, "aaa refs/namespaces/z6MkMine/refs/rad/sigrefs\n")
+            .expect("packed-refs is writable");
+        std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o000))
+            .expect("mode is settable");
+
+        let answer = has_namespace_at(&dir, "z6MkMine");
+        std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o600))
+            .expect("mode is settable back");
+
+        // Root can read it whatever the mode says, and root is the one user the old bug was
+        // invisible to, so the assertion is skipped rather than made to lie.
+        if let Ok(found) = answer {
+            assert!(found, "root read it, so it is ours");
+        } else {
+            assert!(
+                answer.is_err_and(|e| e.one_line().contains("packed-refs")),
+                "an unreadable file has to name itself"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use crate::cli::{Create, Migrate, TierArg, Verify};
 use crate::cmd::{Ctx, backup, verify};
 use crate::error::{Error, Result};
-use crate::home::NodeState;
 
 /// What the retired key is renamed to. It stays on disk rather than being deleted, because a
 /// move that goes wrong halfway needs a way back.
@@ -19,12 +18,22 @@ const RETIRED_NOTE: &str = "RETIRED.txt";
 pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     ctx.home.require()?;
 
-    if ctx.home.node_state() == NodeState::Running {
-        return Err(Error::refused(
-            "the node is running",
-            "run `rad node stop` first: a move that leaves it running is how two nodes end up \
-             sharing one key",
-        ));
+    // Not "is it running" but "is it proven stopped": this run is about to retire the key on
+    // this machine, and a socket that could not be reached is not evidence of anything.
+    let state = ctx.home.node_state();
+    if !state.is_stopped() {
+        return Err(match state.doubt() {
+            Some(doubt) => Error::refused(
+                format!("whether the node is running cannot be told: {doubt}"),
+                "make sure it is stopped and run the move again: two nodes sharing one key is \
+                 what this refusal is for",
+            ),
+            None => Error::refused(
+                "the node is running",
+                "run `rad node stop` first: a move that leaves it running is how two nodes end \
+                 up sharing one key",
+            ),
+        });
     }
 
     let create = Create {
