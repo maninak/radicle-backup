@@ -232,9 +232,13 @@ pub(crate) fn holds_a_retired_key(keys_dir: &Path) -> bool {
         Ok(entries) => entries,
         Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
     };
-    entries
-        .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().starts_with(RETIRED_KEY))
+    entries.into_iter().any(|entry| match entry {
+        Ok(entry) => entry.file_name().to_string_lossy().starts_with(RETIRED_KEY),
+        // An entry that will not read is a name this cannot rule out, and `flatten` dropped
+        // it silently: a directory listing that failed halfway through then read as one
+        // holding nothing, which is the answer that lets a restore write over the key.
+        Err(_) => true,
+    })
 }
 
 /// Where the next retirement should put the key it displaces: the first name free.
