@@ -97,20 +97,25 @@ if [ "$git_version" != "${git_version#*.}" ]; then
 	git_minor=${git_version#*.}
 	git_minor=${git_minor%%.*}
 fi
+# The unreadable arm first, and matched by what a number may NOT hold. `[0-9]*` is a leading
+# digit and anything at all after it, so a release candidate's `46-rc0` took the numeric arm,
+# `[ 46-rc0 -lt 46 ]` printed the shell's own "Illegal number" at somebody mid-recovery, and
+# the warning that a 2.45-rc git writes bundles unchecked was the one thing not said. Neither
+# half holds a colon, so the separator is safe to exempt.
 case "$git_major:$git_minor" in
-[0-9]*:[0-9]*)
-	if [ -n "$bundles" ] && { [ "$git_major" -lt 2 ] ||
-		{ [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 46 ]; }; }; then
-		echo "this git does not check the objects inside a bundle it fetches from, so the" >&2
-		echo "repositories below are written without that check; git 2.46 or newer runs it" >&2
-	fi
-	;;
-*)
+*[!0-9:]* | :* | *:)
 	# Git printing nothing at all is git not being installed, and the failure this script
 	# then dies of says that far better than a sentence about what a bundle was checked for.
 	if [ -n "$bundles" ] && [ -n "$git_said" ]; then
 		echo "the version of git could not be read, so it is not known whether the objects" >&2
 		echo "inside each bundle were checked on the way in" >&2
+	fi
+	;;
+*)
+	if [ -n "$bundles" ] && { [ "$git_major" -lt 2 ] ||
+		{ [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 46 ]; }; }; then
+		echo "this git does not check the objects inside a bundle it fetches from, so the" >&2
+		echo "repositories below are written without that check; git 2.46 or newer runs it" >&2
 	fi
 	;;
 esac

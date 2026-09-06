@@ -2113,6 +2113,11 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
             "git version 2",
             "git version 2.x",
             "git version",
+            // A release candidate. Its minor begins with digits, which a leading-digit
+            // pattern took for a number: the shell then answered `[ 46-rc0 -lt 46 ]` with
+            // its own "Illegal number" and said nothing about the bundles.
+            "git version 2.46-rc0",
+            "git version 2.45-rc1",
         ] {
             let ran = under_shell(shell, &lifted, &[("SAID", said), ("bundles", "yes")]);
             assert!(
