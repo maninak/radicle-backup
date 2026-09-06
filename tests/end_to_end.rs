@@ -60,12 +60,12 @@ impl Fixture {
     }
 
     fn restore_from_words(&self) {
-        let out = self.run_with_stdin(&["restore", "--words", "--yes"], &self.home(), WORDS);
-        assert_success(&out, "restoring the fixture identity from words");
+        let ran = self.run_with_stdin(&["restore", "--words", "--yes"], &self.home(), WORDS);
+        assert_success(&ran, "restoring the fixture identity from words");
         assert!(
-            stderr(&out).contains(DID),
+            stderr(&ran).contains(DID),
             "the fixed mnemonic no longer rebuilds {DID}: {}",
-            stderr(&out)
+            stderr(&ran)
         );
     }
 
@@ -302,17 +302,17 @@ impl Drop for Fixture {
 }
 
 fn git(args: &[&str], cwd: &Path) -> String {
-    let out = Command::new("git")
+    let ran = Command::new("git")
         .args(args)
         .current_dir(cwd)
         .output()
         .expect("git runs");
     assert!(
-        out.status.success(),
+        ran.status.success(),
         "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&ran.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    String::from_utf8_lossy(&ran.stdout).into_owned()
 }
 
 #[cfg(unix)]
@@ -325,20 +325,20 @@ fn mode(path: &Path) -> u32 {
         .mode()
 }
 
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
+fn stderr(ran: &Output) -> String {
+    String::from_utf8_lossy(&ran.stderr).into_owned()
 }
 
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
+fn stdout(ran: &Output) -> String {
+    String::from_utf8_lossy(&ran.stdout).into_owned()
 }
 
-fn assert_success(out: &Output, what: &str) {
+fn assert_success(ran: &Output, what: &str) {
     assert!(
-        out.status.success(),
+        ran.status.success(),
         "{what} exited {:?}: {}",
-        out.status.code(),
-        stderr(out)
+        ran.status.code(),
+        stderr(ran)
     );
 }
 
@@ -367,7 +367,7 @@ fn a_restore_refused_for_want_of_rad_leaves_the_home_untouched() {
     let fixture = Fixture::create("restore-replay-without-rad");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -377,11 +377,11 @@ fn a_restore_refused_for_want_of_rad_leaves_the_home_untouched() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a full backup");
+    assert_success(&ran, "taking a full backup");
     let archive = only_archive(&backups);
 
     let restored = fixture.path("restored");
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "restore",
             "--replay-policies",
@@ -390,10 +390,10 @@ fn a_restore_refused_for_want_of_rad_leaves_the_home_untouched() {
         ],
         &restored,
     );
-    let said = stderr(&out);
+    let said = stderr(&ran);
 
     assert_eq!(
-        out.status.code(),
+        ran.status.code(),
         Some(4),
         "a flag that cannot be honoured is a refusal: {said}"
     );
@@ -408,7 +408,7 @@ fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_suc
     let fixture = Fixture::create("restore-without-git");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -418,16 +418,16 @@ fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_suc
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a full backup");
+    assert_success(&ran, "taking a full backup");
     let archive = only_archive(&backups);
 
     let restored = fixture.path("restored");
-    let out = fixture
+    let ran = fixture
         .command(&["restore", "--yes", &archive.to_string_lossy()], &restored)
         .env("GIT", "/nonexistent/git")
         .output()
         .expect("rad-backup runs");
-    let said = stderr(&out);
+    let said = stderr(&ran);
 
     // The identity is genuinely back, so this is not a failed restore.
     assert!(
@@ -437,7 +437,7 @@ fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_suc
     // But every repository the archive carried is missing, and a run that exits 0 over that
     // is a scheduled restore nobody ever hears about again.
     assert_eq!(
-        out.status.code(),
+        ran.status.code(),
         Some(3),
         "a restore that dropped every repository must not exit 0: {said}"
     );
@@ -469,7 +469,7 @@ fn a_full_archive_restores_an_identity_its_policies_and_its_repositories_byte_fo
     let fixture = Fixture::create("roundtrip");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -479,19 +479,19 @@ fn a_full_archive_restores_an_identity_its_policies_and_its_repositories_byte_fo
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a full backup");
+    assert_success(&ran, "taking a full backup");
     let archive = only_archive(&backups);
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["verify", "--deep", &archive.to_string_lossy()],
         &fixture.home(),
     );
-    assert_success(&out, "verifying the archive");
-    assert!(stderr(&out).contains(DID), "{}", stderr(&out));
+    assert_success(&ran, "verifying the archive");
+    assert!(stderr(&ran).contains(DID), "{}", stderr(&ran));
 
     let restored = fixture.path("restored");
-    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
-    assert_success(&out, "restoring the archive");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
+    assert_success(&ran, "restoring the archive");
 
     let before = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
     let after = std::fs::read(restored.join("keys/radicle")).expect("the restored key is readable");
@@ -528,7 +528,7 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     let fixture = Fixture::create("damaged");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--plaintext",
             "--output",
@@ -537,7 +537,7 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext backup");
+    assert_success(&ran, "taking a plaintext backup");
     let archive = only_archive(&backups);
 
     // Plaintext, so the damage is caught by the manifest's digests rather than by age.
@@ -546,11 +546,11 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     bytes[middle] ^= 0xff;
     std::fs::write(&archive, &bytes).expect("the archive is writable");
 
-    let out = fixture.run(&["verify", &archive.to_string_lossy()], &fixture.home());
+    let ran = fixture.run(&["verify", &archive.to_string_lossy()], &fixture.home());
     assert!(
-        !out.status.success(),
+        !ran.status.success(),
         "a damaged archive verified clean: {}",
-        stderr(&out)
+        stderr(&ran)
     );
 }
 
@@ -559,7 +559,7 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
     let fixture = Fixture::create("verify-deep-without-git");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -569,10 +569,10 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a full backup");
+    assert_success(&ran, "taking a full backup");
     let archive = only_archive(&backups);
 
-    let out = fixture
+    let ran = fixture
         .command(
             &["verify", "--deep", &archive.to_string_lossy()],
             &fixture.home(),
@@ -580,7 +580,7 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
         .env("GIT", "/nonexistent/git")
         .output()
         .expect("rad-backup runs");
-    let said = stderr(&out);
+    let said = stderr(&ran);
 
     // A re-wrap once left the continuation indentation inside the string literal, so the line
     // arrived with a run of eighteen spaces in the middle of a sentence. Neither `cargo fmt`
@@ -600,7 +600,7 @@ fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
     let fixture = Fixture::create("diff");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -610,27 +610,27 @@ fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a full backup");
+    assert_success(&ran, "taking a full backup");
 
-    let out = fixture.run(&["diff"], &fixture.home());
-    assert_success(&out, "diffing an unchanged home");
+    let ran = fixture.run(&["diff"], &fixture.home());
+    assert_success(&ran, "diffing an unchanged home");
     assert!(
-        stderr(&out).contains("nothing has changed"),
+        stderr(&ran).contains("nothing has changed"),
         "{}",
-        stderr(&out)
+        stderr(&ran)
     );
 
     fixture.advance();
 
-    let out = fixture.run(&["diff", "--json"], &fixture.home());
+    let ran = fixture.run(&["diff", "--json"], &fixture.home());
     assert_eq!(
-        out.status.code(),
+        ran.status.code(),
         Some(3),
         "a changed home should exit 3: {}",
-        stderr(&out)
+        stderr(&ran)
     );
     let report: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("--json prints json");
+        serde_json::from_str(&stdout(&ran)).expect("--json prints json");
     assert_eq!(report["changed"], serde_json::Value::Bool(true));
     assert_eq!(
         report["repositoriesMoved"],
@@ -645,7 +645,7 @@ fn private_run(name: &str, visibility: &str) -> (serde_json::Value, String) {
     fixture.stub_rad(visibility);
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -658,8 +658,8 @@ fn private_run(name: &str, visibility: &str) -> (serde_json::Value, String) {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a private-selection archive");
-    let said = stderr(&out).to_string();
+    assert_success(&ran, "taking a private-selection archive");
+    let said = stderr(&ran).to_string();
 
     // The stub shouts about anything it was not taught. Without this the test would pass just
     // as happily against a `rad` that failed every call, which is the state it replaced.
@@ -717,20 +717,20 @@ fn a_state_archive_carries_the_paperwork_but_not_the_repositories() {
     let fixture = Fixture::create("state-tier");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    assert_success(&out, "taking a state backup");
+    assert_success(&ran, "taking a state backup");
     let archive = only_archive(&backups);
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["show", "--json", &archive.to_string_lossy()],
         &fixture.home(),
     );
-    assert_success(&out, "showing the archive");
+    assert_success(&ran, "showing the archive");
     let manifest: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("--json prints json");
+        serde_json::from_str(&stdout(&ran)).expect("--json prints json");
 
     assert_eq!(manifest["tier"], "state");
     let entries: Vec<String> = manifest["entries"]
@@ -761,19 +761,19 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     let fixture = Fixture::create("occupied");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    assert_success(&out, "taking a backup");
+    assert_success(&ran, "taking a backup");
     let archive = only_archive(&backups);
 
     let before = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
-    let out = fixture.run(
+    let ran = fixture.run(
         &["restore", "--yes", &archive.to_string_lossy()],
         &fixture.home(),
     );
-    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert_eq!(ran.status.code(), Some(4), "{}", stderr(&ran));
     let after = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
     assert_eq!(before, after, "a refused restore still touched the key");
 }
@@ -790,11 +790,11 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     let fixture = Fixture::create("keyless-occupied");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    assert_success(&out, "taking a backup");
+    assert_success(&ran, "taking a backup");
     let archive = only_archive(&backups);
 
     // Exactly what `move` leaves behind: no key, and every repository still there.
@@ -802,12 +802,12 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     let repositories = files_under(&fixture.home().join("storage"));
     assert!(!repositories.is_empty(), "the fixture has repositories");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["restore", "--yes", &archive.to_string_lossy()],
         &fixture.home(),
     );
-    let said = stderr(&out);
-    assert_eq!(out.status.code(), Some(4), "{said}");
+    let said = stderr(&ran);
+    assert_eq!(ran.status.code(), Some(4), "{said}");
     assert!(said.contains("stored repositories"), "{said}");
     assert_eq!(
         files_under(&fixture.home().join("storage")),
@@ -823,7 +823,7 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
     let fixture = Fixture::create("displaced");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "identity",
@@ -834,7 +834,7 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking an identity archive");
+    assert_success(&ran, "taking an identity archive");
     let archive = only_archive(&backups);
 
     // A home holding somebody else's key, which `--force` is about to restore over.
@@ -848,17 +848,17 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
     )
     .expect("the public half is writable");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["restore", "--force", "--yes", &archive.to_string_lossy()],
         &occupied,
     );
-    assert_success(&out, "restoring over another identity");
+    assert_success(&ran, "restoring over another identity");
 
     let retired = occupied.join("keys/radicle.retired");
     assert!(
         retired.is_file(),
         "the displaced key must be kept: {}",
-        stderr(&out)
+        stderr(&ran)
     );
     assert_eq!(
         std::fs::read(&retired).expect("the retired key is readable"),
@@ -897,31 +897,31 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
 
     // A `state` archive describes the repository without carrying it, which is the case that
     // made a freshly restored home report the repositories it never asked for as missing.
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    assert_success(&out, "taking a state backup");
+    assert_success(&ran, "taking a state backup");
     let archive = only_archive(&backups);
 
     let restored = fixture.path("restored");
-    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
-    assert_success(&out, "restoring the archive");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
+    assert_success(&ran, "restoring the archive");
 
-    let out = fixture.run(&["diff"], &restored);
-    assert_success(&out, "diffing a freshly restored home");
+    let ran = fixture.run(&["diff"], &restored);
+    assert_success(&ran, "diffing a freshly restored home");
     assert!(
-        stderr(&out).contains("nothing has changed"),
+        stderr(&ran).contains("nothing has changed"),
         "a restore should leave nothing to report: {}",
-        stderr(&out)
+        stderr(&ran)
     );
 
     // Asserted on the detail rather than the topic, because the topic prints whatever the
     // verdict is: matching it would pass just as happily on "no archive has ever been taken".
     // The file name too, since the check now reads the directory instead of trusting the
     // state record, and naming the archive it actually found is the difference.
-    let out = fixture.run(&["doctor"], &restored);
-    let said = stderr(&out);
+    let ran = fixture.run(&["doctor"], &restored);
+    let said = stderr(&ran);
     let name = archive
         .file_name()
         .expect("the archive has a name")
@@ -938,13 +938,13 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
     let backups = fixture.path("backups");
     let dir = backups.to_string_lossy().into_owned();
 
-    let out = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
-    assert_success(&out, "taking the first archive");
+    let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    assert_success(&ran, "taking the first archive");
     // The name carries a whole-second stamp, so two archives need a second between them.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     fixture.advance();
-    let out = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
-    assert_success(&out, "taking the second archive");
+    let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    assert_success(&ran, "taking the second archive");
 
     let mut archives: Vec<PathBuf> = std::fs::read_dir(&backups)
         .expect("the backup directory is readable")
@@ -957,29 +957,29 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
     let newest = archives[1].to_string_lossy().into_owned();
 
     // RAD_BACKUP_DIR is how a command with no argument knows where to look.
-    let out = fixture
+    let ran = fixture
         .command(&["show", "--json"], &fixture.home())
         .env("RAD_BACKUP_DIR", &dir)
         .output()
         .expect("rad-backup runs");
-    assert_success(&out, "showing the newest archive");
+    assert_success(&ran, "showing the newest archive");
     assert!(
-        stderr(&out).contains(&newest),
+        stderr(&ran).contains(&newest),
         "the archive it chose must be named on stderr: {}",
-        stderr(&out)
+        stderr(&ran)
     );
     let manifest: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("--json prints json");
+        serde_json::from_str(&stdout(&ran)).expect("--json prints json");
     let shown = manifest["created"].as_str().expect("a created stamp");
 
-    let out = fixture
+    let ran = fixture
         .command(
             &["show", "--json", &archives[0].to_string_lossy()],
             &fixture.home(),
         )
         .output()
         .expect("rad-backup runs");
-    let older: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("--json prints json");
+    let older: serde_json::Value = serde_json::from_str(&stdout(&ran)).expect("--json prints json");
     assert!(
         shown > older["created"].as_str().expect("a created stamp"),
         "the newest archive is the one that should have been chosen"
@@ -993,8 +993,8 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
     let dir = backups.to_string_lossy().into_owned();
 
     for _ in 0..2 {
-        let out = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
-        assert_success(&out, "taking an archive");
+        let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+        assert_success(&ran, "taking an archive");
         std::thread::sleep(std::time::Duration::from_millis(1100));
     }
     // A file this tool did not write, and one belonging to another identity.
@@ -1003,11 +1003,11 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
     std::fs::write(&bystander, b"not an archive").expect("the fixture file is writable");
     std::fs::write(&other, b"another identity").expect("the fixture file is writable");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["prune", "--keep", "1", "--dir", &dir, "--yes"],
         &fixture.home(),
     );
-    assert_success(&out, "pruning");
+    assert_success(&ran, "pruning");
 
     let left: Vec<String> = std::fs::read_dir(&backups)
         .expect("the backup directory is readable")
@@ -1035,15 +1035,15 @@ fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
     let backups = fixture.path("backups");
     let dir = backups.to_string_lossy().into_owned();
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--dry-run", "--tier", "full", "--output", &dir],
         &fixture.home(),
     );
-    assert_success(&out, "a dry run");
+    assert_success(&ran, "a dry run");
     assert!(
-        stderr(&out).contains("nothing was written"),
+        stderr(&ran).contains("nothing was written"),
         "a dry run must say that it wrote nothing: {}",
-        stderr(&out)
+        stderr(&ran)
     );
     assert!(
         !backups.exists() || std::fs::read_dir(&backups).into_iter().flatten().count() == 0,
@@ -1056,16 +1056,16 @@ fn a_dry_run_asked_for_json_answers_with_json() {
     let fixture = Fixture::create("dry-run-json");
     let dir = fixture.path("backups").to_string_lossy().into_owned();
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--dry-run", "--json", "--tier", "full", "--output", &dir],
         &fixture.home(),
     );
-    assert_success(&out, "a dry run asked for json");
+    assert_success(&ran, "a dry run asked for json");
 
     // `--json` was honoured by every reporting path except this one, which printed the human
     // table on stdout. A consumer got something that parses as far as the first line.
     let report: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("--dry-run --json prints json");
+        serde_json::from_str(&stdout(&ran)).expect("--dry-run --json prints json");
     assert_eq!(report["dryRun"], serde_json::Value::Bool(true));
     assert_eq!(report["tier"], serde_json::Value::String("full".into()));
     assert_eq!(
@@ -1088,7 +1088,7 @@ fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
     std::fs::remove_dir_all(&objects).expect("the object directory is removable");
     std::fs::write(&objects, b"not a directory").expect("something else goes in its place");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1099,10 +1099,10 @@ fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
         ],
         &fixture.home(),
     );
-    let said = stderr(&out);
+    let said = stderr(&ran);
 
     assert_eq!(
-        out.status.code(),
+        ran.status.code(),
         Some(3),
         "a backup missing a repository must not exit 0: {said}"
     );
@@ -1123,7 +1123,7 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
     let fixture = Fixture::create("script-rid");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1134,7 +1134,7 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext archive");
+    assert_success(&ran, "taking a plaintext archive");
 
     let extracted = fixture.path("extracted");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
@@ -1142,12 +1142,12 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
     let mut tarball = Vec::new();
     zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
     std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
-    let out = Command::new("tar")
+    let ran = Command::new("tar")
         .args(["-xf", "archive.tar"])
         .current_dir(&extracted)
         .output()
         .expect("tar runs");
-    assert_success(&out, "extracting the archive");
+    assert_success(&ran, "extracting the archive");
 
     // A name no `rad` would mint, planted the way a hostile archive would carry it. The tool
     // refuses such an archive outright; the script has to refuse the one bundle and go on,
@@ -1156,18 +1156,18 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
         .expect("the planted bundle is writable");
 
     let target = fixture.path("by-script");
-    let out = Command::new("sh")
+    let ran = Command::new("sh")
         .args(["restore.sh", &target.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
         .env("RAD_HOME", fixture.path("decoy-home"))
         .output()
         .expect("the restore script runs");
-    assert_success(&out, "restoring with a planted bundle present");
+    assert_success(&ran, "restoring with a planted bundle present");
     assert!(
-        stderr(&out).contains("is not a repository id"),
+        stderr(&ran).contains("is not a repository id"),
         "{}",
-        stderr(&out)
+        stderr(&ran)
     );
     assert!(
         !target.join("storage/a..b").exists(),
@@ -1195,7 +1195,7 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
     let fixture = Fixture::create("parity");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1206,12 +1206,12 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext archive");
+    assert_success(&ran, "taking a plaintext archive");
     let archive = only_archive(&backups);
 
     let by_tool = fixture.path("by-tool");
-    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &by_tool);
-    assert_success(&out, "restoring with this tool");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &by_tool);
+    assert_success(&ran, "restoring with this tool");
 
     let extracted = fixture.path("extracted");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
@@ -1219,22 +1219,22 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
     let mut tarball = Vec::new();
     zstd::stream::copy_decode(bytes.as_slice(), &mut tarball).expect("the archive decompresses");
     std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
-    let out = Command::new("tar")
+    let ran = Command::new("tar")
         .args(["-xf", "archive.tar"])
         .current_dir(&extracted)
         .output()
         .expect("tar runs");
-    assert_success(&out, "extracting the archive");
+    assert_success(&ran, "extracting the archive");
 
     let by_script = fixture.path("by-script");
-    let out = Command::new("sh")
+    let ran = Command::new("sh")
         .args(["restore.sh", &by_script.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
         .env("RAD_HOME", fixture.path("decoy-home"))
         .output()
         .expect("the restore script runs");
-    assert_success(&out, "restoring with the shipped script");
+    assert_success(&ran, "restoring with the shipped script");
 
     // Sqlite's own scratch files are not part of either restore: whichever side opens a
     // database first makes them, and they say nothing about what was put back.
@@ -1338,7 +1338,7 @@ fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_with
     let scratch = fixture.path("scratch");
     std::fs::create_dir_all(&scratch).expect("the scratch parent is creatable");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1350,7 +1350,7 @@ fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_with
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a full backup");
+    assert_success(&ran, "taking a full backup");
 
     assert_eq!(
         files_under(&scratch),
@@ -1379,7 +1379,7 @@ fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_with
     // And the search itself, against an archive that really does carry the key. Without this
     // the assertions above would pass just as happily if they were looking for nothing.
     let plain = fixture.path("plaintext");
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "identity",
@@ -1390,7 +1390,7 @@ fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_with
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext archive");
+    assert_success(&ran, "taking a plaintext archive");
     let archive = std::fs::read(only_archive(&plain)).expect("the archive is readable");
     let mut tar = Vec::new();
     zstd::stream::copy_decode(archive.as_slice(), &mut tar).expect("the archive decompresses");
@@ -1414,7 +1414,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     let fixture = Fixture::create("script");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1425,7 +1425,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext archive");
+    assert_success(&ran, "taking a plaintext archive");
 
     let extracted = fixture.path("extracted");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
@@ -1434,12 +1434,12 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
     let tar_path = extracted.join("archive.tar");
     std::fs::write(&tar_path, &tarball).expect("the tarball is writable");
-    let out = Command::new("tar")
+    let ran = Command::new("tar")
         .args(["-xf", "archive.tar"])
         .current_dir(&extracted)
         .output()
         .expect("tar runs");
-    assert_success(&out, "extracting the archive");
+    assert_success(&ran, "extracting the archive");
 
     // Run it the way someone in trouble would: a shell, the extracted directory, and no
     // rad-backup anywhere. The target is given as the argument the README documents, with
@@ -1448,18 +1448,18 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     // ignored, which is what it used to be, shows up as a failure rather than as a pass.
     let target = fixture.path("by-script");
     let decoy = fixture.path("decoy-home");
-    let out = Command::new("sh")
+    let ran = Command::new("sh")
         .args(["restore.sh", &target.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
         .env("RAD_HOME", &decoy)
         .output()
         .expect("the restore script runs");
-    assert_success(&out, "restoring with the shipped script");
+    assert_success(&ran, "restoring with the shipped script");
     // The fixture home holds exactly one repository, and the closing line the script prints is
     // the last thing somebody reads before deciding the restore worked. `term::count` is the
     // rule this tool holds its own output to; the shipped script has to keep it too.
-    let said = String::from_utf8_lossy(&out.stdout);
+    let said = String::from_utf8_lossy(&ran.stdout);
     assert!(said.contains("and 1 repository\n"), "{said}");
     assert!(
         !decoy.exists(),
@@ -1485,7 +1485,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     if Command::new("sh")
         .args(["-c", "command -v jq"])
         .output()
-        .is_ok_and(|out| out.status.success())
+        .is_ok_and(|ran| ran.status.success())
     {
         let head = git(
             &[
@@ -1508,7 +1508,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
 
     // And a second run over the home it just built, addressed the other way, refuses
     // instead of overwriting the key.
-    let out = Command::new("sh")
+    let ran = Command::new("sh")
         .arg("restore.sh")
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -1516,14 +1516,14 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         .output()
         .expect("the restore script runs");
     assert!(
-        !out.status.success(),
+        !ran.status.success(),
         "the script overwrote an occupied home: {}",
-        stderr(&out)
+        stderr(&ran)
     );
     assert!(
-        stderr(&out).contains("already holds an identity"),
+        stderr(&ran).contains("already holds an identity"),
         "{}",
-        stderr(&out)
+        stderr(&ran)
     );
 }
 
@@ -1553,7 +1553,7 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
         .and_then(|rest| rest.split("```").next())
         .expect("the sheet opens with a shell block");
 
-    let out = std::process::Command::new("sh")
+    let ran = std::process::Command::new("sh")
         .arg("-c")
         .arg(block)
         .current_dir(&stage)
@@ -1566,7 +1566,7 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
         std::fs::read(home.join("keys/radicle")).expect("the key is still readable"),
         b"the key already here",
         "pasting the block must not overwrite an identity: {}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&ran.stderr)
     );
 }
 
@@ -1574,10 +1574,10 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
 fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
     let fixture = Fixture::create("paper-pipe");
 
-    let out = fixture.run(&["paper"], &fixture.home());
-    assert_success(&out, "rendering a paper sheet to a pipe");
+    let ran = fixture.run(&["paper"], &fixture.home());
+    assert_success(&ran, "rendering a paper sheet to a pipe");
 
-    let sheet = stdout(&out);
+    let sheet = stdout(&ran);
     assert!(
         sheet.contains("<html") && sheet.contains("</html>"),
         "a piped sheet should be the whole HTML document, got {} bytes",
@@ -1601,7 +1601,7 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     let fixture = Fixture::create("script-head");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1612,7 +1612,7 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext archive");
+    assert_success(&ran, "taking a plaintext archive");
 
     let extracted = fixture.path("extracted");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
@@ -1620,12 +1620,12 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     let mut tarball = Vec::new();
     zstd::stream::copy_decode(archive.as_slice(), &mut tarball).expect("the archive decompresses");
     std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
-    let out = Command::new("tar")
+    let ran = Command::new("tar")
         .args(["-xf", "archive.tar"])
         .current_dir(&extracted)
         .output()
         .expect("tar runs");
-    assert_success(&out, "extracting the archive");
+    assert_success(&ran, "extracting the archive");
 
     // Planted the way a hostile archive would carry it, on every repository the manifest
     // names.
@@ -1649,22 +1649,22 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     .expect("the manifest is writable");
 
     let target = fixture.path("by-script");
-    let out = Command::new("sh")
+    let ran = Command::new("sh")
         .args(["restore.sh", &target.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
         .env("RAD_HOME", fixture.path("decoy-home"))
         .output()
         .expect("the restore script runs");
-    assert_success(&out, "restoring with a hostile head planted");
+    assert_success(&ran, "restoring with a hostile head planted");
     assert!(
-        stderr(&out).contains("does not name a ref"),
+        stderr(&ran).contains("does not name a ref"),
         "{}",
-        stderr(&out)
+        stderr(&ran)
     );
     // A skip, not a bail-out: the refs are the repository, and HEAD is only a pointer into
     // them, so refusing the pointer must not cost the history it points at.
-    assert!(stdout(&out).contains("1 repository"), "{}", stdout(&out));
+    assert!(stdout(&ran).contains("1 repository"), "{}", stdout(&ran));
     assert!(
         target
             .join("storage/z3gqcJUoA1n9HaHKufZs5FCSGazv5/refs")
@@ -1687,7 +1687,7 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
     let fixture = Fixture::create("tool-head");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--tier",
             "full",
@@ -1698,16 +1698,16 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a plaintext archive");
+    assert_success(&ran, "taking a plaintext archive");
     let hostile = repack_with_a_planted_head(&fixture, &only_archive(&backups));
 
     let restored = fixture.path("restored");
-    let out = fixture.run(&["restore", "--yes", &hostile.to_string_lossy()], &restored);
-    assert_success(&out, "restoring an archive whose manifest names a bad head");
+    let ran = fixture.run(&["restore", "--yes", &hostile.to_string_lossy()], &restored);
+    assert_success(&ran, "restoring an archive whose manifest names a bad head");
     assert!(
-        stderr(&out).contains("does not name a ref"),
+        stderr(&ran).contains("does not name a ref"),
         "{}",
-        stderr(&out)
+        stderr(&ran)
     );
     assert!(
         restored.join("storage").join(RID).join("refs").exists(),
@@ -1812,13 +1812,13 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
         if shell == "busybox" {
             command.arg("ash");
         }
-        let out = command
+        let ran = command
             .arg("-c")
             .arg(&harness)
             .env("head", head)
             .output()
             .unwrap_or_else(|e| panic!("{shell} runs: {e}"));
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        String::from_utf8_lossy(&ran.stdout).trim().to_string()
     };
     for shell in &shells {
         for head in refused {
@@ -1854,12 +1854,12 @@ fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
     zstd::stream::copy_decode(bytes.as_slice(), &mut tarball).expect("the archive decompresses");
     let opened = fixture.path("planted.tar");
     std::fs::write(&opened, &tarball).expect("the tarball is writable");
-    let out = Command::new("tar")
+    let ran = Command::new("tar")
         .args(["-xf", &opened.to_string_lossy()])
         .current_dir(&extracted)
         .output()
         .expect("tar runs");
-    assert_success(&out, "extracting the archive");
+    assert_success(&ran, "extracting the archive");
 
     let manifest_path = extracted.join("manifest.json");
     let text = std::fs::read_to_string(&manifest_path).expect("the manifest is readable");
@@ -1888,12 +1888,12 @@ fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
     let repacked = fixture.path("repacked.tar");
     let mut args = vec!["-cf".to_string(), repacked.to_string_lossy().into_owned()];
     args.extend(entries);
-    let out = Command::new("tar")
+    let ran = Command::new("tar")
         .args(&args)
         .current_dir(&extracted)
         .output()
         .expect("tar runs");
-    assert_success(&out, "repacking the archive");
+    assert_success(&ran, "repacking the archive");
 
     let name = archive.file_name().expect("the archive has a name");
     let target = rebuilt.join(name);
@@ -1905,16 +1905,16 @@ fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
 
 #[cfg(unix)]
 /// Every regular file under `dir`, named relative to `root`.
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+fn collect_files(root: &Path, dir: &Path, ran: &mut Vec<String>) {
     for entry in std::fs::read_dir(dir).expect("the directory is readable") {
         let path = entry.expect("the entry is readable").path();
         if path.is_dir() {
-            collect_files(root, &path, out);
+            collect_files(root, &path, ran);
         } else {
             let relative = path
                 .strip_prefix(root)
                 .expect("the entry is under the root");
-            out.push(relative.to_string_lossy().into_owned());
+            ran.push(relative.to_string_lossy().into_owned());
         }
     }
 }
@@ -1964,7 +1964,7 @@ fn a_diff_against_an_archive_of_everything_does_not_report_a_foreign_repository_
         &work,
     );
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "--repos",
             "all",
@@ -1975,22 +1975,22 @@ fn a_diff_against_an_archive_of_everything_does_not_report_a_foreign_repository_
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking an archive of everything");
+    assert_success(&ran, "taking an archive of everything");
 
-    let out = fixture.run(&["diff", "--json"], &fixture.home());
+    let ran = fixture.run(&["diff", "--json"], &fixture.home());
     let report: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("the diff report is json");
+        serde_json::from_str(&stdout(&ran)).expect("the diff report is json");
     assert_eq!(
         report["repositoriesGone"],
         serde_json::json!([]),
         "{}",
-        stdout(&out)
+        stdout(&ran)
     );
     assert!(
-        out.status.success(),
+        ran.status.success(),
         "diff exited {:?} over a repository that never left storage: {}",
-        out.status.code(),
-        stdout(&out)
+        ran.status.code(),
+        stdout(&ran)
     );
 }
 
@@ -2005,27 +2005,27 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     let fixture = Fixture::create("sole-holder");
     let backups = fixture.path("backups");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    assert_success(&out, "taking a backup");
+    assert_success(&ran, "taking a backup");
     let archive = only_archive(&backups);
 
     // The home the archive was taken from: nothing was restored here, so there is no second
     // machine to warn about.
-    let out = fixture.run(&["doctor", "--json"], &fixture.home());
-    assert_eq!(verdict_of(&out, "key copies"), "pass");
+    let ran = fixture.run(&["doctor", "--json"], &fixture.home());
+    assert_eq!(verdict_of(&ran, "key copies"), "pass");
 
     let restored = fixture.path("restored");
-    let out = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
-    assert_success(&out, "restoring the archive");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
+    assert_success(&ran, "restoring the archive");
 
     // And the home it was restored into, which now holds a key another machine also holds.
-    let out = fixture.run(&["doctor", "--json"], &restored);
-    assert_eq!(verdict_of(&out, "key copies"), "warn");
+    let ran = fixture.run(&["doctor", "--json"], &restored);
+    assert_eq!(verdict_of(&ran, "key copies"), "warn");
     let report: serde_json::Value =
-        serde_json::from_str(&stdout(&out)).expect("the doctor report is json");
+        serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
     let check = report["checks"]
         .as_array()
         .expect("the report lists checks")
@@ -2039,16 +2039,16 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
 }
 
 /// The verdict of one doctor check, by topic, out of a `--json` run.
-fn verdict_of(out: &Output, topic: &str) -> String {
+fn verdict_of(ran: &Output, topic: &str) -> String {
     let report: serde_json::Value =
-        serde_json::from_str(&stdout(out)).expect("the doctor report is json");
+        serde_json::from_str(&stdout(ran)).expect("the doctor report is json");
     report["checks"]
         .as_array()
         .expect("the report lists checks")
         .iter()
         .find(|check| check["topic"] == topic)
         .and_then(|check| check["verdict"].as_str())
-        .unwrap_or_else(|| panic!("no check named {topic} in {}", stdout(out)))
+        .unwrap_or_else(|| panic!("no check named {topic} in {}", stdout(ran)))
         .to_string()
 }
 
@@ -2068,7 +2068,7 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
     let recipient = std::fs::read_to_string(fixture.home().join("keys/radicle.pub"))
         .expect("the fixture public key is readable");
 
-    let out = fixture.run(
+    let ran = fixture.run(
         &[
             "create",
             "--tier",
@@ -2081,13 +2081,13 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
         ],
         &fixture.home(),
     );
-    assert_success(&out, "taking a backup encrypted to an ssh recipient");
+    assert_success(&ran, "taking a backup encrypted to an ssh recipient");
     let archive = only_archive(&backups);
 
     // The run itself names the key, not only the note beside the archive: the note is read in
     // the middle of a recovery, and this is read while whoever set the timer up is still
     // watching and could still go and check they have the private half.
-    let said = stderr(&out);
+    let said = stderr(&ran);
     assert!(said.contains("opens only with the private half"), "{said}");
     assert!(said.contains(recipient.trim()), "{said}");
 
@@ -2156,7 +2156,7 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
             passphrase_file.to_string_lossy().into_owned(),
         ),
     ] {
-        let out = fixture
+        let ran = fixture
             .command(
                 &[
                     "verify",
@@ -2169,6 +2169,6 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
             .env(variable, value)
             .output()
             .expect("rad-backup runs");
-        assert_success(&out, &format!("verifying with {variable}"));
+        assert_success(&ran, &format!("verifying with {variable}"));
     }
 }
