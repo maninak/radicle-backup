@@ -132,7 +132,7 @@ The two private repositories were carried; the two public ones are on other node
 | `0` | It worked, and nothing needs your attention. |
 | `1` | It failed: a file could not be read, a passphrase was wrong, an archive did not decrypt. |
 | `2` | The arguments were wrong. Clap's own code. |
-| `3` | Checks failed: `verify` found the archive incomplete, `doctor` has a failing line, `diff` found drift. |
+| `3` | Checks failed: `verify` found the archive incomplete, `doctor` has a failing line, `diff` found drift, `backup` could not carry a repository, `restore` did not get one back or found one another node holds signed refs for. |
 | `4` | Refused. Everything is intact and nothing was written, because doing it would have been unsafe. |
 
 Codes `3` and `4` are the ones worth scripting against: `rad backup diff || rad backup` takes an archive only when something changed.

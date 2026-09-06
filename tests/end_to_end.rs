@@ -353,7 +353,7 @@ fn assert_success(ran: &Output, what: &str) {
 /// than it claims is the thing these tests exist to prevent. So the list is printed, and on
 /// Linux CI, whose workflow installs all four, a short one is a failure rather than a fact
 /// about the machine.
-// Unix only, like both callers: they run a POSIX script Windows has no shell for.
+// Unix only, like its callers: they run a POSIX script Windows has no shell for.
 #[cfg(unix)]
 fn probe_shells() -> Vec<&'static str> {
     const WANTED: [&str; 4] = ["sh", "dash", "bash", "busybox"];
@@ -382,7 +382,7 @@ fn probe_shells() -> Vec<&'static str> {
 }
 
 /// One shell running a fragment lifted out of the shipped script, with `variables` exported.
-// Unix only, like both callers.
+// Unix only, like its callers.
 #[cfg(unix)]
 fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Output {
     let mut command = Command::new(shell);
