@@ -191,8 +191,19 @@ pub struct SourceInfo {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
-    /// Whether the node was serving its control socket when the archive was taken.
+    /// Whether the node was serving its control socket when the archive was taken. A run that
+    /// could not reach the socket at all writes `true` here, because a node assumed up costs
+    /// a warning and a node assumed down costs an identity; `why_running_is_unknown` beside it
+    /// is how the far end tells the precaution from the observation.
     pub was_running: bool,
+    /// Why the field above is a precaution rather than something this run saw: the error the
+    /// control socket gave. Absent when the socket answered, which is the ordinary case.
+    ///
+    /// Added rather than making `was_running` an `Option`, because a manifest that omits a
+    /// field an older build reads as a plain `bool` is a manifest that build cannot parse at
+    /// all, and an archive has to stay readable by the versions already installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_running_is_unknown: Option<String>,
     /// Whether this run stopped it, which is the only case where a restart is owed.
     #[serde(rename = "stoppedByBackup")]
     pub was_stopped_by_backup: bool,

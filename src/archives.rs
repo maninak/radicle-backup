@@ -25,8 +25,8 @@ pub struct Archive {
     /// When the name says it was taken. `None` when the stamp does not parse, which is not an
     /// error: the file is still an archive, it just cannot be sorted by its own claim.
     pub taken: Option<jiff::Timestamp>,
-    /// Whether the file begins with an age header. `None` when it could not be opened to
-    /// look, which `ls` prints as unknown.
+    /// Whether the file begins with an age header. `None` when it could not be read to look,
+    /// which `ls` prints as unknown.
     ///
     /// Read off the bytes, never off the `.age` suffix. `rad backup --stdout > name.tar.zst`
     /// writes an encrypted archive under a name that says otherwise, and `ls` printed "(not

@@ -62,6 +62,12 @@ pub struct Restored {
     pub source_retires_key: Option<bool>,
     /// Whether a node was serving on the machine the archive was taken from.
     pub source_node_was_running: bool,
+    /// Whether the field above is what the source run saw or what it assumed. A run that
+    /// could not reach the control socket writes "running" as a precaution, and a report that
+    /// repeats it as a fact tells somebody their key is being double-signed when it may not
+    /// be. Absent in a record written before this was carried, which means it was seen.
+    #[serde(default)]
+    pub source_node_state_was_guessed: bool,
 }
 
 impl Record {

@@ -72,6 +72,20 @@ pub enum Purpose {
     MoveKeepingSource,
 }
 
+impl Purpose {
+    /// Whether the machine this archive is being taken from gives up its key.
+    ///
+    /// Its own function because the answer is written into the archive and read on another
+    /// machine, months later, to decide whether to warn somebody that two homes hold one
+    /// identity. Nothing else in a manifest is acted on that far from where it was written.
+    fn retires_key(self) -> bool {
+        match self {
+            Self::Backup | Self::MoveKeepingSource => false,
+            Self::Move => true,
+        }
+    }
+}
+
 pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     ctx.home.require()?;
     let home = &ctx.home;
@@ -181,10 +195,11 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
             rad_version: rad.as_ref().and_then(|rad| rad.version().ok()),
             git_version: git.version().ok(),
             os: std::env::consts::OS.to_string(),
-            retires_key: Some(purpose == Purpose::Move),
+            retires_key: Some(purpose.retires_key()),
         },
         node: NodeInfo {
             was_running: node.was_running,
+            why_running_is_unknown: node.why_running_is_unknown.clone(),
             was_stopped_by_backup: node.was_stopped_by_backup,
         },
         entries: Vec::new(),
@@ -421,7 +436,13 @@ fn directory_size(path: &Path) -> (u64, usize) {
     };
     let mut bytes = 0;
     let mut unreadable = 0;
-    for entry in entries.filter_map(std::result::Result::ok) {
+    for entry in entries {
+        // An entry the directory would not even name, which is one more thing this estimate
+        // has not seen. Dropped silently, it came off the total as if it were not there.
+        let Ok(entry) = entry else {
+            unreadable += 1;
+            continue;
+        };
         match entry.file_type() {
             Ok(kind) if kind.is_dir() => {
                 let (under, missed) = directory_size(&entry.path());
@@ -432,7 +453,10 @@ fn directory_size(path: &Path) -> (u64, usize) {
                 Ok(meta) => bytes += meta.len(),
                 Err(_) => unreadable += 1,
             },
-            _ => {}
+            // A symlink, a socket or a fifo. The archive does not carry one either, so it
+            // costs nothing and is not something this could not read.
+            Ok(_) => {}
+            Err(_) => unreadable += 1,
         }
     }
     (bytes, unreadable)
@@ -792,6 +816,56 @@ fn hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--keep-source` was written into the archive as a plain move, so the home restored from
+    /// it was told the key on the machine it came from had been retired, about a machine that
+    /// still had it. Spelled out per variant, because a fourth one added to the enum has to
+    /// answer this question on purpose rather than fall into whichever arm was the default.
+    #[test]
+    fn only_a_move_that_gives_up_the_key_says_so_in_the_archive() {
+        assert!(!Purpose::Backup.retires_key());
+        assert!(Purpose::Move.retires_key());
+        assert!(!Purpose::MoveKeepingSource.retires_key());
+    }
+
+    /// A directory the estimate could not read is what makes it under-estimate, and under is
+    /// the wrong side of "will this fit".
+    ///
+    /// The other two ways an entry goes unread, a `read_dir` iterator that yields an error and
+    /// a `file_type` that cannot be determined, are counted in the same tally but are not
+    /// reachable from a fixture: on Linux both come from the filesystem giving up mid-walk.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_the_estimate_could_not_read_is_counted_rather_than_costed_off_the_total() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!("rad-backup-size-{}", std::process::id()));
+        let shut = root.join("shut");
+        std::fs::create_dir_all(&shut).expect("scratch directories are creatable");
+        std::fs::write(root.join("kept"), vec![0u8; 512]).expect("scratch file is writable");
+        std::fs::write(shut.join("hidden"), vec![0u8; 4096]).expect("scratch file is writable");
+
+        let (open_bytes, open_misses) = directory_size(&root);
+        assert_eq!(open_bytes, 512 + 4096);
+        assert_eq!(open_misses, 0);
+
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000))
+            .expect("mode is settable");
+        let (bytes, missed) = directory_size(&root);
+        let walks_through_any_mode = std::fs::read_dir(&shut).is_ok();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700))
+            .expect("mode is settable back");
+
+        if !walks_through_any_mode {
+            assert_eq!(
+                bytes, 512,
+                "the unreadable directory costs nothing to the total"
+            );
+            assert_eq!(missed, 1, "and is counted rather than passed over");
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// The bug: the recipient line read `age -d -i <key file> archive.tar.zst.age`, which a
     /// shell does not read as a template. `<key` redirects input, `file` is an argument, and

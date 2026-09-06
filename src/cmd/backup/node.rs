@@ -31,6 +31,10 @@ pub(super) struct NodeGuard<'a> {
     ctx: &'a Ctx,
     rad: Option<&'a Rad>,
     pub(super) was_running: bool,
+    /// The error the control socket gave, when it gave one. `was_running` above is then a
+    /// precaution rather than a reading, and the manifest carries this so the far end can say
+    /// "may have had a node running" instead of asserting it.
+    pub(super) why_running_is_unknown: Option<String>,
     pub(super) was_stopped_by_backup: bool,
 }
 
@@ -80,7 +84,8 @@ pub(super) fn quiesce<'a>(
     // as stopped, this wrote `node.was_running: false` into the manifest over a home whose
     // node was up, and the restore on the far end skipped the warning that costs an identity.
     let state = ctx.home.node_state();
-    if let Some(doubt) = state.doubt() {
+    let why_running_is_unknown = state.doubt();
+    if let Some(doubt) = &why_running_is_unknown {
         warnings.push(format!(
             "whether the node is running could not be established ({doubt}), so this archive \
              was taken as though it were"
@@ -94,6 +99,7 @@ pub(super) fn quiesce<'a>(
             ctx,
             rad,
             was_running: false,
+            why_running_is_unknown,
             was_stopped_by_backup: false,
         });
     }
@@ -109,6 +115,7 @@ pub(super) fn quiesce<'a>(
             ctx,
             rad,
             was_running: true,
+            why_running_is_unknown,
             was_stopped_by_backup: false,
         });
     }
@@ -132,6 +139,7 @@ pub(super) fn quiesce<'a>(
         ctx,
         rad: Some(rad),
         was_running: true,
+        why_running_is_unknown: why_running_is_unknown.clone(),
         was_stopped_by_backup: true,
     };
 
@@ -156,14 +164,22 @@ pub(super) fn quiesce<'a>(
     }
     // It never went down, so there is nothing this run stopped and nothing to put back.
     node.was_stopped_by_backup = false;
+    // Both of these say the socket is still being served, and neither knows that when the
+    // socket is the thing that could not be reached: the same EACCES that made the state a
+    // doubt makes every poll below a doubt too. Saying so is the difference between sending
+    // somebody to stop a node and sending them to look at a permission.
+    let still_up = match &why_running_is_unknown {
+        Some(doubt) => format!("the node could not be asked whether it stopped ({doubt})"),
+        None => "the node is still serving its control socket".to_string(),
+    };
     Err(if stopped {
         Error::refused(
-            "the node is still serving its control socket after being asked to stop",
+            format!("{still_up} after being asked to stop"),
             "stop it by hand and run again, or run without --stop-node",
         )
     } else {
         Error::refused(
-            "`rad node stop` failed, and the node is still serving its control socket",
+            format!("`rad node stop` failed, and {still_up}"),
             "read what it said above, stop it by hand, or run without --stop-node",
         )
     })

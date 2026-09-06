@@ -201,6 +201,24 @@ impl Home {
         NodeState::Stopped
     }
 
+    /// The socket `RAD_SOCKET` names, when it names one other than this home's own.
+    ///
+    /// A node answering there is not necessarily this home's node: heartwood resolves the
+    /// variable before the home-relative default, so somebody with one exported for their main
+    /// node was told "the node is running against the home being restored into" about a node
+    /// serving a different home entirely. The refusal stands either way, because a node for
+    /// this home could not have bound that socket, but the sentence has to name what answered.
+    #[cfg(unix)]
+    pub fn borrowed_socket(&self) -> Option<PathBuf> {
+        let socket = self.control_socket();
+        (socket != self.control_socket_at()).then_some(socket)
+    }
+
+    #[cfg(not(unix))]
+    pub fn borrowed_socket(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// The alias the node announces, read from `config.json` rather than from `rad self`, so
     /// that reading an archived home works without a `rad` on PATH.
     pub fn alias(&self) -> Result<Option<String>> {
@@ -300,7 +318,8 @@ mod tests {
     /// stopped". A control socket is created `srwxrwxr-x` inside a directory, so a home
     /// reached over a mount another user owns answers "stopped" about a node that is up.
     /// `restore --force` then wrote over storage a live node was holding, and `--stop-node`
-    /// recorded a stop it never performed.
+    /// recorded a stop it never performed. The three answers it can give are walked in turn:
+    /// nothing listening, somebody listening, and a question this process cannot put.
     #[cfg(unix)]
     #[test]
     fn a_socket_that_could_not_be_asked_is_not_reported_as_a_stopped_node() {
@@ -310,20 +329,41 @@ mod tests {
         let home = Home::at(&root);
         std::fs::create_dir_all(home.node_dir()).expect("scratch home is creatable");
 
-        // Nothing there at all, which is the ordinary shape of a machine with no node, and a
-        // stale socket file left by one that died: both mean nothing is listening.
+        // Nothing there at all, which is the ordinary shape of a machine with no node.
+        assert_eq!(home.node_state(), NodeState::Stopped);
+
+        // Somebody listening, which is what the probe is for.
+        let listening = std::os::unix::net::UnixListener::bind(home.control_socket_at())
+            .expect("a scratch socket is bindable");
+        assert_eq!(home.node_state(), NodeState::Running);
+
+        // The socket file a node that died leaves behind. Nothing accepts on it, and that is
+        // a real answer rather than a doubt.
+        drop(listening);
+        assert!(
+            home.control_socket_at().exists(),
+            "the socket file outlives its listener"
+        );
         assert_eq!(home.node_state(), NodeState::Stopped);
 
         // The directory holding the socket cannot be entered, so this process cannot ask.
-        // Running as root defeats it, and root is the one user for whom the old bug was
-        // invisible, so the assertion is skipped rather than made to lie.
         let unreadable = std::fs::Permissions::from_mode(0o000);
         std::fs::set_permissions(home.node_dir(), unreadable).expect("mode is settable");
         let state = home.node_state();
+        // Root and anything holding CAP_DAC_OVERRIDE walks straight through mode 000, so there
+        // is nothing it could fail to ask. Probed here rather than guessed from a user name,
+        // because the probe is the condition itself; an outcome-shaped guard would also skip
+        // whenever the bug this test exists for came back.
+        let walks_through_any_mode = std::fs::read_dir(home.node_dir()).is_ok();
         std::fs::set_permissions(home.node_dir(), std::fs::Permissions::from_mode(0o700))
             .expect("mode is settable back");
 
-        if state != NodeState::Stopped {
+        if !walks_through_any_mode {
+            assert_ne!(
+                state,
+                NodeState::Stopped,
+                "a socket nobody could reach is not an answer"
+            );
             assert!(!state.is_running(), "{state:?}");
             assert!(
                 state

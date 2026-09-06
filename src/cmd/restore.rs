@@ -86,17 +86,29 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // Anything but a node proven stopped refuses. A socket that cannot be reached is not a
     // node that is down, and this guard exists precisely because being wrong about that costs
     // the home it was protecting.
-    if !home.node_state().is_stopped() {
-        let state = home.node_state();
+    let state = home.node_state();
+    if !state.is_stopped() {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
                 format!("whether a node is running against this home cannot be told: {doubt}"),
                 "make sure no node is running, then restore into this home again",
             ),
-            None => Error::refused(
-                "the node is running against the home being restored into",
-                "run `rad node stop` first: a node writing to a home mid-restore corrupts both",
-            ),
+            None => match home.borrowed_socket() {
+                Some(socket) => Error::refused(
+                    format!(
+                        "a node answered on {}, which RAD_SOCKET names rather than this home's \
+                         own socket",
+                        socket.display()
+                    ),
+                    "stop that node, or unset RAD_SOCKET if it belongs to another home, then \
+                     restore again",
+                ),
+                None => Error::refused(
+                    "the node is running against the home being restored into",
+                    "run `rad node stop` first: a node writing to a home mid-restore corrupts \
+                     both",
+                ),
+            },
         });
     }
 
@@ -196,6 +208,7 @@ fn remember(
     record.restored = Some(state::Restored {
         source_retires_key: manifest.source.retires_key,
         source_node_was_running: manifest.node.was_running,
+        source_node_state_was_guessed: manifest.node.why_running_is_unknown.is_some(),
     });
     if let Err(e) = state::write(&record) {
         ctx.term.warn(&format!(
@@ -362,10 +375,21 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
                 ),
                 "make sure no node is running, then restore again: nothing has been written yet",
             ),
-            None => Error::refused(
-                "the node started against this home while the archive was being read",
-                "run `rad node stop` and restore again: nothing has been written yet",
-            ),
+            None => match home.borrowed_socket() {
+                Some(socket) => Error::refused(
+                    format!(
+                        "a node answered on {} while the archive was being read, which \
+                         RAD_SOCKET names rather than this home's own socket",
+                        socket.display()
+                    ),
+                    "stop that node, or unset RAD_SOCKET if it belongs to another home, then \
+                     restore again: nothing has been written yet",
+                ),
+                None => Error::refused(
+                    "the node started against this home while the archive was being read",
+                    "run `rad node stop` and restore again: nothing has been written yet",
+                ),
+            },
         });
     }
     for directory in [home.path().to_path_buf(), home.keys_dir(), home.node_dir()] {
@@ -884,7 +908,15 @@ fn report(
         }
         term.blank();
         if manifest.node.was_running {
-            term.warn("the machine this archive came from had a node running when it was taken");
+            match &manifest.node.why_running_is_unknown {
+                // Said as a possibility, because that is what it is: the run that wrote this
+                // archive could not reach the socket and wrote the cautious answer.
+                Some(doubt) => term.warn(&format!(
+                    "the machine this archive came from may have had a node running: the run                      that took it could not tell ({doubt})"
+                )),
+                None => term
+                    .warn("the machine this archive came from had a node running when it was taken"),
+            }
             term.detail("never run two nodes with one key: stop the other one first");
         }
         term.detail("start the node with `rad node start`");

@@ -335,27 +335,33 @@ fn write_environment(
 /// are not UTF-8, is exactly the file the marker check exists to protect, and it was the one
 /// file the check could not see.
 fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
-    match std::fs::read_to_string(path) {
-        Ok(existing) if !existing.contains(MARKER_MARK) => {
-            return Err(Error::refused(
-                format!("{} was not written by this tool", path.display()),
-                "edit it yourself, or move it aside and run this again",
-            ));
-        }
-        Ok(_) => {}
-        // Nothing there, so there is nothing to protect.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(Error::refused(
-                format!("{} is there and could not be read ({e})", path.display()),
-                "this tool will not overwrite a unit it cannot recognise; move it aside and \
-                 run this again",
-            ));
-        }
-    }
+    let existing = std::fs::read_to_string(path);
+    may_replace(path, existing.as_deref())?;
     std::fs::write(path, contents).map_err(|e| Error::io(path, e))?;
     ctx.term.step(&format!("wrote {}", path.display()));
     Ok(())
+}
+
+/// Whether whatever is already at `path` may be replaced, decided from the read alone. Pure.
+///
+/// Three answers, and the third is the one that matters: a file that is there and cannot be
+/// read is not a file that is not there. Read as absent, this overwrote a unit somebody wrote
+/// by hand on any machine where the directory was readable and the file was not.
+fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>) -> Result<()> {
+    match existing {
+        Ok(text) if !text.contains(MARKER_MARK) => Err(Error::refused(
+            format!("{} was not written by this tool", path.display()),
+            "edit it yourself, or move it aside and run this again",
+        )),
+        Ok(_) => Ok(()),
+        // Nothing there, so there is nothing to protect.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::refused(
+            format!("{} is there and could not be read ({e})", path.display()),
+            "this tool will not overwrite a unit it cannot recognise; move it aside and run \
+             this again",
+        )),
+    }
 }
 
 /// One argument as systemd will read it back: quoted, because systemd word-splits an
@@ -461,6 +467,34 @@ fn describe(every: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug: an unreadable file was read as no file, so `rad backup schedule` overwrote a
+    /// unit somebody wrote by hand. Three answers, and the tool is only allowed to write on
+    /// the two where it knows what it is writing over.
+    #[test]
+    fn a_unit_that_is_there_and_unreadable_is_not_a_unit_that_is_absent() {
+        use std::io::{Error as IoError, ErrorKind};
+
+        let path = Path::new("/etc/systemd/system/rad-backup.service");
+
+        let absent = IoError::from(ErrorKind::NotFound);
+        assert!(may_replace(path, Err(&absent)).is_ok());
+
+        let ours = format!("[Unit]\n{MARKER_MARK}\n");
+        assert!(may_replace(path, Ok(&ours)).is_ok());
+
+        let theirs = may_replace(path, Ok("[Unit]\nDescription=my own timer\n"))
+            .expect_err("a unit this tool did not write is not this tool's to replace");
+        assert!(theirs.to_string().contains("was not written by this tool"));
+
+        let unreadable = IoError::from(ErrorKind::PermissionDenied);
+        let refused = may_replace(path, Err(&unreadable))
+            .expect_err("a file that could not be read is not a file that is not there");
+        assert!(
+            refused.to_string().contains("could not be read"),
+            "{refused}"
+        );
+    }
 
     #[test]
     fn a_unit_this_tool_wrote_carries_the_mark_that_lets_it_be_replaced() {

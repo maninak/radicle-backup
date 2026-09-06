@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::cli::Doctor;
 use crate::cmd::Ctx;
 use crate::db;
-use crate::error::{EXIT_CHECKS_FAILED, Result};
+use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
 use crate::git::Git;
 use crate::inventory::{self, Inventory};
 use crate::key::{Identity, SecretKey};
@@ -236,11 +236,14 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     checks.push(check_delegate_quorum(&inventory).qualified_by_unread(unread));
     checks.push(check_replication(&inventory, &routing).qualified_by_unread(unread));
     checks.push(check_sole_holder(&stored));
-    checks.push(check_propagation(
-        &inventory,
-        &db::synced_heads(&home.node_db(), &node_id)?,
-        &node_id,
-    ));
+    checks.push(
+        check_propagation(
+            &inventory,
+            &db::synced_heads(&home.node_db(), &node_id)?,
+            &node_id,
+        )
+        .qualified_by_unread(unread),
+    );
     Ok(checks)
 }
 
@@ -272,9 +275,35 @@ struct Newest {
     /// What the age was read off, so the sentence names something the reader can go and look
     /// at rather than an age from nowhere.
     named: String,
-    /// Said beside the age when the two sources disagree, so that a pass can never leave the
-    /// impression that a file is somewhere it is not.
-    caveat: Option<String>,
+    /// Said beside the age when the file on this disk and the record disagree.
+    caveat: Option<Aside>,
+}
+
+/// What has to be said beside the age, and whether it takes the shine off a pass.
+///
+/// An enum rather than a second boolean beside the string, because the two asides pull in
+/// opposite directions and a caller cannot tell them apart by looking: one means there is no
+/// archive at hand, the other means there is a fresher one somewhere else. Told apart by
+/// whether a caveat was present at all, the second turned a covered home into a warning.
+enum Aside {
+    /// The age was read off the record, and the file it names is not there. A pass would
+    /// otherwise read as "there is an archive here to restore from", and there is not.
+    NotAtHand(String),
+    /// A file is here, and the record remembers a newer archive that went somewhere else.
+    /// The age below is right about this file; it is just not the newest one that exists.
+    SomethingNewerElsewhere(String),
+}
+
+impl Aside {
+    fn said(&self) -> &str {
+        match self {
+            Self::NotAtHand(what) | Self::SomethingNewerElsewhere(what) => what,
+        }
+    }
+
+    fn downgrades_a_pass(&self) -> bool {
+        matches!(self, Self::NotAtHand(_))
+    }
 }
 
 /// How recently an archive of this identity was taken.
@@ -285,6 +314,28 @@ struct Newest {
 /// The directory holds what is actually there, which is nothing once the last archive has been
 /// pruned or carried off. Reading only the first is how "no archive has ever been taken for
 /// this identity" was printed at a machine with a working nightly backup.
+/// The record's own archive, when it is newer than the file found on this disk.
+///
+/// Both ages are needed, so a record or a file whose stamp does not parse produces nothing:
+/// there is no comparison to report, and inventing one from a missing half is how a report
+/// starts saying more than it knows.
+fn newer_elsewhere(
+    record: Option<&state::Record>,
+    here: Option<i64>,
+    now: jiff::Timestamp,
+) -> Option<Aside> {
+    let record = record?;
+    let here = here?;
+    let recorded = record.age_in_days(now)?;
+    (recorded < here).then(|| {
+        Aside::SomethingNewerElsewhere(format!(
+            "this tool recorded a {} archive {}, which is not in this directory",
+            record.tier,
+            term::days_ago(recorded)
+        ))
+    })
+}
+
 fn check_backup_freshness(
     stored: &state::Stored,
     newest: Option<&crate::archives::Archive>,
@@ -299,18 +350,24 @@ fn check_backup_freshness(
     // there whoever wrote it. The record answers only when nothing is, because an archive
     // carried off to another disk is still an archive that was taken.
     let judged = match (newest, record) {
-        (Some(archive), _) => Newest {
-            days: archive.taken.map(|taken| term::days_between(taken, now)),
-            named: format!("{} in {looked_in}", archive.name()),
-            caveat: None,
-        },
+        (Some(archive), _) => {
+            let here = archive.taken.map(|taken| term::days_between(taken, now));
+            Newest {
+                days: here,
+                named: format!("{} in {looked_in}", archive.name()),
+                // A nightly `rad backup --stdout` to another disk records an archive this
+                // directory never receives. Reading only the file here, the report called a
+                // year-old copy the newest backup and never mentioned last night's.
+                caveat: newer_elsewhere(record, here, now),
+            }
+        }
         (None, Some(record)) => Newest {
             days: record.age_in_days(now),
             named: format!("the newest {} archive this tool recorded", record.tier),
-            caveat: Some(match &record.archive {
+            caveat: Some(Aside::NotAtHand(match &record.archive {
                 Some(path) => format!("{path} is not there now"),
                 None => "it went to stdout, so this tool never knew where it landed".to_string(),
-            }),
+            })),
         },
         (None, None) => {
             if let state::Stored::Unreadable { .. } = stored {
@@ -342,7 +399,8 @@ fn check_backup_freshness(
         caveat,
     } = judged;
     let beside = caveat
-        .map(|caveat| format!(", though {caveat}"))
+        .as_ref()
+        .map(|caveat| format!(", though {}", caveat.said()))
         .unwrap_or_default();
     let check = match days {
         // Ahead of this clock, so the age says nothing. Left as a Pass it pinned the staleness
@@ -372,8 +430,10 @@ fn check_backup_freshness(
         ),
     };
     // An archive that is not where it was is still an archive, but a clean pass would say it
-    // is at hand, and it is not.
-    match check.verdict == Verdict::Pass && !beside.is_empty() {
+    // is at hand, and it is not. A newer one on another disk is the opposite news and leaves
+    // the pass alone.
+    match check.verdict == Verdict::Pass && caveat.is_some_and(|caveat| caveat.downgrades_a_pass())
+    {
         true => Check {
             verdict: Verdict::Warn,
             ..check
@@ -449,13 +509,27 @@ fn check_backup_encryption(
     // (zstd, tar, the manifest) is somebody else's check. Opening far enough to build the zstd
     // decoder has already made age produce the file key, so this proves the key on hand opens
     // the archive without reading a gigabyte to find out.
+    //
+    // Never interactively, whatever the run outside is: a passphrase-protected ssh key is the
+    // state this tool recommends, and a health report that stops to ask for its passphrase is
+    // one people take off the timer.
+    let silent = crate::crypt::Identities {
+        is_interactive: false,
+        ..identities.clone()
+    };
     Ok(
-        match crate::container::Reader::open(&archive.path, None, identities) {
+        match crate::container::Reader::open(&archive.path, None, &silent) {
             Ok(_) => Check::new(
                 TOPIC,
                 Verdict::Pass,
                 format!("{name} is encrypted to a key, and the key offered here opens it"),
             ),
+            // The key is here and locked, so nothing was learnt about the archive either way.
+            // Reported as a Fail this was a permanent red line, and an exit 3 every night, for
+            // the setup the README asks for.
+            Err(Error::KeysStayedLocked { what, remedy }) => {
+                Check::new(TOPIC, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy)
+            }
             Err(e) => Check::new(TOPIC, Verdict::Fail, format!("{name} did not open: {e}"))
                 .with_remedy(
                     "an archive whose key is gone is not a backup; take another one you can open",
@@ -672,7 +746,10 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
 /// on one disk, which is the loss a file copy of the home cannot see.
 ///
 /// Private repositories are left out. They are announced to nobody by design, so counting them
-/// here would report the feature working as a failure.
+/// here would report the feature working as a failure. A repository whose identity document
+/// nothing could read is not known to be public either, which is why the caller qualifies this
+/// answer the way it qualifies its three siblings: without it, a home with no `rad` on PATH
+/// was told to announce repositories that must never be announced.
 fn check_propagation(
     inventory: &Inventory,
     synced: &BTreeMap<String, BTreeSet<String>>,
@@ -795,12 +872,21 @@ fn check_sole_holder(stored: &state::Stored) -> Check {
         Some(false) => Check::new(
             TOPIC,
             Verdict::Warn,
-            match restored.source_node_was_running {
-                true => {
+            match (
+                restored.source_node_was_running,
+                restored.source_node_state_was_guessed,
+            ) {
+                (true, false) => {
                     "this home was restored from a backup, and that backup was taken from a \
                      machine with a node running"
                 }
-                false => {
+                // The source run could not reach the socket and recorded the cautious answer.
+                // Repeating that as a fact is this report asserting what nothing established.
+                (true, true) => {
+                    "this home was restored from a backup, and the run that took it could not \
+                     tell whether that machine had a node running"
+                }
+                (false, _) => {
                     "this home was restored from a backup, which leaves the key on the machine \
                      the backup was taken from"
                 }
@@ -854,6 +940,62 @@ mod tests {
             std::path::Path::new("/nowhere"),
             now,
         )
+    }
+
+    /// The shape: a nightly `rad backup --stdout` to another disk, and one old copy lying in
+    /// the directory `doctor` looks in. Read off the file alone, the report called a year-old
+    /// archive the newest backup and never mentioned last night's; downgraded for having
+    /// anything to say, it warned at a machine that is covered.
+    #[test]
+    fn a_newer_archive_the_record_remembers_is_said_beside_an_older_file_without_costing_the_pass()
+    {
+        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        let mut recorded = record();
+        recorded.created = "2026-08-13T00:00:00Z".to_string();
+        recorded.archive = None;
+        let stored = state::Stored::Record(Box::new(recorded));
+
+        let stale_file = check_backup_freshness(
+            &stored,
+            Some(&found("2025-08-14T12:00:00Z")),
+            std::path::Path::new("/nowhere"),
+            now,
+        );
+        assert_eq!(stale_file.verdict, Verdict::Warn, "{}", stale_file.detail);
+        assert!(
+            stale_file.detail.contains("not in this directory"),
+            "{}",
+            stale_file.detail
+        );
+
+        // Both fresh, and the record is the fresher of the two. Still a pass: there is an
+        // archive here to restore from, and another one newer still somewhere else.
+        let fresh_file = check_backup_freshness(
+            &stored,
+            Some(&found("2026-08-12T12:00:00Z")),
+            std::path::Path::new("/nowhere"),
+            now,
+        );
+        assert_eq!(fresh_file.verdict, Verdict::Pass, "{}", fresh_file.detail);
+        assert!(
+            fresh_file.detail.contains("not in this directory"),
+            "{}",
+            fresh_file.detail
+        );
+
+        // The file here is the newer of the two, so there is nothing to add.
+        let newest_here = check_backup_freshness(
+            &stored,
+            Some(&found("2026-08-14T00:00:00Z")),
+            std::path::Path::new("/nowhere"),
+            now,
+        );
+        assert_eq!(newest_here.verdict, Verdict::Pass, "{}", newest_here.detail);
+        assert!(
+            !newest_here.detail.contains("though"),
+            "{}",
+            newest_here.detail
+        );
     }
 
     /// Every topic the report can print, one per check, whatever the verdict turns out to be.
@@ -1178,6 +1320,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The bug: an ssh key with a passphrase on it is what the README tells people to have,
+    /// and `doctor` reported the archive it opens as a failure every night, because "the key
+    /// never came unlocked" was read as "the key does not open this". On a terminal it did
+    /// worse and stopped to ask for the passphrase.
+    #[test]
+    fn a_key_that_stayed_locked_is_a_question_doctor_could_not_put_rather_than_a_failure() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-locked-{}", std::process::id()));
+        let seed = zeroize::Zeroizing::new([7u8; 32]);
+        let identity = crate::key::identity_from_seed(&seed).expect("a seed makes a key");
+        let keyed = crate::crypt::Encryption::Recipients(vec![
+            identity.to_openssh().expect("the public half is printable"),
+        ]);
+        let archive = archive_at(&dir, "locked.tar.zst.age", &keyed);
+
+        let passphrase = zeroize::Zeroizing::new("open sesame".to_string());
+        let key_file = dir.join("id_ed25519");
+        std::fs::write(
+            &key_file,
+            crate::key::openssh_from_seed(&seed, Some(&passphrase))
+                .expect("the key is writable")
+                .as_str(),
+        )
+        .expect("scratch key is writable");
+
+        // Interactive on purpose, which is how `doctor` is usually called. What this asserts
+        // is the verdict; that the check hands age a non-interactive copy of the identities
+        // is visible in `check_backup_encryption` and cannot be shown from here, because a
+        // test harness has no terminal for the prompt to reach either way.
+        let locked = check_backup_encryption(
+            &crate::crypt::Identities {
+                files: vec![key_file.clone()],
+                is_interactive: true,
+                ..Default::default()
+            },
+            Some(&archive),
+            None,
+        )
+        .expect("the header is readable");
+        assert_eq!(locked.verdict, Verdict::Unknown, "{}", locked.detail);
+        assert!(locked.detail.contains("stayed locked"), "{}", locked.detail);
+        assert!(
+            locked.remedy.is_some(),
+            "an unknown with no way out is a nag"
+        );
+
+        // The same key, unlocked by a passphrase file, opens it.
+        let passphrase_file = dir.join("passphrase");
+        std::fs::write(&passphrase_file, passphrase.as_str()).expect("scratch file is writable");
+        let opened = check_backup_encryption(
+            &crate::crypt::Identities {
+                files: vec![key_file],
+                passphrase_file: Some(passphrase_file),
+                is_interactive: false,
+            },
+            Some(&archive),
+            None,
+        )
+        .expect("the header is readable");
+        assert_eq!(opened.verdict, Verdict::Pass, "{}", opened.detail);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     const ME: &str = "z6MkAAA";
 
     /// A public repository whose current signed refs are `head`.
@@ -1252,10 +1457,32 @@ mod tests {
         record.restored = Some(state::Restored {
             source_retires_key: Some(false),
             source_node_was_running: true,
+            source_node_state_was_guessed: false,
         });
-        let check = check_sole_holder(&state::Stored::Record(Box::new(record)));
+        let check = check_sole_holder(&state::Stored::Record(Box::new(record.clone())));
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.remedy.is_some(), "a warning with no way out is a nag");
+        assert!(
+            check.detail.contains("with a node running"),
+            "{}",
+            check.detail
+        );
+
+        // The same record, except that the run which took the archive could not reach the
+        // control socket and wrote the cautious answer. Repeating that as a sighting tells
+        // somebody their identity is being double-signed when nothing established it.
+        record.restored = Some(state::Restored {
+            source_retires_key: Some(false),
+            source_node_was_running: true,
+            source_node_state_was_guessed: true,
+        });
+        let guessed = check_sole_holder(&state::Stored::Record(Box::new(record)));
+        assert_eq!(guessed.verdict, Verdict::Warn);
+        assert!(
+            guessed.detail.contains("could not tell"),
+            "{}",
+            guessed.detail
+        );
     }
 
     #[test]
@@ -1264,6 +1491,7 @@ mod tests {
         record.restored = Some(state::Restored {
             source_retires_key: Some(true),
             source_node_was_running: true,
+            source_node_state_was_guessed: false,
         });
         assert_eq!(
             check_sole_holder(&state::Stored::Record(Box::new(record))).verdict,
@@ -1279,6 +1507,7 @@ mod tests {
         record.restored = Some(state::Restored {
             source_retires_key: None,
             source_node_was_running: false,
+            source_node_state_was_guessed: false,
         });
         assert_eq!(
             check_sole_holder(&state::Stored::Record(Box::new(record))).verdict,

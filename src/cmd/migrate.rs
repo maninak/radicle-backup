@@ -28,11 +28,22 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
                 "make sure it is stopped and run the move again: two nodes sharing one key is \
                  what this refusal is for",
             ),
-            None => Error::refused(
-                "the node is running",
-                "run `rad node stop` first: a move that leaves it running is how two nodes end \
-                 up sharing one key",
-            ),
+            None => match ctx.home.borrowed_socket() {
+                Some(socket) => Error::refused(
+                    format!(
+                        "a node answered on {}, which RAD_SOCKET names rather than this home's \
+                         own socket",
+                        socket.display()
+                    ),
+                    "stop that node, or unset RAD_SOCKET if it belongs to another home, then \
+                     run the move again",
+                ),
+                None => Error::refused(
+                    "the node is running",
+                    "run `rad node stop` first: a move that leaves it running is how two nodes \
+                     end up sharing one key",
+                ),
+            },
         });
     }
 

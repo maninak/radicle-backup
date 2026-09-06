@@ -30,10 +30,17 @@ All notable changes to this project are documented here. The format follows [Kee
 - `doctor` no longer reports "the node has no record of what any other node holds" when the node database is there and will not open.
 - A dry run now says when part of storage could not be measured. The estimate is meant to run high, and an unreadable directory silently counted as zero was the one thing making it run low.
 - `restore` compares a private repository with the network again when anybody else can hold it. Private means announced to nobody, not unreachable: `rad sync --fetch` goes to a private repository's delegates and allowed peers, so one shared with a collaborator was exactly the case the sigrefs check was skipped for, and skipping it is how a restored copy forks its own peer history. Only a private repository delegated to you alone and allowed to nobody is left uncompared now.
+- `doctor` no longer fails an archive whose key is sitting right there with a passphrase on it. A passphrase-protected ssh key is the state this tool recommends, and "the key never came unlocked" was reported as "the key does not open this archive": a red line every night, and an exit 3 with it. It is now an unknown that says how to unlock the key, and the check never prompts, whatever the run around it is doing.
+- `doctor` no longer stops outright when heartwood renames a column in the node database. A renamed table was already tolerated; a renamed column aborted the whole report.
+- `doctor`'s `signed refs propagation` check now says when it could not describe every repository. Without a `rad` on PATH no repository looks private, so private ones were counted as public and the remedy told you to announce them.
+- An archive taken while the control socket could not be reached now says so, rather than recording that a node was running as though it had been seen. The far end says "could not tell" instead of telling somebody their identity is being double-signed, and `--stop-node` names the socket it could not ask instead of blaming the node for not stopping.
+- An archive that could not be read is no longer reported as unencrypted. Only a file too short to hold an age header answers that question; an unreadable one now says so.
+- A refusal about a running node names the socket when `RAD_SOCKET` chose it. Restoring into `--home /tmp/other` with one exported for your main node said "the node is running against the home being restored into", about a node serving a different home entirely.
 
 ### Changed
 
 - `restore --json` renames one standing. `not checked` is now `nothing to compare it with` or `could not be compared`, which are different answers with different fixes.
+- `ls --json` can now report `"encrypted": null`, for an archive whose first bytes could not be read. It was always `true` or `false`, and one of them was a guess.
 - `doctor --backup-dir` is now `doctor --dir`, matching `ls` and `prune`, and it is now where the checks actually look rather than a path printed in a remedy. `--backup-dir` still works.
 
 ## [0.2.1] - 2026-08-22

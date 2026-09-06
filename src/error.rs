@@ -70,6 +70,14 @@ pub enum Error {
     #[error("{what}\n{remedy}")]
     Refused { what: String, remedy: String },
 
+    /// Keys were offered, and none of them was ever unlocked, so the archive was never
+    /// actually tried against any of them. Its own variant rather than one more `Refused`,
+    /// because "the right key is here and still locked" and "no key here opens this" are
+    /// different news: `doctor` reports the first as a question it could not put, and only
+    /// the second as a backup nobody can open.
+    #[error("{what}\n{remedy}")]
+    KeysStayedLocked { what: String, remedy: String },
+
     #[error("{0}")]
     Json(#[from] serde_json::Error),
 
@@ -111,7 +119,7 @@ impl Error {
 
     pub fn exit_code(&self) -> ExitCode {
         match self {
-            Self::Refused { .. } => ExitCode::from(EXIT_REFUSED),
+            Self::Refused { .. } | Self::KeysStayedLocked { .. } => ExitCode::from(EXIT_REFUSED),
             _ => ExitCode::FAILURE,
         }
     }

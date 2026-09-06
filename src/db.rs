@@ -173,11 +173,11 @@ pub fn synced_heads(
         .prepare("select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head")
     {
         Ok(statement) => statement,
-        // Only the table being absent. Anything else, a database that will not open or an
-        // image that is corrupt, is propagated: rendered as an empty map it reached `doctor`
-        // as "the node has no record of what any other node holds", which sent the reader to
-        // start a node that is already running.
-        Err(e) if is_missing_table(&e) => return Ok(BTreeMap::new()),
+        // Only the table or the column being absent. Anything else, a database that will not
+        // open or an image that is corrupt, is propagated: rendered as an empty map it reached
+        // `doctor` as "the node has no record of what any other node holds", which sent the
+        // reader to start a node that is already running.
+        Err(e) if is_absent_from_this_schema(&e) => return Ok(BTreeMap::new()),
         Err(e) => return Err(e.into()),
     };
     let rows = statement.query_map([own_node_id], |row| {
@@ -288,18 +288,31 @@ pub fn touched_warning(path: &Path) -> String {
     )
 }
 
-/// Whether sqlite refused a statement because the table is not in this schema.
+/// Whether sqlite refused a statement because what it names is not in this schema.
 ///
 /// The node's schema is heartwood's, and this tool is not entitled to a release every time
-/// heartwood adds or renames a table. Every other sqlite failure is a real one and says so.
-fn is_missing_table(e: &rusqlite::Error) -> bool {
-    matches!(
-        e.sqlite_error(),
-        Some(rusqlite::ffi::Error {
-            code: rusqlite::ffi::ErrorCode::Unknown,
-            ..
-        })
-    ) && e.to_string().contains("no such table")
+/// heartwood adds or renames a table or a column. Every other sqlite failure, a database that
+/// will not open above all, is a real one and says so.
+///
+/// The two spellings are not interchangeable: a missing table comes back as a generic
+/// `SqliteFailure`, and a missing column as a `SqlInputError` carrying the offset of the name
+/// inside the statement, for which `sqlite_error()` answers `None`. Matching only the first
+/// left a renamed column aborting `doctor` outright.
+fn is_absent_from_this_schema(e: &rusqlite::Error) -> bool {
+    let complains_about = |what: &str| e.to_string().contains(what);
+    match e {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::Unknown,
+                ..
+            },
+            _,
+        ) => complains_about("no such table"),
+        rusqlite::Error::SqlInputError { .. } => {
+            complains_about("no such table") || complains_about("no such column")
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -434,5 +447,45 @@ mod tests {
 
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(destination);
+    }
+
+    /// The predicate decides between "heartwood moved its schema on" and "this database is
+    /// broken", and the shapes it reads are rusqlite's, not sqlite's: a version bump can
+    /// change which variant carries which message. Asserted against the real library rather
+    /// than against a remembered spelling of it.
+    #[test]
+    fn a_renamed_table_or_column_is_schema_drift_and_a_ruined_file_is_not() {
+        let db = rusqlite::Connection::open_in_memory().expect("memory is a database");
+        db.execute_batch("create table kept (rid text)")
+            .expect("the table is creatable");
+
+        let gone = db
+            .prepare("select rid from \"repo-sync-status\"")
+            .expect_err("the table is not there");
+        assert!(is_absent_from_this_schema(&gone), "{gone:?}");
+
+        let renamed = db
+            .prepare("select head from kept")
+            .expect_err("the column is not there");
+        assert!(is_absent_from_this_schema(&renamed), "{renamed:?}");
+
+        let mistyped = db
+            .prepare("slect rid from kept")
+            .expect_err("that is not sql");
+        assert!(
+            !is_absent_from_this_schema(&mistyped),
+            "a statement this tool got wrong is this tool's fault: {mistyped:?}"
+        );
+
+        // A file that is not a database at all reaches the caller as a failure rather than as
+        // an empty answer, and it never gets as far as the predicate: it fails on the open.
+        let ruined = scratch("not-a-database");
+        std::fs::write(&ruined, b"this is not an sqlite image").expect("scratch file is writable");
+        let refused = synced_heads(&ruined, "z6MkAAA").expect_err("that is not a database");
+        assert!(
+            matches!(refused, Error::Malformed { .. }),
+            "a ruined node database is news, not an empty map: {refused:?}"
+        );
+        let _ = std::fs::remove_file(ruined);
     }
 }

@@ -98,6 +98,7 @@ Fields that carry weight:
 - **`repos[].visibility`** is `public` or `private`, from the repository's identity document; a document with no `visibility` is public, as heartwood reads it. `private` means the open network does not carry it, and `repos[].allowed` lists the peers its owner allowed to hold a copy. That list being empty is what makes a repository unrecoverable without this archive.
 - **`identity.keyEncrypted`** says whether the archived key has a passphrase of its own. When it is `false`, the archive's own encryption is the only thing protecting the identity.
 - **`node.wasRunning`** records that storage was read while a node could write to it. The databases are still consistent (they are snapshotted, not copied), but a repository fetched during the run may be missing its newest refs.
+- **`node.whyRunningIsUnknown`** is present only when the run could not reach the control socket at all, and holds the error it got. `node.wasRunning` is then `true` as a precaution rather than as a reading, because a node wrongly assumed up costs a warning and one wrongly assumed down costs an identity. A reader that repeats `wasRunning` as a sighting must check this key first.
 
 ## Reading one by hand
 

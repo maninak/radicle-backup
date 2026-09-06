@@ -221,7 +221,12 @@ pub fn looks_encrypted(path: &Path) -> Result<bool> {
     let mut head = [0u8; AGE_MAGIC.len()];
     match file.read_exact(&mut head) {
         Ok(()) => Ok(head == AGE_MAGIC),
-        Err(_) => Ok(false),
+        // A file shorter than the magic is not encrypted, and that is the only read failure
+        // that answers the question. Anything else, an unreadable directory or a disk giving
+        // EIO, is a file this could not look at, and reported as "not encrypted" it had
+        // `doctor` telling somebody an archive it never read can be read by anyone.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(Error::io(path, e)),
     }
 }
 
@@ -539,17 +544,17 @@ impl OfferedKeys {
                 )
             }
             age::DecryptError::NoMatchingKeys if !self.passphrases.locked().is_empty() => {
-                Error::refused(
-                    format!(
+                Error::KeysStayedLocked {
+                    what: format!(
                         "this archive was never tried against {}, which stayed locked{footnote}",
                         self.passphrases.locked()
                     ),
-                    format!(
+                    remedy: format!(
                         "pass --identity-passphrase-file PATH, or set \
                          {IDENTITY_PASSPHRASE_ENV}, or re-run with stdin and stderr both on a \
                          terminal"
                     ),
-                )
+                }
             }
             age::DecryptError::NoMatchingKeys => Error::refused(
                 format!("none of the identities given open this archive{footnote}"),
@@ -748,6 +753,28 @@ impl age::Callbacks for KeyPassphraseSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file this tool could not read is not a file it read as plaintext. `doctor` renders
+    /// the answer as "can be read by anyone who holds it, your key file included", which is a
+    /// claim about who can open a file, and it must not come from a failed read.
+    #[test]
+    fn a_file_that_could_not_be_read_is_not_reported_as_unencrypted() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-looks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory is creatable");
+
+        let short = dir.join("short");
+        std::fs::write(&short, b"age").expect("scratch file is writable");
+        assert!(
+            !looks_encrypted(&short).expect("a file shorter than the magic is an answer"),
+            "a three-byte file is not an age file"
+        );
+
+        // Linux opens a directory and fails on the read, which is the shape this guards.
+        let refused = looks_encrypted(&dir);
+        assert!(refused.is_err(), "{refused:?}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn an_archive_round_trips_through_a_passphrase() {
