@@ -292,7 +292,7 @@ recovery posture of /home/alice/.radicle
   every ✗ is a way to lose this identity; the line under it is the fix
 ```
 
-Nine checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line is the command that fixes the one above it.
+Nine checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line says what fixes the one above it, usually as a command to run.
 
 `other seeds` and `signed refs propagation` ask different questions. The first asks whether a repository exists anywhere but here; the second asks whether the newest work in it does. A repository forty seeds carry can still have this morning's commits on one disk, and that is the loss a file copy of the home cannot see.
 

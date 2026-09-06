@@ -1808,7 +1808,7 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
             .find("\n\t\tesac")
             .expect("the case about HEAD is still closed by an esac")
         + "\n\t\tesac".len();
-    let harness = script[start..end]
+    let lifted = script[start..end]
         .replace(
             "git --git-dir \"$target\" symbolic-ref HEAD \"$head\"",
             "echo ACCEPT",
@@ -1818,9 +1818,9 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
             "echo SKIP",
         );
     assert!(
-        harness.contains("echo ACCEPT") && harness.contains("echo SKIP"),
+        lifted.contains("echo ACCEPT") && lifted.contains("echo SKIP"),
         "the case no longer has the branches this substitutes, so it is not being tested: \
-         {harness}"
+         {lifted}"
     );
 
     let refused = [
@@ -1852,7 +1852,7 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
     let shells = probe_shells();
 
     let verdict = |shell: &str, head: &str| -> String {
-        let ran = under_shell(shell, &harness, &[("head", head)]);
+        let ran = under_shell(shell, &lifted, &[("head", head)]);
         String::from_utf8_lossy(&ran.stdout).trim().to_string()
     };
     for shell in &shells {
@@ -1898,10 +1898,10 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
         + "\nesac".len();
     // The version comes from the environment rather than from the git that is installed, so
     // the table below can ask about versions this machine does not have.
-    let harness = script[start..end].replace("$(git --version 2>/dev/null)", "$SAID");
+    let lifted = script[start..end].replace("$(git --version 2>/dev/null)", "$SAID");
     assert!(
-        harness.contains("$SAID") && harness.contains("2.46"),
-        "the block no longer has what this substitutes, so it is not being tested: {harness}"
+        lifted.contains("$SAID") && lifted.contains("2.46"),
+        "the block no longer has what this substitutes, so it is not being tested: {lifted}"
     );
 
     // A version and whether the script must warn about it. The tails are the ones
@@ -1918,7 +1918,7 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
     ];
     for shell in probe_shells() {
         for (said, warns) in table {
-            let ran = under_shell(shell, &harness, &[("SAID", said)]);
+            let ran = under_shell(shell, &lifted, &[("SAID", said)]);
             let printed = stderr(&ran);
             assert_eq!(
                 printed.contains("does not check the objects inside a bundle"),
@@ -1928,7 +1928,7 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
         }
         // Nothing that reads as a version at all: neither claim can be made, and saying
         // nothing would be the claim that it checked.
-        let ran = under_shell(shell, &harness, &[("SAID", "git version next")]);
+        let ran = under_shell(shell, &lifted, &[("SAID", "git version next")]);
         assert!(
             stderr(&ran).contains("could not be read"),
             "under {shell}: {}",

@@ -410,9 +410,10 @@ pub fn saw_schema_drift_in(database: &Path, wanted: &str) -> bool {
 }
 
 /// Take the list of such absences, leaving it empty.
-// `expect` rather than `allow`, so the attribute fails the build the moment the command layer
-// drains this, because it must be removed then and an `allow` would sit on live code forever.
-// Off the test build, where the tests below are the only caller either way.
+///
+/// Drained once per run by whichever verb is finishing, `main` for most and `backup` for the
+/// line it writes into the manifest, and never by a check: a check that drained it would
+/// silence the report that names the file and the sqlite reason.
 pub fn drain_schema_drift() -> Vec<SchemaDrift> {
     SCHEMA_DRIFT
         .lock()
