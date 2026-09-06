@@ -104,8 +104,8 @@ impl Term {
         self.narrate(&self.dim(&format!("  {text}")));
     }
 
-    /// The lines under a `warn` or a `fail` that carry the substance: which repositories
-    /// diverged, what to run next, where to look. Printed like a hint and never swallowed,
+    /// The lines under a `warn` or a `fail` that carry the substance: which repositories are
+    /// at risk, what to run next, where to look. Printed like a hint and never swallowed,
     /// because `--quiet` otherwise reported that something was wrong and withheld what.
     pub fn detail(&self, text: &str) {
         self.always(&self.dim(&format!("  {text}")));

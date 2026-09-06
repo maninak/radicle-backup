@@ -840,6 +840,68 @@ fn prefixed_rid(rid: &str) -> String {
     }
 }
 
+/// How long to let other nodes answer, once the fetches are done, and how often to look.
+///
+/// `rad sync --fetch` returns when the fetches are done, and a peer's refs announcement is a
+/// separate message that arrives over the same connection on its own schedule. Without this
+/// wait the read happened microseconds later and almost always found nothing written since the
+/// archive, so a working network was reported as "could not be compared" on every restore, and
+/// a report that says that every time is a report nobody reads.
+///
+/// Twenty seconds, which is what `restore` already waits for a node it started, and it ends
+/// the moment every repository has an answer.
+const GOSSIP_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
+const GOSSIP_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether there is nothing left to wait for: every repository has at least one row some node
+/// wrote after the archive was taken.
+///
+/// Split from the polling so that what ends the wait can be tested without a node, a network
+/// and twenty seconds. An empty list answers yes, because a wait for nothing is over.
+fn every_repository_answered(
+    held: &BTreeMap<String, BTreeMap<String, i64>>,
+    waiting_on: &[&str],
+    written_after: Option<i64>,
+) -> bool {
+    waiting_on.iter().all(|rid| {
+        !evidence_since(held.get(&prefixed_rid(rid)), written_after)
+            .heads
+            .is_empty()
+    })
+}
+
+/// Poll the node's record of what other nodes hold until every repository has something dated
+/// after the archive, or the window closes.
+///
+/// Returns what it has either way, because a partial answer is still an answer about the
+/// repositories it covers, and `evidence_since` is what decides per repository whether there
+/// is anything to compare.
+fn wait_for_what_others_hold(
+    ctx: &Ctx,
+    node_id: &str,
+    fetched: &[(&RepoRecord, &String)],
+    written_after: Option<i64>,
+) -> Result<BTreeMap<String, BTreeMap<String, i64>>> {
+    let node_db = ctx.home.node_db();
+    let deadline = std::time::Instant::now() + GOSSIP_WINDOW;
+    let waiting_on: Vec<&str> = fetched.iter().map(|(repo, _)| repo.rid.as_str()).collect();
+    let mut said = false;
+    loop {
+        let held = crate::db::read_synced_heads(&node_db, node_id)?;
+        if every_repository_answered(&held, &waiting_on, written_after)
+            || std::time::Instant::now() >= deadline
+        {
+            return Ok(held);
+        }
+        if !said {
+            ctx.term
+                .step("waiting for other nodes to say what they hold of these refs");
+            said = true;
+        }
+        std::thread::sleep(GOSSIP_POLL);
+    }
+}
+
 fn compare_with_network(
     ctx: &Ctx,
     manifest: &Manifest,
@@ -886,17 +948,12 @@ fn compare_with_network(
         fetched.push((repo, archived));
     }
 
-    // Read after the last fetch, and best-effort: `rad sync --fetch` returns when the fetches
-    // are done and a peer's refs announcement arrives on its own schedule, so there is no
-    // barrier here and nothing waits for one. That is why a row is only evidence when it was
-    // written after the archive: what has not arrived leaves the row the archive carried, and
-    // that row must not be read as a peer agreeing.
-    let held = crate::db::read_synced_heads(&ctx.home.node_db(), node_id)?;
     let written_after = manifest
         .created
         .parse::<jiff::Timestamp>()
         .ok()
         .map(|at| at.as_millisecond());
+    let held = wait_for_what_others_hold(ctx, node_id, &fetched, written_after)?;
     for (repo, archived) in fetched {
         let path = ctx.home.repository_path(&repo.rid);
         let evidence = evidence_since(held.get(&prefixed_rid(&repo.rid)), written_after);
@@ -1437,6 +1494,51 @@ mod tests {
         .expect("the ancestry answer is not an error");
         assert_eq!(compared.standing, Standing::CouldNotAsk);
         assert_eq!(calls.get(), 0, "git was handed a value out of a database");
+    }
+
+    /// The wait ends when there is nothing left to wait for, and not before. Ending it on the
+    /// first repository to answer would have read the rest off a table that had not caught up,
+    /// which is the whole failure the wait was added to stop.
+    #[test]
+    fn the_wait_ends_only_once_every_repository_has_been_answered_for() {
+        let taken_at = millis("2026-01-01T00:00:00Z");
+        let after = millis("2026-01-02T00:00:00Z");
+        let mut held = BTreeMap::from([("rad:zAAA".to_string(), recorded(&[(&oid('a'), after)]))]);
+
+        assert!(every_repository_answered(
+            &held,
+            &["rad:zAAA"],
+            Some(taken_at)
+        ));
+        assert!(!every_repository_answered(
+            &held,
+            &["rad:zAAA", "rad:zBBB"],
+            Some(taken_at)
+        ));
+
+        held.insert("rad:zBBB".to_string(), recorded(&[(&oid('b'), after)]));
+        assert!(every_repository_answered(
+            &held,
+            &["rad:zAAA", "rad:zBBB"],
+            Some(taken_at)
+        ));
+    }
+
+    /// Rows the archive itself carried are what the wait is waiting past, so they must not end
+    /// it: a home whose every row predates the restore would otherwise never wait at all.
+    #[test]
+    fn rows_older_than_the_archive_do_not_end_the_wait() {
+        let taken_at = millis("2026-01-01T00:00:00Z");
+        let held = BTreeMap::from([(
+            "rad:zAAA".to_string(),
+            recorded(&[(&oid('a'), millis("2025-12-01T00:00:00Z"))]),
+        )]);
+
+        assert!(!every_repository_answered(
+            &held,
+            &["rad:zAAA"],
+            Some(taken_at)
+        ));
     }
 
     /// A repository is reported as one standing, and these are the pairs whose order decides

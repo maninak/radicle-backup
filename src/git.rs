@@ -71,14 +71,16 @@ impl Git {
         Ok(printed.map(|target| target.trim().to_string()))
     }
 
-    /// Whether `ancestor` is reachable from `descendant`. This is the fork test: a restored
-    /// namespace is safe to build on only when its signed refs are an ancestor of what the
-    /// network holds.
+    /// Whether `ancestor` is reachable from `descendant`.
+    ///
+    /// This is the fork test. `restore` asks it with a head some other node announced it holds
+    /// of our signed refs as the `ancestor` and the archived head as the `descendant`: a yes
+    /// means that node is simply behind us, and anything else means it is holding work signed
+    /// under this key that the restored copy does not have.
     ///
     /// Three answers, not two. `git merge-base` exits 128 over an oid it cannot resolve or an
-    /// object it cannot read, and read as "not an ancestor" in both directions that becomes
-    /// the divergence verdict, which tells somebody their identity is forked on the strength
-    /// of an error nobody read.
+    /// object it cannot read, and folded into "not an ancestor" that became the loudest thing
+    /// this tool says, told to somebody on the strength of an error nobody read.
     pub fn is_ancestor(
         &self,
         git_dir: &Path,
