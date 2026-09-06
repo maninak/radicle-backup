@@ -4,8 +4,8 @@
 //! different subject: what this identity's archives are called and where they are found.
 //!
 //! Layers are ordinary formats in an ordinary order, because somebody with no copy of this
-//! tool, five years from now, has to be able to recover an identity with `age`, `tar` and
-//! `git` alone. The instructions for doing that ride inside the archive.
+//! tool, five years from now, has to be able to recover an identity with `age`, `zstd`, `tar`
+//! and `git` alone. The instructions for doing that ride inside the archive.
 //!
 //! The manifest is written last, because it carries the digest of every entry as that entry
 //! was written. A manifest written first could only carry digests of what was on disk before
@@ -335,8 +335,10 @@ fn entry_header(size: u64, mode: u32) -> tar::Header {
     header.set_size(size);
     header.set_mode(mode);
     header.set_entry_type(tar::EntryType::Regular);
-    // Fixed ownership and timestamp keep two archives of an unchanged home byte-identical,
-    // which is what lets restic and borg deduplicate successive backups.
+    // Fixed ownership and timestamp keep an entry's bytes independent of who wrote it and
+    // when, so an unchanged repository lands identically in two archives and restic and borg
+    // can deduplicate it. The archive as a whole still differs run to run: the manifest
+    // carries the clock, and age adds a fresh salt.
     header.set_uid(0);
     header.set_gid(0);
     header.set_mtime(0);

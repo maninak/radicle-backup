@@ -257,8 +257,9 @@ pub struct RepoRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     pub refs: usize,
-    /// Signed refs per peer at the moment of the backup. Restore compares these with the
-    /// network to decide whether building on the restored copy would fork the identity.
+    /// Signed refs per peer at the moment of the backup. Restore takes our own entry and
+    /// holds it against the node's record of what other nodes announced, to decide whether
+    /// building on the restored copy would fork the identity.
     #[serde(default)]
     pub sigrefs: BTreeMap<String, String>,
     /// How many other nodes the routing table said announce this repository.

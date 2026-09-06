@@ -75,8 +75,9 @@ impl Git {
     ///
     /// This is the fork test. `restore` asks it with a head some other node announced it holds
     /// of our signed refs as the `ancestor` and the archived head as the `descendant`: a yes
-    /// means that node is simply behind us, and anything else means it is holding work signed
-    /// under this key that the restored copy does not have.
+    /// means that node is simply behind us, a no means it is holding work signed under this
+    /// key that the restored copy does not have, and the third answer means `git` could not
+    /// say, which is a fact about this machine and not about that node.
     ///
     /// Three answers, not two. `git merge-base` exits 128 over an oid it cannot resolve or an
     /// object it cannot read, and folded into "not an ancestor" that became the loudest thing

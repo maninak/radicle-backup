@@ -137,8 +137,9 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
 ///
 /// Snapshots of databases and freshly built git bundles have to exist as files before they can
 /// be added to a tar, because tar needs a size before it takes content. They are put next to
-/// the archive being written, on the filesystem the user already chose for it, rather than in
-/// a shared temporary directory where a private repository's contents would be a surprise.
+/// whatever the command is producing, the archive for `backup` and the home for `restore`, on
+/// a filesystem the user already chose, rather than in a shared temporary directory where a
+/// private repository's contents would be a surprise.
 pub struct Scratch {
     path: PathBuf,
 }

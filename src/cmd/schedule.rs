@@ -2,7 +2,8 @@
 //!
 //! The archive people lose their identity without is the one they meant to take last month.
 //! This installs a systemd user timer, checks that the run it schedules can actually work
-//! unattended, and turns it on. It writes only files it wrote, and never enables anything the
+//! unattended, and turns it on. It replaces a unit file only when that unit carries its own
+//! marker, rewrites its environment file in full every run, and never enables anything the
 //! user did not ask for in the same breath.
 
 use std::path::{Path, PathBuf};
@@ -164,10 +165,11 @@ fn timer_verdict(said: &str, load_state: &str) -> Option<String> {
 /// Whether what `systemctl is-enabled` said means the timer will fire.
 ///
 /// `enabled-runtime` is a timer that is on until the next reboot, and reading only the exact
-/// word `enabled` told the owner of one that no backup was scheduled on the machine. Every
-/// other answer systemd gives (`static`, `indirect`, `masked`, `disabled`, `linked`, and the
-/// `unknown` this tool writes when systemd could not be reached at all) is not this tool's
-/// timer being on, so the prefix is the whole test.
+/// word `enabled` told the owner of one that no backup was scheduled on the machine. No other
+/// answer systemd gives begins with the word, and neither does the `unknown` this tool writes
+/// when systemd could not be reached at all, so the prefix is the whole test. Deliberately not
+/// a list of the other answers: systemd has added to that list before and would add to it
+/// again without telling this file.
 fn timer_is_on(state: &str) -> bool {
     state.starts_with("enabled")
 }

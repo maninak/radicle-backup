@@ -72,9 +72,9 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
             }
         } else {
             term.fail(&format!(
-                "{} has {} problem(s)",
+                "{} has {}",
                 report.archive.display(),
-                report.problems.len()
+                crate::term::count(report.problems.len(), "problem", "problems")
             ));
         }
     }
@@ -238,7 +238,14 @@ fn check_unpacked_home(
     }
     if bundles_opened > 0 {
         checks.push((
-            format!("{bundles_opened} repository bundles open and hold refs"),
+            format!(
+                "{} and hold refs",
+                crate::term::count(
+                    bundles_opened,
+                    "repository bundle opens",
+                    "repository bundles open"
+                )
+            ),
             true,
         ));
     }

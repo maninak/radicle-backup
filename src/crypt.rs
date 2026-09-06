@@ -1,8 +1,8 @@
 //! Encryption of the archive, and where the passphrase for it comes from.
 //!
 //! An archive holds the 32 bytes that are the user's identity, so encryption is the default
-//! and plaintext is something the caller has to ask for out loud. Revisit never: an
-//! unencrypted copy of a private key is the failure this tool exists to prevent.
+//! and plaintext is something the caller has to ask for out loud, because an unencrypted copy
+//! of a private key is the failure this tool exists to prevent.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};

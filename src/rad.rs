@@ -1,9 +1,10 @@
 //! The `rad` commands this tool asks questions of.
 //!
-//! Only two kinds of call live here. Queries that return JSON (`rad inspect --identity`) are
+//! Three kinds of call live here. Queries that return JSON (`rad inspect --identity`) are
 //! parsed as JSON. Queries that return a table are never parsed by column: repository
 //! identifiers are picked out of the text by their `rad:z` prefix, which is a shape no table
-//! layout can change. Anything more fragile than that belongs in `git` or in SQLite instead.
+//! layout can change. Everything else is run for its exit status alone and nothing it prints
+//! is read. Anything more fragile than the second kind belongs in `git` or in SQLite instead.
 
 use std::path::Path;
 

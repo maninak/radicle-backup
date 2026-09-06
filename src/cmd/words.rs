@@ -82,7 +82,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     ctx.term
         .ok(&format!("wrote the key into {}", home.keys_dir().display()));
     ctx.term
-        .hint("`rad node start` will build the rest from the network");
+        .hint("the key is all this restored: `rad node start` rebuilds the routing table,");
     ctx.term
         .hint("your repositories come back with `rad clone <rid>` or `rad seed <rid>`");
     Ok(())

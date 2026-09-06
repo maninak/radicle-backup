@@ -1,7 +1,8 @@
 //! Deciding which repositories an archive carries, and what it knows about them.
 //!
-//! Two costs are kept apart. Deciding what is yours reads files and spawns nothing,
-//! so it stays cheap on a seed holding twelve thousand repositories. Gathering the paperwork
+//! Two costs are kept apart. Deciding what is yours costs two `rad ls` calls and then reads
+//! files, spawning nothing per repository, so it stays cheap on a seed holding twelve thousand
+//! repositories. Gathering the paperwork
 //! (name, delegates, visibility) asks `rad`, so it happens only for repositories that are
 //! actually yours.
 
@@ -81,6 +82,10 @@ pub fn collect(
     let stored_ids: BTreeSet<&str> = stored.iter().map(String::as_str).collect();
     let selected: BTreeSet<String> = match selection {
         RepoSelection::None => BTreeSet::new(),
+        // `Private` is resolved further down, once the identity documents have been read.
+        // `Unknown` is a selection word written by a build this one does not know, and it
+        // carries nothing on purpose: guessing which repositories a stranger's word meant is
+        // how a private repository ends up in an archive nobody expected it in.
         RepoSelection::Private | RepoSelection::Unknown => BTreeSet::new(),
         RepoSelection::Mine => mine.clone(),
         RepoSelection::Seeded => policies

@@ -1,8 +1,10 @@
 //! Which archives of this identity exist, and how old they are.
 //!
-//! Answered from file names and file sizes alone. No archive is opened and no passphrase is
-//! asked for, so this stays usable on a machine where the passphrase lives in someone's head
-//! and the archives live on a mounted disk.
+//! Answered from file names, file sizes, and a read of the first bytes of each archive, which
+//! is what says whether it is encrypted: a `--stdout` archive is encrypted under a name that
+//! says otherwise. Nothing is decrypted and no passphrase is asked for, so this stays usable
+//! on a machine where the passphrase lives in someone's head and the archives live on a
+//! mounted disk.
 
 use crate::archives::{self, Archive};
 use crate::cli::Ls;
@@ -72,10 +74,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     for archive in &present {
         let age = archive
             .taken
-            // Seconds, not `get_hours`: subtracting two timestamps gives a span whose largest
-            // unit is seconds, so the hours COMPONENT of it is always 0 and every archive read
-            // as "today" however old it was.
-            .map(|taken| term::days_ago((now - taken).get_seconds().div_euclid(86_400)))
+            .map(|taken| term::days_ago(term::days_between(taken, now)))
             .unwrap_or_else(|| "at an unreadable time".to_string());
         let mark = if is_recorded(archive, record) {
             "*"

@@ -556,13 +556,8 @@ fn archive_repositories(
         });
     }
     ctx.term.step(&format!(
-        "bundling {} repositor{}",
-        inventory.selected.len(),
-        if inventory.selected.len() == 1 {
-            "y"
-        } else {
-            "ies"
-        }
+        "bundling {}",
+        crate::term::count(inventory.selected.len(), "repository", "repositories")
     ));
 
     let mut archived = 0;
@@ -642,7 +637,8 @@ fn opening_lines(encryption: &Encryption, file_name: &str) -> (String, String) {
         ),
         Encryption::Passphrase(_) => (
             format!("age -d {file_name} | zstd -dc | tar -x"),
-            "Each of those asks for the passphrase this archive was sealed with.".to_string(),
+            "Each rad-backup command above asks for the passphrase this archive was sealed with."
+                .to_string(),
         ),
         // KEYFILE and PASSFILE, never `<key file>`: a reader pastes these lines into a shell,
         // and `age -d -i <key file> archive.tar.zst.age` is not a template with a placeholder
@@ -652,8 +648,9 @@ fn opening_lines(encryption: &Encryption, file_name: &str) -> (String, String) {
         Encryption::Recipients(recipients) => (
             format!("age -d -i KEYFILE {file_name} | zstd -dc | tar -x"),
             format!(
-                "Each of those needs --identity KEYFILE, naming the private half of one of the \
-                 keys this archive was encrypted to:\n\n{}\n\nAdd --identity-passphrase-file \
+                "Each rad-backup command above needs --identity KEYFILE, naming the private \
+                 half of one of the keys this archive was encrypted to:\n\n{}\n\nAdd \
+                 --identity-passphrase-file \
                  PASSFILE when that key has a passphrase of its own, which is a different \
                  secret from an archive passphrase.",
                 recipients

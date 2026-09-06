@@ -1,9 +1,10 @@
 //! What this tool remembers between runs.
 //!
 //! One small file per identity, holding no secrets: when the last archive was written, what
-//! was in it, and where it went. It is what lets `doctor` say "your newest backup is 40 days
-//! old and does not carry your two private repositories" without asking for a passphrase, and
-//! what lets `diff` answer without opening an archive at all.
+//! was in it, and where it went. It is what lets `doctor` say "the newest archive does not
+//! carry your two private repositories" without asking for a passphrase, and what lets `diff`
+//! answer without opening an archive at all. The age of an archive is read off the file when
+//! there is one, and off this record only when there is not.
 //!
 //! It lives under the XDG state directory rather than in the Radicle home, because it is this
 //! tool's memory and not part of anyone's identity.

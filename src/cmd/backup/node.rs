@@ -71,11 +71,6 @@ impl Drop for NodeGuard<'_> {
     }
 }
 
-/// Stop the node when `--stop-node` asks for it, and warn when it is running and nothing asked.
-///
-/// Only git storage is at risk from a running node: the databases are snapshotted through
-/// SQLite's own backup API, and keys and config do not change. So a running node is a warning
-/// with a reason attached, not a refusal.
 /// Whether this run still owes the node a restart, after a stop whose result it never saw.
 ///
 /// Three cases and only one of them owes anything. With no doubt on the probe, the socket
@@ -89,6 +84,12 @@ fn owes_a_restart(stop_accepted: bool, why_running_is_unknown: Option<&str>) -> 
     stop_accepted && why_running_is_unknown.is_some()
 }
 
+/// Stop the node when `--stop-node` asks for it, and warn when it is running and nothing
+/// asked.
+///
+/// Only git storage is at risk from a running node: the databases are snapshotted through
+/// SQLite's own backup API, and keys and config do not change. So a running node is a warning
+/// with a reason attached, not a refusal.
 pub(super) fn quiesce<'a>(
     ctx: &'a Ctx,
     args: &Create,

@@ -1,4 +1,5 @@
-//! Running the two programs this tool delegates to, `rad` and `git`.
+//! Running the programs this tool delegates to: `rad` and `git`, and `systemctl` and `uname`
+//! for the two commands that need them.
 //!
 //! Delegated rather than linked, because the user's own `rad` and `git` are by definition the
 //! right versions for the home being backed up: an archive taken by an old build of this tool

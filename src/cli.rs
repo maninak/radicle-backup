@@ -401,7 +401,8 @@ pub struct Restore {
     #[arg(value_name = "ARCHIVE", required_unless_present = "words")]
     pub archive: Option<PathBuf>,
 
-    /// Restore into a home that already holds an identity, overwriting what is there.
+    /// Restore into a home that already holds an identity, stored repositories, a node
+    /// database or a config, overwriting what is there.
     #[arg(long)]
     pub force: bool,
 

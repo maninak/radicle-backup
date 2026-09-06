@@ -111,7 +111,7 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
     // `diff` and `restore` all wrote into a home they said they would only read and said
     // nothing. `backup` drains it first, to put the same fact in the manifest.
     // Set off by a blank line, because this lands after whatever the verb printed last. Under
-    // `doctor` that is the tally, and a `!` line flush against it reads as a tenth check the
+    // `doctor` that is the tally, and a `!` line flush against it reads as one more check the
     // tally forgot to count rather than as a note about the run.
     let touched = db::drain_touched();
     // Drift belongs with the touched files: both are facts about the run rather than about the

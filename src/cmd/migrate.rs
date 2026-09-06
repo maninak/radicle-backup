@@ -2,7 +2,8 @@
 //!
 //! This is the common case, and it is the one with the footgun: two nodes running one key sign
 //! conflicting histories for the same peer, and the network sees a fork that nothing resolves.
-//! So the source key is retired as part of the move, not left behind as a courtesy copy.
+//! So the source key is retired as part of the move by default, not left behind as a courtesy
+//! copy. `--keep-source` leaves it, and the archive says so, so the far end is warned.
 
 use std::path::{Path, PathBuf};
 
@@ -123,9 +124,10 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     ));
     ctx.term.hint("    rad-backup restore <archive>");
     ctx.term
-        .hint("it will put the identity, the policies and the repositories back, then check");
+        .hint("it will put the identity, the policies and the repositories back, then compare");
     ctx.term
-        .hint("each repository against the network before you write to it");
+        .hint("what came back with what other nodes report holding, and name any repository");
+    ctx.term.hint("you must not write in");
     Ok(())
 }
 
@@ -179,9 +181,11 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
 
 /// Where a retired key goes. Kept as a function so the note and the rename cannot disagree.
 ///
-/// A second move never writes over the first one's key: the same file name twice would mean a
-/// key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
-/// prevent.
+/// A second move does not write over the first one's key: the same file name twice would mean
+/// a key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
+/// prevent. The `unwrap_or` below cannot be reached, because the range it searches has no end;
+/// it is there because the type says the search may fail and returning the occupied path is
+/// the answer a caller can at least see going wrong.
 pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
     let first = keys_dir.join(RETIRED_KEY);
     if !first.exists() {

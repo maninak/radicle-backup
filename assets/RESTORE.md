@@ -97,7 +97,7 @@ So, for every repository you restored and intend to write to:
 rad sync <rid> --fetch     # get what the network has
 ```
 
-A fetch will not bring your own newer refs back: to a node that already has the repository it is a pull, and a pull ignores your own key. If you suspect this archive is behind, clone the repository into an empty home and look at what the network holds under your peer id before you write. `rad-backup restore` does that comparison for you, from what other nodes have announced, and refuses to continue when one of them holds signed refs this copy does not have.
+A fetch will not bring your own newer refs back: to a node that already has the repository it is a pull, and a pull ignores your own key. If you suspect this archive is behind, clone the repository into an empty home and look at what the network holds under your peer id before you write. `rad-backup restore` does that comparison for you, from what other nodes have announced. It compares after restoring, not before, so it names every repository another node holds signed refs of yours for and exits 3 rather than 0. That is a warning to read before you write, not a gate that stopped anything.
 
 ## 5. One node, one key
 
