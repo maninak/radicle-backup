@@ -215,7 +215,7 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 · restoring 2 repositories
 · comparing 2 repositories with the network
 · starting the node, to compare what was restored with the network
-· waiting twenty seconds for other nodes to say what they hold of these refs
+· waiting 20 seconds for other nodes to say what they hold of these refs
 · stopping the node again
 
 ✓ restored alice into ~/.radicle

@@ -1024,13 +1024,16 @@ const GOSSIP_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
 /// after the backup was taken goes unseen on a network that is about to say so.
 ///
 /// A flat wait, with nothing to poll for: a peer that holds exactly what the archive holds
-/// writes no row at all, so no observable state ever says the answers are in. Twenty seconds
-/// was inherited from what this command spends waiting for a node it started, and it is spent
-/// on every restore that fetched anything rather than only when something is wrong, which is
-/// why the line saying so names the number.
+/// writes no row at all, so no observable state ever says the answers are in. The length was
+/// inherited from what this command spends waiting for a node it started, and it is spent on
+/// every restore that fetched anything rather than only when something is wrong, which is why
+/// the line saying so names the number. Named from the constant, so the two cannot drift into
+/// a run that says twenty and waits thirty.
 fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSet<String>>> {
-    ctx.term
-        .step("waiting twenty seconds for other nodes to say what they hold of these refs");
+    ctx.term.step(&format!(
+        "waiting {} seconds for other nodes to say what they hold of these refs",
+        GOSSIP_WINDOW.as_secs()
+    ));
     std::thread::sleep(GOSSIP_WINDOW);
     read_what_others_hold(&ctx.term, &ctx.home.node_db(), node_id)
 }
