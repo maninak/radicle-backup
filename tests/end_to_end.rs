@@ -1588,6 +1588,35 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         .expect("the seeding table survives");
     assert_eq!(seeded, 2);
 
+    // The whole script, not only the two blocks the parity tests lift, under every shell on
+    // the machine. Those tests run the patterns; nothing ran the file, so a bashism anywhere
+    // else in it would have been found by whoever was mid-recovery on a busybox rescue image.
+    // Only the closing line is asserted here, because the run above already checked what the
+    // script produces and this is asking a different question: whether it runs at all.
+    for shell in probe_shells() {
+        if shell == "sh" {
+            continue;
+        }
+        let elsewhere = fixture.path(&format!("by-{shell}"));
+        let mut command = Command::new(shell);
+        if shell == "busybox" {
+            command.arg("ash");
+        }
+        let ran = command
+            .args(["restore.sh", &elsewhere.to_string_lossy()])
+            .current_dir(&extracted)
+            .env("HOME", fixture.path("fake-home"))
+            .env("RAD_HOME", &decoy)
+            .output()
+            .unwrap_or_else(|e| panic!("{shell} runs the restore script: {e}"));
+        assert_success(
+            &ran,
+            &format!("restoring with the shipped script under {shell}"),
+        );
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(said.contains("and 1 repository\n"), "under {shell}: {said}");
+    }
+
     // And a second run over the home it just built, addressed the other way, refuses
     // instead of overwriting the key.
     let ran = Command::new("sh")
