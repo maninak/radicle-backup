@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - `--identity-passphrase-file` and `RAD_BACKUP_IDENTITY_PASSPHRASE`, for the passphrase on a `--identity` key. It is a different secret from the archive's, so it has its own flag and its own variable, and `--help` says which is which.
+- A `--recipient` run now names, in its own output, the key the archive will need to be opened. Until now only the note beside the archive said so, and that note is read in the middle of a recovery: the run is the last moment somebody is still in a position to go and check they have the private half.
 
 ### Fixed
 

@@ -1980,6 +1980,13 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
     assert_success(&out, "taking a backup encrypted to an ssh recipient");
     let archive = only_archive(&backups);
 
+    // The run itself names the key, not only the note beside the archive: the note is read in
+    // the middle of a recovery, and this is read while whoever set the timer up is still
+    // watching and could still go and check they have the private half.
+    let said = stderr(&out);
+    assert!(said.contains("opens only with the private half"), "{said}");
+    assert!(said.contains(recipient.trim()), "{said}");
+
     // The note beside the archive is what a person who no longer has this tool reads. For a
     // recipient archive a bare `age -d` asks for a passphrase that does not exist, so the note
     // has to name the key instead, on both the with-tool and the without-tool path.

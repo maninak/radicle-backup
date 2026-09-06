@@ -327,7 +327,14 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     }
     remember(ctx, &manifest, path.as_deref(), &node_id, &encryption);
 
-    report(ctx, &manifest, &inventory, archived, path.as_deref())?;
+    report(
+        ctx,
+        &manifest,
+        &inventory,
+        archived,
+        path.as_deref(),
+        &encryption,
+    )?;
     Ok(Outcome {
         path,
         is_incomplete: bundled.dropped > 0,
@@ -713,6 +720,7 @@ fn report(
     inventory: &Inventory,
     archived: usize,
     path: Option<&Path>,
+    encryption: &Encryption,
 ) -> Result<()> {
     if ctx.global.json {
         let mut value = serde_json::to_value(manifest)?;
@@ -745,6 +753,24 @@ fn report(
         manifest.policies.seeded,
         manifest.policies.followed
     ));
+
+    // Named here as well as in the note beside the archive, because the note is read during a
+    // recovery and this is read while somebody is still watching. A recipient archive opens
+    // with a private key that need not be anywhere near this machine, and this run is the last
+    // moment anyone is in a position to go and check they still have it.
+    if let Encryption::Recipients(recipients) = encryption {
+        term.hint(&format!(
+            "opens only with the private half of {}",
+            if recipients.len() == 1 {
+                "this key"
+            } else {
+                "one of these keys"
+            }
+        ));
+        for recipient in recipients {
+            term.detail(recipient);
+        }
+    }
 
     if !manifest.identity.key_is_encrypted {
         term.warn("the archived key has no passphrase of its own");
