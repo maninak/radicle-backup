@@ -1,7 +1,7 @@
 //! Reporting how recoverable an identity currently is.
 //!
 //! This is the answer to the question the Radicle support channel keeps getting: "what is my
-//! exposure, and what do I do about it". Every failing line names the command that fixes it,
+//! exposure, and what do I do about it". Every failing line says what fixes it,
 //! and every check says what it actually looked at, because a score nobody can audit is a
 //! score nobody should trust.
 
@@ -21,7 +21,9 @@ use crate::rad::Rad;
 use crate::state;
 use crate::term;
 
-/// How old a backup may get before it stops counting as one.
+/// How old a backup may get before it stops counting as one, because `schedule` writes a
+/// timer no looser than monthly and a backup older than the loosest cadence this tool offers
+/// is one whose timer stopped firing. Revisit if `schedule` ever offers a longer interval.
 const STALE_AFTER_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -132,7 +134,7 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
                 Verdict::Fail => term.fail(&line),
                 Verdict::Unknown => term.unknown(&line),
             }
-            // `detail` for the remedy under a check that is not a Pass, so `--quiet` cannot
+            // The remedy goes through `detail` under anything but a Pass, so `--quiet` cannot
             // print "you would lose this" and withhold the one line that fixes it.
             if let Some(remedy) = &check.remedy {
                 let line = format!("--> {remedy}");
@@ -213,9 +215,9 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let record = stored.record();
     let now = jiff::Timestamp::now();
 
-    // The archive on disk, found once and answered from twice: how old it is, and whether it
-    // is encrypted. Reading it from the state file instead is how both checks came to report
-    // on a run that happened rather than on the file that is there.
+    // The archive on disk, found once and read by four checks: its age, its encryption, where
+    // it sits, and whether it covers the private repositories. Reading the state file instead
+    // is how they came to report on a run that happened rather than on the file that is there.
     let directory = crate::cmd::archive_dir_from_env(args.dir.as_deref(), record);
     let newest = crate::archives::newest(&directory, &node_id)?;
 
@@ -250,9 +252,9 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
             &inventory,
             &db::read_synced_heads(&home.node_db(), &node_id)?,
             &node_id,
-            // Per read, not per process. `doctor` reads `policies.db` before this and two
-            // other tables of the node's, and any of their drift used to make this check
-            // answer "not known" about a table it had read perfectly.
+            // Per read, not per process. `doctor` reads `policies.db` and the routing
+            // table before this, and drift in either used to make this check answer "not
+            // known" about a table it had read perfectly.
             db::saw_schema_drift_in(&home.node_db(), "sync status table"),
         )
         .qualified_by_unread(unread),
@@ -324,7 +326,7 @@ impl Aside {
 /// "Is not there now" was said from the record alone, without looking, and `--output
 /// /backups/mine.tar.zst.age` names a file this tool writes and then does not recognise: the
 /// listing wants a `-<short node id>-` in the name. So a report said an archive was gone while
-/// it sat there, and `check_archive_location` two checks down said it existed, in one run.
+/// it sat there, and `check_archive_location` in the same report said it existed.
 fn not_listed_here(path: &str) -> String {
     // Anything the filesystem will not answer about is not proof of absence either.
     match std::fs::symlink_metadata(path) {
@@ -378,8 +380,8 @@ fn check_backup_freshness(
     let record = stored.record();
 
     // The file that is there answers first: it is what a restore would actually use, and it is
-    // there whoever wrote it. The record answers only when nothing is, because an archive
-    // carried off to another disk is still an archive that was taken.
+    // there whoever wrote it. The record gives the age only when no file does, because an
+    // archive carried off to another disk is still an archive that was taken.
     let judged = match (newest, record) {
         (Some(archive), _) => {
             let here = archive.taken.map(|taken| term::days_between(taken, now));
@@ -477,7 +479,7 @@ fn check_backup_freshness(
 /// Whether the newest archive can still be read by someone who is not you, and whether it can
 /// still be read by you.
 ///
-/// Read off the file, never off the state record. The record says what a run once wrote, so it
+/// Read off the file whenever there is one. The record says what a run once wrote, so it
 /// answered "the newest archive cannot be read without its passphrase" over a directory whose
 /// only archive was a plaintext one somebody dropped there by hand. It also cannot answer the
 /// half that matters more: an archive encrypted to a key nobody still holds is as lost as no
@@ -498,7 +500,10 @@ fn check_archive_encryption(
                 "no archive of this identity was found here, and the last one this tool wrote \
                  was written in the clear",
             )
-            .with_remedy("wherever that archive is, it can be read by anyone holding it"),
+            .with_remedy(
+                "take another without --plaintext, then find that one and delete it: anyone \
+                 holding it can read it",
+            ),
             Some(_) => Check::new(
                 TOPIC,
                 Verdict::Unknown,
@@ -542,8 +547,8 @@ fn check_archive_encryption(
     // the archive without reading a gigabyte to find out.
     //
     // Never interactively, whatever the run outside is: a passphrase-protected ssh key is the
-    // state this tool recommends, and a health report that stops to ask for its passphrase is
-    // one people take off the timer.
+    // shape the README shows, and a health report that stops to ask for its passphrase is one
+    // people take off the timer.
     let silent = crate::crypt::Identities {
         is_interactive: false,
         ..identities.clone()
@@ -557,8 +562,8 @@ fn check_archive_encryption(
             ),
             // The key never came unlocked, or came unlocked and was of a type age cannot use.
             // Either way nothing was learnt about the archive, and reported as a Fail this was
-            // a permanent red line, and an exit 3 every night, for the setup the README asks
-            // for.
+            // a permanent red line, and an exit 3 every night, for the setup the README
+            // shows.
             Err(
                 Error::KeysStayedLocked { what, remedy } | Error::KeyNotUsable { what, remedy },
             ) => Check::new(TOPIC, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy),
@@ -1111,7 +1116,6 @@ mod tests {
         );
     }
 
-    /// Every topic the report can print, one per check, whatever the verdict turns out to be.
     /// How many checks `examine` runs. Pinned because `every_topic` below is built by hand:
     /// a tenth check pushed into `examine` would be swept by none of the rules that read this
     /// list, silently. The integration suite asks the real command for its `total` and pins
@@ -1123,6 +1127,8 @@ mod tests {
         assert_eq!(every_topic("doctor-sweep").len(), CHECKS_THE_COMMAND_RUNS);
     }
 
+    /// Every topic the report can print, one per check, whatever the verdict turns out to be.
+    ///
     /// The scratch name comes from the caller: two tests calling this with one name inside it
     /// ask `TestScratch` for the same parent, which it refuses, and the refusal names the
     /// helper rather than either test.
@@ -1463,7 +1469,7 @@ mod tests {
         assert_eq!(wrong.verdict, Verdict::Fail, "{}", wrong.detail);
     }
 
-    /// The bug: an ssh key with a passphrase on it is what the README tells people to have,
+    /// The bug: an ssh key with a passphrase on it is the shape the README shows,
     /// and `doctor` reported the archive it opens as a failure every night, because "the key
     /// never came unlocked" was read as "the key does not open this". On a terminal it did
     /// worse and stopped to ask for the passphrase.
@@ -1490,7 +1496,7 @@ mod tests {
         // Interactive on purpose, which is how `doctor` is usually called. What this asserts
         // is the verdict; that the check hands age a non-interactive copy of the identities
         // is visible in `check_archive_encryption` and cannot be shown from here, because a
-        // test harness has no terminal for the prompt to reach either way.
+        // test run has no terminal for the prompt to reach either way.
         let locked = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![key_file.clone()],

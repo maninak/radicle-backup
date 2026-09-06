@@ -395,7 +395,7 @@ fn record_schema_drift(path: &Path, wanted: &'static str, e: &rusqlite::Error) {
 /// A reader that asks the process-wide question treats every other read's drift as its own, so
 /// an unrelated read anywhere before it silently turns a table that was read perfectly into
 /// "not known", with a warning naming a table nobody asked about. Both halves matter: `doctor`
-/// reads `policies.db` before it reads the node's, and it reads three tables of the node's.
+/// reads `policies.db` before it reads the node's, and it reads two tables of the node's.
 ///
 /// `wanted` is the same word the reader passed to `prepare_against_heartwood`.
 pub fn saw_schema_drift_in(database: &Path, wanted: &str) -> bool {
