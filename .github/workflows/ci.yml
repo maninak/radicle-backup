@@ -67,6 +67,9 @@ jobs:
       - name: Messages
         if: matrix.os == 'ubuntu-latest'
         run: ci/messages.sh
+      - name: Pins
+        if: matrix.os == 'ubuntu-latest'
+        run: ci/pins.sh
       # `--locked`, so a Cargo.toml requirement widened without updating Cargo.lock is an error
       # rather than a silent re-resolve. Without it the dependency-age gate below sees no added
       # versions while the build pulls and runs a crate published this morning.

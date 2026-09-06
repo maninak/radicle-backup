@@ -6,7 +6,7 @@ default:
 # What CI runs on every push, in the order that fails fastest. The shell gates live in `ci/`
 # and both this file and the workflow call them there: spelled out in two places they drifted,
 # and a gate only one side enforces is one that lands broken on whichever side nobody ran.
-check: fmt-check audit-map names messages lint nonunix test
+check: fmt-check audit-map names messages pins lint nonunix test
 
 # Every file SECURITY.md sends a reviewer to still exists. Why, in `ci/audit-map.sh`.
 audit-map:
@@ -19,6 +19,10 @@ messages:
 # Six naming rules a reviewer kept having to enforce by hand. Why, in `ci/names.sh`.
 names:
     ci/names.sh
+
+# One fact, written in several files, still says one thing. Why, in `ci/pins.sh`.
+pins:
+    ci/pins.sh
 
 # Compile the suite the way a target that is not unix sees it. Why, in `ci/nonunix.sh`.
 nonunix:

@@ -420,7 +420,7 @@ Unattended-Upgrade::Allowed-Origins {
 ## Development
 
 ```sh
-just check    # cargo fmt --check, the SECURITY.md audit map, the naming and message gates, clippy, a non-unix build, then the tests: what CI runs, in that order
+just check    # cargo fmt --check, the SECURITY.md audit map, the naming, message and cross-file pin gates, clippy, a non-unix build, then the tests: what CI runs, in that order
 ```
 
 The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, takes real archives of it, restores them into a second home and compares the two byte for byte. It needs `git` and nothing else, so it runs anywhere the tool does.

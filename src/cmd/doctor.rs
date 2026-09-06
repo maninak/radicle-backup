@@ -1117,9 +1117,13 @@ mod tests {
     }
 
     /// How many checks `examine` runs. Pinned because `every_topic` below is built by hand:
-    /// a tenth check pushed into `examine` would be swept by none of the rules that read this
-    /// list, silently. The integration suite asks the real command for its `total` and pins
-    /// the same number, so adding a check turns that red first and this one straight after.
+    /// a tenth check swept by none of the rules that read that list would be added silently.
+    ///
+    /// This number is written in three places and derived in none, so it is `ci/pins.sh` that
+    /// holds them together: it counts the `check_` functions the file defines and refuses a
+    /// tree where they, this constant and the `total` the integration suite asks the real
+    /// command for are not the same number. What the test below adds is the other direction,
+    /// an entry dropped from `every_topic` while the constant beside it stayed.
     const CHECKS_THE_COMMAND_RUNS: usize = 9;
 
     #[test]
