@@ -467,7 +467,33 @@ fn write_displaced_note(
         former_did.unwrap_or("an identity this tool could not read"),
     );
     let path = ctx.home.keys_dir().join("DISPLACED.txt");
-    std::fs::write(&path, note).map_err(|e| Error::io(&path, e))
+    // Read before it is written, because a second displaced restore is not a correction of the
+    // first: `retired_path` never reuses a freed name, so the first key is still at
+    // `radicle.retired` while this one goes to `radicle.retired.2`, and a note that truncates
+    // leaves two keys in the directory and one paragraph naming only the newer of them.
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Error::io(&path, e)),
+    };
+    crate::perms::write_atomically(
+        &path,
+        appended(&existing, &note).as_bytes(),
+        crate::perms::MODE_DOC,
+    )
+}
+
+/// One note after another, oldest first, with a blank line between them.
+///
+/// Separate from the writing so that the joining can be tested: the case worth pinning is the
+/// second note, and reaching it through `restore` means two archives, two identities and a
+/// home displaced twice.
+fn appended(existing: &str, note: &str) -> String {
+    if existing.is_empty() {
+        return note.to_string();
+    }
+    // A trailing newline is what every note here ends with, so the separator is one more.
+    format!("{existing}\n{note}")
 }
 
 /// Move the identity, the config and the databases into place.
@@ -2350,6 +2376,22 @@ mod tests {
         let _reading_drift = crate::db::while_reading_drift();
         let _ = crate::db::drain_schema_drift();
         assert!(read_what_others_hold(&term, &node_db, OWN_NODE).is_none());
+    }
+
+    #[test]
+    fn a_second_displaced_key_does_not_take_the_note_describing_the_first() {
+        // `radicle.retired` from one restore and `radicle.retired.2` from the next both sit in
+        // the same directory, and whoever finds them is looking for which is which.
+        let first = "the key at keys/radicle is now radicle.retired.\n";
+        let second = "the key at keys/radicle is now radicle.retired.2.\n";
+        let both = appended(&appended("", first), second);
+        assert!(both.contains("radicle.retired.\n"), "{both}");
+        assert!(both.contains("radicle.retired.2.\n"), "{both}");
+        assert!(
+            both.starts_with(first),
+            "the older note comes first: {both}"
+        );
+        assert_eq!(appended("", first), first);
     }
 
     fn reconciled(standings: &[(&str, Standing)], ahead_of_someone: &[&str]) -> Reconciled {
