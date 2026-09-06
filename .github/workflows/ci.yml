@@ -55,14 +55,14 @@ jobs:
         run: |
           missing=0
           rows=0
-          for path in $(grep -o '^| `src/[^`]*`' SECURITY.md | tr -d '|` '); do
+          for path in $(grep -o '`src/[^`]*`' SECURITY.md | tr -d '`'); do
             if [ ! -e "$path" ]; then
               echo "::error::SECURITY.md sends a reviewer to $path, which is not there"
               missing=1
             fi
             rows=$((rows + 1))
           done
-          # Zero rows means the table stopped matching the pattern, not that the map is clean.
+          # Zero paths means the map stopped matching the pattern, not that it is clean.
           if [ "$rows" -eq 0 ]; then
             echo "::error::the audit map in SECURITY.md matched no rows, so nothing was checked"
             missing=1
@@ -84,26 +84,33 @@ jobs:
           fi
           rules=$((rules + 1))
           claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
-          not_a_claim=$(grep -rEn '^[[:space:]]+(pub )?[a-z_]+: bool,$' src/ \
+          visibility='(pub(\([a-z]+\))? )?'
+          not_a_claim=$(grep -rEn "^[[:space:]]+${visibility}[a-z_]+: bool,$" src/ \
             | grep -v '^src/cli.rs:' \
-            | grep -vE ":[[:space:]]+(pub )?([a-z_]+_)?${claims}_" || true)
+            | grep -vE ":[[:space:]]+${visibility}([a-z_]+_)?${claims}_" || true)
           if [ -n "$not_a_claim" ]; then
             echo "$not_a_claim" | sed 's/$/: a bool has to read as a claim (is_, has_, was_, uses_, ...)/' | sed 's/^/::error::/'
             found=1
           fi
           rules=$((rules + 1))
-          env_readers=$(for file in $(git ls-files 'src/*.rs' 'src/cmd/*.rs' 'src/cmd/backup/*.rs'); do
+          env_readers=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
             awk -v file="$file" '
-              /^[[:space:]]*(pub(\([a-z]+\))? )?(async )?fn [a-z_]+/ {
-                match($0, /fn [a-z_]+/)
-                name = substr($0, RSTART + 3, RLENGTH - 3)
-                signature = $0
-              }
-              /std::env::var/ {
-                if (signature ~ /Self/) next
-                if (name ~ /_from_env$/) next
-                if (name ~ /^(read|probe|ask|require)_/) next
-                printf "%s:%d: fn %s reads the environment\n", file, NR, name
+              {
+                if ($0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?(const |unsafe |async )*fn [a-z_]+/) {
+                  match($0, /fn [a-z_]+/)
+                  name = substr($0, RSTART + 3, RLENGTH - 3)
+                  signature = $0
+                  collecting = (index($0, "{") == 0 && index($0, ";") == 0)
+                } else if (collecting) {
+                  signature = signature " " $0
+                  if (index($0, "{") || index($0, ";")) collecting = 0
+                }
+                if ($0 ~ /env::var/) {
+                  if (signature ~ /->[^{]*Self/) next
+                  if (name ~ /_from_env$/) next
+                  if (name ~ /^(read|probe|ask|require)_/) next
+                  printf "%s:%d: fn %s reads the environment\n", file, NR, name
+                }
               }
             ' "$file"
           done)
@@ -159,7 +166,10 @@ jobs:
             echo "::error::no '#[cfg(unix)]' gates matched in $file, so nothing was checked"
             exit 1
           fi
-          sed 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' "$saved" > "$file"
+          # The second expression drops `#[cfg(not(unix))]` so its item compiles unconditionally:
+          # switching only the unix half of a platform pair off would take both arms away.
+          sed -e 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' \
+            -e '/^[[:space:]]*#\[cfg(not(unix))\]$/d' "$saved" > "$file"
           cargo clippy --all-targets --locked
       # The integration suite drives the real binary against a real git, which is what makes
       # it worth running on every platform rather than only where it was written. Windows is

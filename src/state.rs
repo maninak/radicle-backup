@@ -181,17 +181,36 @@ impl Stored {
 }
 
 pub fn read(did: &str) -> Result<Stored> {
-    let path = path_from_env(did)?;
-    if !path.is_file() {
-        return Ok(Stored::Absent);
+    Ok(read_at(path_from_env(did)?))
+}
+
+/// What the file at `path` says, or why it could not say it. Pure.
+///
+/// `metadata`, and not `is_file`, because `is_file` answers `false` for a file this process
+/// may not stat and for a directory sitting where the file should be, and both then read as
+/// `Absent`: `doctor` told the owner of a record it could not open that this tool had no
+/// record of one anywhere. Only "not there" is absence, the way `Home::holds_identity` tells
+/// the two apart; everything else that stops the file being read is `Unreadable`, which the
+/// enum already means and which stops nothing. Revisit if a state file ever needs a run to
+/// stop on it.
+pub fn read_at(path: PathBuf) -> Stored {
+    let unreadable = |reason: String| Stored::Unreadable {
+        path: path.clone(),
+        reason,
+    };
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return unreadable("there is a directory where the record should be".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Stored::Absent,
+        Err(e) => return unreadable(e.to_string()),
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return unreadable(e.to_string()),
+    };
     match serde_json::from_str(&text) {
-        Ok(record) => Ok(Stored::Record(Box::new(record))),
-        Err(e) => Ok(Stored::Unreadable {
-            path,
-            reason: e.to_string(),
-        }),
+        Ok(record) => Stored::Record(Box::new(record)),
+        Err(e) => unreadable(e.to_string()),
     }
 }
 
@@ -228,6 +247,72 @@ mod tests {
             followed: 3,
             restored: None,
         }
+    }
+
+    /// The bug: `is_file` answered `false` for a directory sitting where the record should be
+    /// and for a record this process may not stat, and both came back as `Absent`. `doctor`
+    /// then said "this tool has no record of one anywhere" about a record it could not open.
+    #[test]
+    fn a_record_that_is_there_and_cannot_be_read_is_not_reported_as_never_written() {
+        let dir = std::env::temp_dir().join(format!("rad-backup-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+
+        assert!(
+            matches!(read_at(dir.join("never.json")), Stored::Absent),
+            "nothing there is the one shape that is absence"
+        );
+
+        let squatted = dir.join("squatted.json");
+        std::fs::create_dir_all(&squatted).expect("a directory in the file's place is creatable");
+        let stored = read_at(squatted.clone());
+        assert!(
+            matches!(&stored, Stored::Unreadable { path, .. } if *path == squatted),
+            "a directory in the file's place is not absence: {stored:?}"
+        );
+        assert!(
+            stored.complaint().is_some(),
+            "and it is something the run says out loud"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_record_this_process_may_not_open_is_unreadable_rather_than_absent_or_fatal() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir =
+            std::env::temp_dir().join(format!("rad-backup-state-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
+        let locked = dir.join("locked.json");
+        std::fs::write(
+            &locked,
+            serde_json::to_vec(&record()).expect("a record serialises"),
+        )
+        .expect("the fixture is writable");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("mode is settable");
+        // Root and anything holding CAP_DAC_OVERRIDE reads straight through mode 000, so there
+        // is nothing it could fail to open. Probed here rather than guessed from a user name,
+        // because the probe is the condition itself.
+        let reads_through_any_mode = std::fs::read(&locked).is_ok();
+
+        let stored = read_at(locked.clone());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600))
+            .expect("mode is settable back");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        if reads_through_any_mode {
+            return;
+        }
+        let Stored::Unreadable { path, reason } = &stored else {
+            panic!("a record that cannot be opened is not absence: {stored:?}");
+        };
+        assert_eq!(*path, locked);
+        assert!(reason.contains("denied"), "{reason}");
     }
 
     #[test]

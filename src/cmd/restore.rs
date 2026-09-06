@@ -13,6 +13,7 @@ use crate::container::Reader;
 use crate::crypt;
 use crate::db::Policies;
 use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
+use crate::exec::Answer;
 use crate::git::{self, Git};
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
@@ -77,11 +78,28 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     let home = &ctx.home;
     let term = &ctx.term;
 
-    if home.holds_identity()? && !args.force {
-        return Err(Error::refused(
-            format!("{} already holds an identity", home.path().display()),
-            "move it aside, restore into a different --home, or pass --force to overwrite it",
-        ));
+    // Two ways a home is occupied, and only the first used to be asked about. The second is
+    // the one that bites quietly: a home whose key was retired by `move` holds no identity and
+    // still holds every repository, and a restore rewinds all of their refs with a `--force`
+    // fetch.
+    if !args.force {
+        if home.holds_identity()? {
+            return Err(Error::refused(
+                format!("{} already holds an identity", home.path().display()),
+                "move it aside, restore into a different --home, or pass --force to overwrite it",
+            ));
+        }
+        let occupied = home.what_a_restore_would_overwrite();
+        if !occupied.is_empty() {
+            return Err(Error::refused(
+                format!(
+                    "{} holds no identity, and holds {}, which this restore would write over",
+                    home.path().display(),
+                    occupied.join(", ")
+                ),
+                "restore into a different --home, or pass --force to overwrite what is there",
+            ));
+        }
     }
     // Anything but a node proven stopped refuses. A socket that cannot be reached is not a
     // node that is down, and this guard exists precisely because being wrong about that costs
@@ -220,20 +238,38 @@ fn remember(
 /// Refuse to install a key that is not the key the manifest names.
 fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
     let identity = Identity::read(staging.join("keys/radicle.pub"))?;
-    if identity.did() != manifest.identity.did {
-        return Err(Error::refused(
-            format!(
-                "the archived key is {} but the manifest says {}",
-                identity.did(),
-                manifest.identity.did
-            ),
-            "this archive is inconsistent; do not install it",
-        ));
-    }
+    describes_this_key(
+        &identity.did(),
+        &manifest.identity.did,
+        &manifest.identity.node_id,
+    )?;
     let secret = SecretKey::read(staging.join("keys/radicle"))?;
     if secret.identity()?.did() != manifest.identity.did {
         return Err(Error::refused(
             "the archived private and public keys are not a pair",
+            "this archive is inconsistent; do not install it",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the manifest describes the key the archive carries. Both spellings of it.
+///
+/// The manifest names the identity twice, and only the did was ever checked. The node id is
+/// the same key written another way, and it is not decoration: it picks the namespace the
+/// signed-refs comparison reads and the key it looks the archived oid up under. One that
+/// disagrees makes every repository come back "nothing to compare", so the restore exits 0
+/// having compared nothing, which is the silent pass that comparison exists to prevent.
+fn describes_this_key(did: &str, claimed_did: &str, claimed_node_id: &str) -> Result<()> {
+    if did != claimed_did {
+        return Err(Error::refused(
+            format!("the archived key is {did} but the manifest says {claimed_did}"),
+            "this archive is inconsistent; do not install it",
+        ));
+    }
+    if did.strip_prefix("did:key:") != Some(claimed_node_id) {
+        return Err(Error::refused(
+            format!("the archived key is {did} but the manifest calls its node {claimed_node_id}"),
             "this archive is inconsistent; do not install it",
         ));
     }
@@ -632,7 +668,7 @@ fn wait_for_node(ctx: &Ctx) -> bool {
 }
 
 /// What `git merge-base --is-ancestor` said about the two sides, asked both ways round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Ancestry {
     /// The archived refs are an ancestor of what is here now: the network moved on without us.
     ArchivedIsAncestorOfNetwork,
@@ -640,6 +676,8 @@ enum Ancestry {
     NetworkIsAncestorOfArchived,
     /// Neither reaches the other, so there is no history that holds both.
     Unrelated,
+    /// `git` failed rather than answered, so nothing is known about either direction.
+    CouldNotAsk { said: String },
 }
 
 /// Where the archive's signed refs stand against what the network now holds.
@@ -665,6 +703,7 @@ where
         Ancestry::ArchivedIsAncestorOfNetwork => Standing::NetworkWasAhead,
         Ancestry::NetworkIsAncestorOfArchived => Standing::ArchiveIsAhead,
         Ancestry::Unrelated => Standing::Diverged,
+        Ancestry::CouldNotAsk { .. } => Standing::CouldNotAsk,
     })
 }
 
@@ -697,6 +736,15 @@ fn compare_with_network(
             standings.insert(repo.rid.clone(), Standing::NothingToCompare);
             continue;
         };
+        // Nothing in this manifest was vouched for by anybody. `merge-base` takes no `--`, so
+        // a value reading as a flag would be one, and a revision expression would have git
+        // resolve something the archive chose. Not compared rather than refused outright: one
+        // repository with a bad oid is not a reason to abandon the comparison of the rest, and
+        // "could not ask" is the honest standing for it.
+        if !git::names_an_oid(archived) {
+            standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
+            continue;
+        }
         if !rad.fetch(&repo.rid)? {
             standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
@@ -705,13 +753,17 @@ fn compare_with_network(
         let path = ctx.home.repository_path(&repo.rid);
         let current = git.ref_oid(&path, &sigrefs_ref)?;
         let standing = classify(archived, current.as_deref(), |current| {
-            if git.is_ancestor(&path, archived, current)? {
-                Ok(Ancestry::ArchivedIsAncestorOfNetwork)
-            } else if git.is_ancestor(&path, current, archived)? {
-                Ok(Ancestry::NetworkIsAncestorOfArchived)
-            } else {
-                Ok(Ancestry::Unrelated)
-            }
+            // Only a `No` in the first direction earns the second probe, and only a `No` in
+            // both earns `Unrelated`. An oid `git` could not resolve answers neither.
+            Ok(match git.is_ancestor(&path, archived, current)? {
+                Answer::Yes => Ancestry::ArchivedIsAncestorOfNetwork,
+                Answer::CouldNotAsk { said } => Ancestry::CouldNotAsk { said },
+                Answer::No => match git.is_ancestor(&path, current, archived)? {
+                    Answer::Yes => Ancestry::NetworkIsAncestorOfArchived,
+                    Answer::CouldNotAsk { said } => Ancestry::CouldNotAsk { said },
+                    Answer::No => Ancestry::Unrelated,
+                },
+            })
         })?;
         standings.insert(repo.rid.clone(), standing);
     }
@@ -940,6 +992,23 @@ fn report(
 
 #[cfg(test)]
 mod tests {
+    /// A manifest names its identity twice and both have to be the key in the archive. Only
+    /// the did was checked, so an archive whose node id said something else installed happily
+    /// and then compared nothing: every repository came back "nothing to compare", because the
+    /// sigrefs are looked up under that node id, and the run exited 0 over it.
+    #[test]
+    fn a_manifest_whose_node_id_is_not_its_key_is_refused_like_a_wrong_did() {
+        const DID: &str = "did:key:z6MkjDYUKMUeY58Vtr8dGJrHRvnTfjKWVGCBYJDVTHXsXzm5";
+        const NODE_ID: &str = "z6MkjDYUKMUeY58Vtr8dGJrHRvnTfjKWVGCBYJDVTHXsXzm5";
+        const SOMEBODY_ELSE: &str = "z6MktaNvN1tjt7bWaP9WNaKUnfLNqk7oYGjPGyMbcHDW2i8x";
+
+        assert!(describes_this_key(DID, DID, NODE_ID).is_ok());
+        assert!(describes_this_key(DID, DID, SOMEBODY_ELSE).is_err());
+        assert!(describes_this_key(DID, &format!("did:key:{SOMEBODY_ELSE}"), NODE_ID).is_err());
+        // A node id that is the did over again, rather than the key on its own.
+        assert!(describes_this_key(DID, DID, DID).is_err());
+    }
+
     use super::*;
 
     #[test]

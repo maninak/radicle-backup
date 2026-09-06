@@ -17,7 +17,9 @@ audit-map:
     set -eu
     missing=0
     rows=0
-    for path in $(grep -o '^| `src/[^`]*`' SECURITY.md | tr -d '|` '); do
+    # Every backticked `src/...` in the file, not just the first of a row: the anchored form
+    # checked one path per line, so a row naming two files was half unchecked.
+    for path in $(grep -o '`src/[^`]*`' SECURITY.md | tr -d '`'); do
     	if [ ! -e "$path" ]; then
     		echo "SECURITY.md sends a reviewer to $path, which is not there" >&2
     		missing=1
@@ -34,10 +36,15 @@ audit-map:
 
 # No user-facing message carries a run of spaces where a line continuation should be.
 #
-# A message written across two source lines needs a trailing `\` inside the literal, and the
-# `\` is the easy thing to drop: `cargo fmt` will not touch the inside of a literal, so the
-# gap survives every gate and reaches the user as a hole in the middle of a warning. One had
-# been printing that way in `restore` for as long as the warning existed.
+# `cargo fmt` will not touch the inside of a literal, so a message hand-joined from two lines
+# keeps whatever whitespace the join left and reaches the user as a hole in the middle of a
+# sentence. One had been printing that way in `restore` for as long as the warning existed.
+#
+# Line-based, so it catches the run of spaces WITHIN one source line, which is the shape the
+# real defect had. A literal continued to the next line with the trailing `\` dropped is a
+# different shape and this does not see it: telling a literal that spans lines from a comment,
+# a char literal or a raw string needs a Rust parser, and a gate that guesses would fire on
+# the templates this tool ships. Revisit if that shape ever occurs.
 #
 # The pattern deliberately wants a word character on both sides of the run, so the indentation
 # inside the multi-line templates this tool ships (`RESTORE.md`, `restore.sh`, the systemd
@@ -94,9 +101,10 @@ names:
     # on the wire is renamed here and pinned there with `#[serde(rename = ...)]`, because an
     # archive is read by versions that were never built.
     claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
-    not_a_claim=$(grep -rEn '^[[:space:]]+(pub )?[a-z_]+: bool,$' src/ \
+    visibility='(pub(\([a-z]+\))? )?'
+    not_a_claim=$(grep -rEn "^[[:space:]]+${visibility}[a-z_]+: bool,$" src/ \
     	| grep -v '^src/cli.rs:' \
-    	| grep -vE ":[[:space:]]+(pub )?([a-z_]+_)?${claims}_" || true)
+    	| grep -vE ":[[:space:]]+${visibility}([a-z_]+_)?${claims}_" || true)
     if [ -n "$not_a_claim" ]; then
     	echo "$not_a_claim" | sed 's/$/: a bool has to read as a claim (is_, has_, was_, uses_, ...)/' >&2
     	found=1
@@ -105,21 +113,32 @@ names:
 
     # A function that reads the environment under a name that sounds pure. `archive_dir` was
     # one, and it could not be tested at all: setting a variable to check its precedence sets
-    # it for every other test in the process. A constructor is exempt, told by the `Self` in
-    # its return type, because building this program's view of its environment is what one is
-    # for and the type name already says so.
-    env_readers=$(for file in $(git ls-files 'src/*.rs' 'src/cmd/*.rs' 'src/cmd/backup/*.rs'); do
+    # it for every other test in the process. A constructor is exempt, told by `Self` in the
+    # RETURN position and not merely somewhere on the signature, because building this
+    # program's view of its environment is what one is for and the type name already says so.
+    #
+    # The signature is collected across the lines rustfmt wrapped it over, so a long
+    # constructor is not read as a plain function. `env::var` is matched however the module was
+    # brought into scope; `use std::env as e` would still slip past, which is a spelling
+    # nothing in this tree uses and no reviewer would let through.
+    env_readers=$(for file in $(git ls-files 'src/' | grep '\.rs$'); do
     	awk -v file="$file" '
-    		/^[[:space:]]*(pub(\([a-z]+\))? )?(async )?fn [a-z_]+/ {
-    			match($0, /fn [a-z_]+/)
-    			name = substr($0, RSTART + 3, RLENGTH - 3)
-    			signature = $0
-    		}
-    		/std::env::var/ {
-    			if (signature ~ /Self/) next
-    			if (name ~ /_from_env$/) next
-    			if (name ~ /^(read|probe|ask|require)_/) next
-    			printf "%s:%d: fn %s reads the environment\n", file, NR, name
+    		{
+    			if ($0 ~ /^[[:space:]]*(pub(\([a-z]+\))? )?(const |unsafe |async )*fn [a-z_]+/) {
+    				match($0, /fn [a-z_]+/)
+    				name = substr($0, RSTART + 3, RLENGTH - 3)
+    				signature = $0
+    				collecting = (index($0, "{") == 0 && index($0, ";") == 0)
+    			} else if (collecting) {
+    				signature = signature " " $0
+    				if (index($0, "{") || index($0, ";")) collecting = 0
+    			}
+    			if ($0 ~ /env::var/) {
+    				if (signature ~ /->[^{]*Self/) next
+    				if (name ~ /_from_env$/) next
+    				if (name ~ /^(read|probe|ask|require)_/) next
+    				printf "%s:%d: fn %s reads the environment\n", file, NR, name
+    			}
     		}
     	' "$file"
     done)
@@ -162,9 +181,14 @@ nonunix:
     # caller goes reports the caller's absence as dead code, which is this check inventing a
     # failure windows would never see.
     #
+    # The second expression drops `#[cfg(not(unix))]` so its item compiles unconditionally.
+    # A platform pair has two arms, and switching only the unix one off would take both away,
+    # reporting an absence windows would never see.
+    #
     # Reading the saved copy and writing the file, rather than `sed -i`, which spells its
     # backup suffix differently on GNU and BSD and so breaks on the macOS checkouts.
-    sed 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' "$saved" > "$file"
+    sed -e 's/^\([[:space:]]*\)#\[cfg(unix)\]$/\1#[cfg(all(unix, any()))]/' \
+    	-e '/^[[:space:]]*#\[cfg(not(unix))\]$/d' "$saved" > "$file"
     RUSTFLAGS="-D warnings" cargo clippy --all-targets --locked
 
 fmt:

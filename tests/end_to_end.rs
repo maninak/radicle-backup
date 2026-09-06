@@ -35,8 +35,13 @@ impl Fixture {
     fn create(name: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("rad-backup-it-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).expect("the fixture root is creatable");
+        // Owner-only, and never a directory that was already there, because the root holds a
+        // real Radicle home with a real secret key under a name guessable from the pid. A
+        // `create_dir_all` over a root somebody else planted first would have built that home
+        // under their permissions, and a leftover from a crashed run fails here on purpose.
+        // The guard is armed before the first file is written so that a panic partway through
+        // still removes what was written.
+        create_private_dir(&root).expect("the fixture root is creatable and was not already there");
         let fixture = Self { root };
 
         fixture.restore_from_words();
@@ -273,6 +278,21 @@ esac
             );
         command
     }
+}
+
+/// What `rad-backup` itself does for a working directory, spelled out here because an
+/// integration test cannot reach `crate::perms`. `create_dir` fails when the path exists,
+/// which is the property that matters on every platform; the mode is the part only unix has.
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
+
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
 }
 
 impl Drop for Fixture {
@@ -710,6 +730,44 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
     let after = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
     assert_eq!(before, after, "a refused restore still touched the key");
+}
+
+/// A home with no key still holds everything a restore rewrites.
+///
+/// Occupancy was decided on `keys/radicle` alone, so a home whose key `move` retired, or whose
+/// key was deleted, answered "empty" and a restore went through with neither `--force` nor a
+/// confirmation. It fetches every bundle with `--force`, which rewinds every ref in every
+/// stored repository, other peers' namespaces included, to whatever the archive holds. For a
+/// private repository nobody else has, there is nothing to bring the newer refs back from.
+#[test]
+fn a_home_with_repositories_and_no_key_is_still_occupied() {
+    let fixture = Fixture::create("keyless-occupied");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &["--output", &backups.to_string_lossy(), "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a backup");
+    let archive = only_archive(&backups);
+
+    // Exactly what `move` leaves behind: no key, and every repository still there.
+    std::fs::remove_file(fixture.home().join("keys/radicle")).expect("the key is removable");
+    let repositories = files_under(&fixture.home().join("storage"));
+    assert!(!repositories.is_empty(), "the fixture has repositories");
+
+    let out = fixture.run(
+        &["restore", "--yes", &archive.to_string_lossy()],
+        &fixture.home(),
+    );
+    let said = stderr(&out);
+    assert_eq!(out.status.code(), Some(4), "{said}");
+    assert!(said.contains("stored repositories"), "{said}");
+    assert_eq!(
+        files_under(&fixture.home().join("storage")),
+        repositories,
+        "a refused restore still touched storage"
+    );
 }
 
 /// Restoring over a home that holds a DIFFERENT identity must file the old key, not delete

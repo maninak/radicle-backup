@@ -537,14 +537,15 @@ impl OfferedKeys {
                         "; age stops at the first key it cannot use, so {untried} went untried"
                     ),
                 };
-                Error::refused(
-                    format!(
+                Error::KeyNotUsable {
+                    what: format!(
                         "{named} could not be used with the passphrase given: either that \
                          passphrase is wrong, or age cannot use a key of that type{rest}{footnote}"
                     ),
-                    "check the passphrase, or pass --identity with only the key this archive \
-                     was encrypted to",
-                )
+                    remedy: "check the passphrase, or pass --identity with only the key this \
+                             archive was encrypted to"
+                        .to_string(),
+                }
             }
             age::DecryptError::NoMatchingKeys if !self.passphrases.locked().is_empty() => {
                 Error::KeysStayedLocked {
@@ -857,16 +858,17 @@ mod tests {
         assert!(failure.to_string().contains("damaged"), "{failure}");
     }
 
-    fn scratch_path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "rad-backup-crypt-{name}-{}.age",
-            std::process::id()
-        ))
+    use crate::key::tests::TestScratch;
+
+    fn scratch_path(scratch: &TestScratch, name: &str) -> PathBuf {
+        scratch.path_of(&format!("{name}.age"))
     }
 
-    fn written_archive(name: &str, encryption: &Encryption) -> PathBuf {
-        let path = scratch_path(name);
-        let file = std::fs::File::create(&path).expect("scratch file is creatable");
+    /// Owner-only like the other two fixtures, because an archive holds the same secret its key
+    /// unlocks, and `File::create` would have followed a symlink planted under the name.
+    fn written_archive(scratch: &TestScratch, name: &str, encryption: &Encryption) -> PathBuf {
+        let path = scratch_path(scratch, name);
+        let file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
         let mut sink = Sink::new(Box::new(file), encryption).expect("sink is buildable");
         sink.write_all(b"secret").expect("plaintext is writable");
         sink.finish().expect("sink finishes");
@@ -878,7 +880,12 @@ mod tests {
     /// Built through `key::openssh_from_seed`, which is the path a Radicle key restored from
     /// words takes, so the fixture cannot drift from the keys this tool actually meets. `seed`
     /// picks which key: two different values are two unrelated identities.
-    fn ssh_key_file(name: &str, seed: u8, passphrase: Option<&str>) -> (PathBuf, String) {
+    fn ssh_key_file(
+        scratch: &TestScratch,
+        name: &str,
+        seed: u8,
+        passphrase: Option<&str>,
+    ) -> (PathBuf, String) {
         let seed = Zeroizing::new([seed; 32]);
         let openssh = crate::key::openssh_from_seed(
             &seed,
@@ -888,7 +895,7 @@ mod tests {
         let recipient = crate::key::identity_from_seed(&seed)
             .and_then(|identity| identity.to_openssh())
             .expect("the public half is renderable");
-        let path = scratch_path(name);
+        let path = scratch_path(scratch, name);
         let mut file = crate::perms::create_private_file(&path).expect("scratch key is creatable");
         file.write_all(openssh.as_bytes())
             .expect("scratch key is writable");
@@ -898,33 +905,12 @@ mod tests {
     /// Owner-only, like every other passphrase this tool writes. `/tmp` is shared, and a
     /// fixture that drops a secret there at the umask default would be the one place in the
     /// crate that does not follow what SECURITY.md says about passphrase files.
-    fn passphrase_file(name: &str, passphrase: &str) -> PathBuf {
-        let path = scratch_path(name);
+    fn passphrase_file(scratch: &TestScratch, name: &str, passphrase: &str) -> PathBuf {
+        let path = scratch_path(scratch, name);
         let mut file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
         file.write_all(passphrase.as_bytes())
             .expect("scratch passphrase file is writable");
         path
-    }
-
-    /// Deletes what a test wrote, however the test ends.
-    ///
-    /// A trailing `for path in [..] { remove_file(path) }` runs only when every assertion
-    /// above it held, so the runs that leave private keys and passphrases in `/tmp` are
-    /// exactly the failing ones somebody then re-runs.
-    struct Scratch(Vec<PathBuf>);
-
-    impl Scratch {
-        fn keeping(paths: impl IntoIterator<Item = PathBuf>) -> Self {
-            Self(paths.into_iter().collect())
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            for path in &self.0 {
-                let _ = std::fs::remove_file(path);
-            }
-        }
     }
 
     /// Open a recipient-encrypted archive the way `--identity` does, with no terminal to
@@ -953,11 +939,10 @@ mod tests {
 
     #[test]
     fn a_passphrase_protected_key_opens_the_archive_it_is_a_recipient_of() {
-        let (key, recipient) = ssh_key_file("locked-key", 7, Some("hunter2"));
-        let archive = written_archive("locked", &Encryption::Recipients(vec![recipient]));
-        let unlocks = passphrase_file("locked-pass", "hunter2\n");
-
-        let _scratch = Scratch::keeping([key.clone(), archive.clone(), unlocks.clone()]);
+        let scratch = TestScratch::create("crypt-locked");
+        let (key, recipient) = ssh_key_file(&scratch, "locked-key", 7, Some("hunter2"));
+        let archive = written_archive(&scratch, "locked", &Encryption::Recipients(vec![recipient]));
+        let unlocks = passphrase_file(&scratch, "locked-pass", "hunter2\n");
 
         let plaintext = opened_with(&archive, std::slice::from_ref(&key), Some(&unlocks))
             .expect("the right key with the right passphrase opens the archive");
@@ -969,10 +954,14 @@ mod tests {
     /// restore would otherwise hand age an empty string and report the key as the wrong one.
     #[test]
     fn an_empty_identity_passphrase_file_is_refused_rather_than_offered_to_age() {
-        let (key, recipient) = ssh_key_file("empty-pass-key", 13, Some("hunter2"));
-        let archive = written_archive("empty-pass", &Encryption::Recipients(vec![recipient]));
-        let empty = passphrase_file("empty-pass-file", "");
-        let _scratch = Scratch::keeping([key.clone(), archive.clone(), empty.clone()]);
+        let scratch = TestScratch::create("crypt-empty-pass");
+        let (key, recipient) = ssh_key_file(&scratch, "empty-pass-key", 13, Some("hunter2"));
+        let archive = written_archive(
+            &scratch,
+            "empty-pass",
+            &Encryption::Recipients(vec![recipient]),
+        );
+        let empty = passphrase_file(&scratch, "empty-pass-file", "");
 
         let failure = opened_with(&archive, std::slice::from_ref(&key), Some(&empty))
             .expect_err("an empty passphrase unlocks nothing");
@@ -984,11 +973,14 @@ mod tests {
 
     #[test]
     fn a_wrong_passphrase_for_the_key_is_reported_as_that_and_not_as_a_key_that_does_not_match() {
-        let (key, recipient) = ssh_key_file("wrong-pass-key", 8, Some("hunter2"));
-        let archive = written_archive("wrong-pass", &Encryption::Recipients(vec![recipient]));
-        let unlocks = passphrase_file("wrong-pass-file", "not hunter2");
-
-        let _scratch = Scratch::keeping([key.clone(), archive.clone(), unlocks.clone()]);
+        let scratch = TestScratch::create("crypt-wrong-pass");
+        let (key, recipient) = ssh_key_file(&scratch, "wrong-pass-key", 8, Some("hunter2"));
+        let archive = written_archive(
+            &scratch,
+            "wrong-pass",
+            &Encryption::Recipients(vec![recipient]),
+        );
+        let unlocks = passphrase_file(&scratch, "wrong-pass-file", "not hunter2");
 
         let failure = opened_with(&archive, std::slice::from_ref(&key), Some(&unlocks))
             .expect_err("a wrong key passphrase cannot open the archive");
@@ -1006,18 +998,13 @@ mod tests {
     /// the one that did not. age stops at the first key it cannot use, so exactly one is.
     #[test]
     fn a_key_that_unlocked_is_not_named_beside_the_one_that_did_not() {
+        let scratch = TestScratch::create("crypt-two");
         // One passphrase for both, right for the first and wrong for the second: the shape a
         // single --identity-passphrase-file has whenever two locked keys are offered.
-        let (first, _) = ssh_key_file("two-first", 14, Some("hunter2"));
-        let (second, recipient) = ssh_key_file("two-second", 15, Some("different"));
-        let archive = written_archive("two", &Encryption::Recipients(vec![recipient]));
-        let unlocks = passphrase_file("two-pass", "hunter2");
-        let _scratch = Scratch::keeping([
-            first.clone(),
-            second.clone(),
-            archive.clone(),
-            unlocks.clone(),
-        ]);
+        let (first, _) = ssh_key_file(&scratch, "two-first", 14, Some("hunter2"));
+        let (second, recipient) = ssh_key_file(&scratch, "two-second", 15, Some("different"));
+        let archive = written_archive(&scratch, "two", &Encryption::Recipients(vec![recipient]));
+        let unlocks = passphrase_file(&scratch, "two-pass", "hunter2");
 
         let failure = opened_with(&archive, &[first.clone(), second.clone()], Some(&unlocks))
             .expect_err("the recipient key's passphrase was not the one given");
@@ -1029,9 +1016,13 @@ mod tests {
 
     #[test]
     fn a_key_that_stayed_locked_is_named_instead_of_being_called_the_wrong_key() {
-        let (key, recipient) = ssh_key_file("no-pass-key", 9, Some("hunter2"));
-        let archive = written_archive("no-pass", &Encryption::Recipients(vec![recipient]));
-        let _scratch = Scratch::keeping([key.clone(), archive.clone()]);
+        let scratch = TestScratch::create("crypt-no-pass");
+        let (key, recipient) = ssh_key_file(&scratch, "no-pass-key", 9, Some("hunter2"));
+        let archive = written_archive(
+            &scratch,
+            "no-pass",
+            &Encryption::Recipients(vec![recipient]),
+        );
 
         // No passphrase file, no variable, nobody to prompt: the case a timer runs in, and the
         // one that used to report a correct key as the wrong one.
@@ -1047,10 +1038,14 @@ mod tests {
 
     #[test]
     fn an_unrelated_key_is_still_reported_as_a_key_the_archive_was_not_encrypted_to() {
-        let (recipient_key, recipient) = ssh_key_file("unrelated-recipient", 10, None);
-        let (other, _) = ssh_key_file("unrelated-key", 11, None);
-        let archive = written_archive("unrelated", &Encryption::Recipients(vec![recipient]));
-        let _scratch = Scratch::keeping([recipient_key, other.clone(), archive.clone()]);
+        let scratch = TestScratch::create("crypt-unrelated");
+        let (_, recipient) = ssh_key_file(&scratch, "unrelated-recipient", 10, None);
+        let (other, _) = ssh_key_file(&scratch, "unrelated-key", 11, None);
+        let archive = written_archive(
+            &scratch,
+            "unrelated",
+            &Encryption::Recipients(vec![recipient]),
+        );
 
         let failure = opened_with(&archive, std::slice::from_ref(&other), None)
             .expect_err("a key that is not a recipient opens nothing");
@@ -1070,13 +1065,26 @@ mod tests {
          QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2\n\
          -----END RSA PRIVATE KEY-----\n";
 
+    /// Owner-only although the body is filler, because a test that writes a file shaped like a
+    /// key at the umask default is the pattern a real key would be copied from.
+    fn legacy_key_file(scratch: &TestScratch, name: &str) -> PathBuf {
+        let path = scratch_path(scratch, name);
+        let mut file = crate::perms::create_private_file(&path).expect("scratch key is creatable");
+        file.write_all(LEGACY_PEM_KEY.as_bytes())
+            .expect("scratch key is writable");
+        path
+    }
+
     #[test]
     fn a_key_age_cannot_use_is_named_as_that_rather_than_as_the_wrong_key() {
-        let (recipient_key, recipient) = ssh_key_file("unsupported-recipient", 12, None);
-        let archive = written_archive("unsupported", &Encryption::Recipients(vec![recipient]));
-        let key = scratch_path("unsupported-key");
-        std::fs::write(&key, LEGACY_PEM_KEY).expect("scratch key is writable");
-        let _scratch = Scratch::keeping([recipient_key, key.clone(), archive.clone()]);
+        let scratch = TestScratch::create("crypt-unsupported");
+        let (_, recipient) = ssh_key_file(&scratch, "unsupported-recipient", 12, None);
+        let archive = written_archive(
+            &scratch,
+            "unsupported",
+            &Encryption::Recipients(vec![recipient]),
+        );
+        let key = legacy_key_file(&scratch, "unsupported-key");
 
         let failure = opened_with(&archive, std::slice::from_ref(&key), None)
             .expect_err("a key age cannot use opens nothing");
@@ -1096,11 +1104,10 @@ mod tests {
     /// worse than the vague message it was meant to improve.
     #[test]
     fn a_key_age_cannot_use_does_not_stop_the_key_beside_it_from_opening_the_archive() {
-        let (good, recipient) = ssh_key_file("mixed-good", 16, None);
-        let archive = written_archive("mixed", &Encryption::Recipients(vec![recipient]));
-        let legacy = scratch_path("mixed-legacy");
-        std::fs::write(&legacy, LEGACY_PEM_KEY).expect("scratch key is writable");
-        let _scratch = Scratch::keeping([good.clone(), legacy.clone(), archive.clone()]);
+        let scratch = TestScratch::create("crypt-mixed");
+        let (good, recipient) = ssh_key_file(&scratch, "mixed-good", 16, None);
+        let archive = written_archive(&scratch, "mixed", &Encryption::Recipients(vec![recipient]));
+        let legacy = legacy_key_file(&scratch, "mixed-legacy");
 
         // Unusable key first, so it is not merely being reached after the archive is open.
         let plaintext = opened_with(&archive, &[legacy.clone(), good.clone()], None)
@@ -1113,11 +1120,14 @@ mod tests {
     /// they are already holding.
     #[test]
     fn a_run_with_no_usable_key_at_all_says_so_instead_of_reporting_no_match() {
-        let (recipient_key, recipient) = ssh_key_file("none-usable-recipient", 17, None);
-        let archive = written_archive("none-usable", &Encryption::Recipients(vec![recipient]));
-        let legacy = scratch_path("none-usable-legacy");
-        std::fs::write(&legacy, LEGACY_PEM_KEY).expect("scratch key is writable");
-        let _scratch = Scratch::keeping([recipient_key, legacy.clone(), archive.clone()]);
+        let scratch = TestScratch::create("crypt-none-usable");
+        let (_, recipient) = ssh_key_file(&scratch, "none-usable-recipient", 17, None);
+        let archive = written_archive(
+            &scratch,
+            "none-usable",
+            &Encryption::Recipients(vec![recipient]),
+        );
+        let legacy = legacy_key_file(&scratch, "none-usable-legacy");
 
         let failure = opened_with(&archive, std::slice::from_ref(&legacy), None)
             .expect_err("nothing usable was offered");
@@ -1129,24 +1139,27 @@ mod tests {
 
     #[test]
     fn only_a_passphrase_archive_is_the_one_that_asks_for_a_passphrase() {
+        let scratch = TestScratch::create("crypt-needs-passphrase");
         let passphrase = written_archive(
+            &scratch,
             "passphrase",
             &Encryption::Passphrase(Zeroizing::new("open sesame".to_string())),
         );
-        let _passphrase_scratch = Scratch::keeping([passphrase.clone()]);
         // The one case that must ask, and the only one.
         assert!(needs_passphrase(&passphrase).expect("header is readable"));
 
         // A recipient archive is opened with its private key. Asking for a passphrase here was
         // the bug: an escrow-key restore on a machine with no terminal had nothing to answer.
         let recipient = age::x25519::Identity::generate().to_public().to_string();
-        let keyed = written_archive("recipient", &Encryption::Recipients(vec![recipient]));
-        let _keyed_scratch = Scratch::keeping([keyed.clone()]);
+        let keyed = written_archive(
+            &scratch,
+            "recipient",
+            &Encryption::Recipients(vec![recipient]),
+        );
         assert!(!needs_passphrase(&keyed).expect("header is readable"));
 
         // A plaintext archive holds its secret in the clear and has nothing to unlock.
-        let plain = written_archive("plain", &Encryption::Plaintext);
-        let _plain_scratch = Scratch::keeping([plain.clone()]);
+        let plain = written_archive(&scratch, "plain", &Encryption::Plaintext);
         assert!(!needs_passphrase(&plain).expect("header is readable"));
     }
 

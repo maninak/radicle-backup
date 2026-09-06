@@ -41,6 +41,18 @@ pub struct Tool {
     secrets: Secrets,
 }
 
+/// What a probe said, when it was in a position to say anything.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Answer {
+    Yes,
+    No,
+    /// The command failed rather than answered. `said` is whatever it wrote to stderr, so the
+    /// report can name the reason instead of inventing one.
+    CouldNotAsk {
+        said: String,
+    },
+}
+
 impl Tool {
     /// `rad`, pointed at a specific Radicle home. Honours `RAD` so an operator can name a
     /// specific binary, the same way radicle-seed-prune does.
@@ -108,10 +120,25 @@ impl Tool {
         })
     }
 
-    /// Run and report only whether it succeeded. For probes where a non-zero exit is an
-    /// answer rather than an error, such as `git merge-base --is-ancestor`.
-    pub fn succeeds<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<bool> {
-        Ok(self.raw(args)?.status.success())
+    /// Run a probe whose non-zero exit is an answer, and keep "it could not answer" apart
+    /// from "no".
+    ///
+    /// `git merge-base --is-ancestor` exits 0 for yes and 1 for no, and 128 when it could not
+    /// answer at all: an oid it cannot resolve, an object it cannot read, a repository it
+    /// will not open. Folded into a `bool` that third case reads as "no", and "no" in both
+    /// directions is what a restore reports as a fork of the user's own peer history, which
+    /// is the most alarming thing this tool ever says. A verdict that severe must not rest on
+    /// an error nobody looked at.
+    pub fn answers<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Answer> {
+        let finished = self.raw(args)?;
+        Ok(match finished.status.code() {
+            Some(0) => Answer::Yes,
+            Some(1) => Answer::No,
+            // `None` is a signal, which is no more an answer than exit 128 is.
+            _ => Answer::CouldNotAsk {
+                said: String::from_utf8_lossy(&finished.stderr).trim().to_string(),
+            },
+        })
     }
 
     /// Run the child with its output visible, returning whether it exited successfully.

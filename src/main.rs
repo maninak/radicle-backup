@@ -114,11 +114,19 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
     // `doctor` that is the tally, and a `!` line flush against it reads as a tenth check the
     // tally forgot to count rather than as a note about the run.
     let touched = db::drain_touched();
-    if !touched.is_empty() {
+    // Drift belongs with the touched files: both are facts about the run rather than about the
+    // verb, and a reader who is told "the routing table is empty" has to be told that the
+    // table this build asks for is not the one that is there, or they go and start a node that
+    // is already running.
+    let drift = db::drain_schema_drift();
+    if !touched.is_empty() || !drift.is_empty() {
         ctx.term.blank();
     }
     for path in touched {
         ctx.term.warn(&db::touched_warning(&path));
+    }
+    for drift in &drift {
+        ctx.term.warn(&db::schema_drift_warning(drift));
     }
     outcome
 }

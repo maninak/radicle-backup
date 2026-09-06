@@ -43,49 +43,95 @@ impl Archive {
     }
 }
 
-/// Every archive of this identity in `directory`, newest first.
+/// Every archive of this identity in `directory`, newest first, and those that could not be
+/// examined.
 ///
 /// The alias is deliberately not part of the match. An identity that renames itself keeps the
 /// same node id, and archives taken under the old name are still that identity's archives.
-pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
+///
+/// The second list is every file named like one of this identity's archives that could not be
+/// examined, each with why, in the shape `Home::read_inventory` hands back what it could not
+/// read. Left out of the first list instead, one used to vanish: `prune` reported "freeing
+/// 0 B", never deleted it and never counted it against `--keep`, and `newest` could name the
+/// file beside it. A caller that can say so and carry on prints these; one that acts on the
+/// count or picks by it goes through `in_dir`, which refuses an incomplete listing.
+pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Error>)> {
     let short: String = node_id.chars().take(SHORT_NODE_ID_LEN).collect();
     let marker = format!("-{short}-");
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         // A directory that is not there holds no archives, which is an answer, not a failure.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
         Err(e) => return Err(Error::io(directory, e)),
     };
 
-    let mut archives: Vec<Archive> = entries
-        .filter_map(std::result::Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_string_lossy().into_owned();
-            let suffix = SUFFIXES.iter().find(|suffix| name.ends_with(**suffix))?;
-            let stamp = name
-                .split_once(&marker)?
-                .1
-                .strip_suffix(*suffix)?
-                .to_string();
-            Some(Archive {
-                bytes: entry.metadata().map(|meta| meta.len()).unwrap_or_default(),
-                taken: parse_stamp(&stamp),
-                // One short read per archive in a directory listing, which is cheaper than
-                // being wrong about whether somebody's key is readable.
-                encrypted: crate::crypt::looks_encrypted(&path).ok(),
-                path,
-            })
-        })
-        .collect();
+    let mut archives = Vec::new();
+    let mut unexamined = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::io(directory, e))?;
+        let path = entry.path();
+        let Some(stamp) = stamp_of(&path, &marker) else {
+            continue;
+        };
+        // `metadata`, which follows a symlink, and not `file_type`, which does not: an archive
+        // kept elsewhere and linked into the directory is still an archive of this identity,
+        // and it used to be dropped as "not a file".
+        let bytes = match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => meta.len(),
+            // A directory named like an archive is not one.
+            Ok(_) => continue,
+            // Gone between the listing and the look, which is an answer.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                unexamined.push(Error::io(&path, e));
+                continue;
+            }
+        };
+        archives.push(Archive {
+            bytes,
+            taken: parse_stamp(&stamp),
+            // One short read per archive in a directory listing, which is cheaper than being
+            // wrong about whether somebody's key is readable.
+            encrypted: crate::crypt::looks_encrypted(&path).ok(),
+            path,
+        });
+    }
 
     // By the stamp, never by the file name: the name begins with the alias, so sorting by it
     // would order archives by what the identity was called rather than by when they were
     // taken. One whose stamp did not parse sorts last, and ties break by name so the order is
     // total and the same on every run.
     archives.sort_by(|a, b| b.taken.cmp(&a.taken).then_with(|| b.name().cmp(&a.name())));
-    Ok(archives)
+    unexamined.sort_by_key(|e| e.to_string());
+    Ok((archives, unexamined))
+}
+
+/// The stamp in a file name that this tool wrote for this identity, or `None` for any other
+/// file.
+fn stamp_of(path: &Path, marker: &str) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let suffix = SUFFIXES.iter().find(|suffix| name.ends_with(**suffix))?;
+    Some(
+        name.split_once(marker)?
+            .1
+            .strip_suffix(*suffix)?
+            .to_string(),
+    )
+}
+
+/// Every archive of this identity in `directory`, newest first, or a failure when one of them
+/// could not be examined.
+///
+/// Fails closed rather than listing what it could see, because every caller of this acts on
+/// the list as if it were the whole of it: `prune` deletes by count, `--keep` keeps by count,
+/// and `newest` names a file to read. An archive that is there and could not be examined is
+/// news, not absence. Revisit when every caller goes through `listing` and says so itself.
+pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
+    let (archives, unexamined) = listing(directory, node_id)?;
+    match unexamined.into_iter().next() {
+        None => Ok(archives),
+        Some(first) => Err(first),
+    }
 }
 
 /// The newest archive of this identity in `directory`, if there is one.
@@ -292,6 +338,91 @@ mod tests {
         assert_eq!(found.iter().map(Archive::name).collect::<Vec<_>>(), [name]);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The bug: the listing kept only what `file_type` called a file, and `file_type` does not
+    /// follow a symlink. An archive kept on another disk and linked into the directory was
+    /// invisible to `ls`, `prune` and `--keep`, and its size was never read.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_archive_is_listed_with_the_size_of_what_it_points_at() {
+        let dir = scratch_dir("symlink");
+        let elsewhere = scratch_dir("symlink-target");
+        let name = "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst";
+        std::fs::write(elsewhere.join(name), b"twelve bytes").expect("fixture is writable");
+        std::os::unix::fs::symlink(elsewhere.join(name), dir.join(name))
+            .expect("a symlink is creatable");
+
+        let found = in_dir(&dir, NODE).expect("the directory is readable");
+        assert_eq!(found.iter().map(Archive::name).collect::<Vec<_>>(), [name]);
+        assert_eq!(
+            found[0].bytes, 12,
+            "the size is the target's, not the link's"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// The bug: an archive whose metadata could not be read was listed with `bytes: 0`, and
+    /// one whose kind could not be read was not listed at all. `prune` then reported "freeing
+    /// 0 B", never deleted it and never counted it against `--keep`, and `newest` could name
+    /// the file beside it.
+    #[cfg(unix)]
+    #[test]
+    fn an_archive_that_cannot_be_examined_is_reported_rather_than_dropped() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch_dir("unexamined");
+        let locked = scratch_dir("unexamined-target");
+        let hidden = "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst";
+        let seen = "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst";
+        touch(&locked, hidden);
+        touch(&dir, seen);
+        // A link into a directory this process may not enter, so the archive is there and
+        // cannot be examined.
+        std::os::unix::fs::symlink(locked.join(hidden), dir.join(hidden))
+            .expect("a symlink is creatable");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("mode is settable");
+        // Root and anything holding CAP_DAC_OVERRIDE walks straight through mode 000, so
+        // there is nothing it could fail to examine. Probed here rather than guessed from a
+        // user name, because the probe is the condition itself.
+        let walks_through_any_mode = std::fs::metadata(dir.join(hidden)).is_ok();
+
+        let listed = listing(&dir, NODE);
+        let refused = in_dir(&dir, NODE);
+        let newest_one = newest(&dir, NODE);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("mode is settable back");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&locked);
+
+        if walks_through_any_mode {
+            return;
+        }
+        let (archives, unexamined) = listed.expect("the directory itself is readable");
+        assert_eq!(
+            archives.iter().map(Archive::name).collect::<Vec<_>>(),
+            [seen],
+            "what could be examined is still listed"
+        );
+        let complaints: Vec<String> = unexamined.iter().map(ToString::to_string).collect();
+        assert_eq!(complaints.len(), 1, "{complaints:?}");
+        assert!(
+            complaints[0].contains(hidden),
+            "the complaint names the archive: {complaints:?}"
+        );
+        // The callers that delete by count or pick by name must not act on a listing with a
+        // hole in it.
+        assert!(
+            matches!(refused, Err(Error::Io { ref path, .. }) if path.ends_with(hidden)),
+            "an incomplete listing is not a listing: {refused:?}"
+        );
+        assert!(
+            newest_one.is_err(),
+            "the newest of an incomplete listing may be the one that could not be seen"
+        );
     }
 
     #[test]

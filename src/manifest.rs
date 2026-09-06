@@ -279,6 +279,17 @@ impl RepoRecord {
         matches!(self.visibility.as_deref(), Some("private"))
     }
 
+    /// Whether this repository is one Radicle announces.
+    ///
+    /// Not `!is_private()`, because a record whose identity document was never read has no
+    /// visibility at all and would pass that test. The checks that count public repositories
+    /// end in `rad sync --announce`, and announcing one that turns out to be private is the
+    /// single mistake they must never make, so an unread document is left out of the count and
+    /// the caller says how many it could not describe.
+    pub fn is_public(&self) -> bool {
+        matches!(self.visibility.as_deref(), Some("public"))
+    }
+
     /// Whether this repository's identity document was actually read.
     ///
     /// `visibility`, `delegates` and `allowed` all come out of that one document, so a record
@@ -291,9 +302,16 @@ impl RepoRecord {
     }
 
     /// Whether anything but this machine could hand this repository back: another node has
-    /// announced it, or its owner allowed a peer to hold it.
+    /// announced it, its owner allowed a peer to hold it, or somebody else delegates it.
+    ///
+    /// A second delegate holds the repository by definition, and leaving them out told the
+    /// owner of a jointly delegated private repository that it was "in no archive and on no
+    /// other node", which is a Fail over a copy that is sitting on the other delegate's disk.
+    /// The same fact `has_nowhere_to_fetch_from` counts on, said about a different question.
     pub fn has_another_holder(&self) -> bool {
-        self.other_seeds.is_some_and(|seeds| seeds > 0) || !self.allowed.is_empty()
+        self.other_seeds.is_some_and(|seeds| seeds > 0)
+            || !self.allowed.is_empty()
+            || self.delegates.len() > 1
     }
 
     /// Whether a fetch has anybody at all to ask about this repository.
@@ -305,9 +323,14 @@ impl RepoRecord {
     ///
     /// A delegate list that is empty means nothing was read, not that there is nobody, so
     /// that case falls through to the fetch: an unnecessary fetch costs a few seconds, and a
-    /// skipped comparison costs a peer history.
+    /// skipped comparison costs a peer history. The sole delegate has to be us for the same
+    /// reason: a repository delegated to one person who is somebody else has that person to
+    /// ask.
     pub fn has_nowhere_to_fetch_from(&self) -> bool {
-        self.is_private() && self.allowed.is_empty() && self.delegates.len() == 1
+        self.is_private()
+            && self.allowed.is_empty()
+            && self.delegates.len() == 1
+            && self.is_delegate
     }
 }
 
@@ -391,10 +414,24 @@ mod tests {
             "a private repository allowed to nobody is on this disk alone"
         );
 
-        record.allowed = vec!["did:key:z6MkjDYUKMUeY58Vtr8dGJrHRvnTfjKWVGCBYJDVTHXsXzm5".into()];
+        record.allowed = vec![SOMEBODY_ELSE.to_string()];
         assert!(
             record.has_another_holder(),
             "a private repository allowed to a seed can be fetched back from it"
+        );
+
+        record.allowed = Vec::new();
+        record.delegates = vec![ONLY_US.to_string(), SOMEBODY_ELSE.to_string()];
+        assert!(
+            record.has_another_holder(),
+            "a second delegate holds the repository by definition, so it is not lost with this \
+             disk"
+        );
+
+        record.delegates = vec![ONLY_US.to_string()];
+        assert!(
+            !record.has_another_holder(),
+            "being the only delegate is what having nobody else looks like"
         );
     }
 
@@ -448,6 +485,49 @@ mod tests {
             !record.has_nowhere_to_fetch_from(),
             "a repository nothing could ask about is not a repository nobody holds"
         );
+
+        record.visibility = Some("private".to_string());
+        record.delegates = vec![SOMEBODY_ELSE.to_string()];
+        record.is_delegate = false;
+        assert!(
+            !record.has_nowhere_to_fetch_from(),
+            "a repository whose one delegate is somebody else has that somebody to ask"
+        );
+    }
+
+    /// Every check that counts public repositories ends its remedy in `rad sync --announce`,
+    /// and a record whose identity document was never read has no visibility at all. Told
+    /// apart by `!is_private()`, such a record joined the public list, so a home with no `rad`
+    /// on PATH was told to announce repositories that may well be private.
+    #[test]
+    fn a_repository_nothing_could_describe_is_neither_public_nor_private() {
+        let mut record = RepoRecord {
+            rid: "rad:zAAA".to_string(),
+            name: None,
+            visibility: None,
+            allowed: Vec::new(),
+            is_delegate: true,
+            delegates: Vec::new(),
+            scope: None,
+            policy: None,
+            head: None,
+            refs: 0,
+            sigrefs: BTreeMap::new(),
+            other_seeds: None,
+            bundle: None,
+        };
+        assert!(!record.is_private());
+        assert!(!record.is_public());
+        assert!(!record.identity_was_read());
+
+        record.visibility = Some("public".to_string());
+        assert!(record.is_public());
+        record.visibility = Some("private".to_string());
+        assert!(!record.is_public());
+        // A visibility a later heartwood adds is not one this build may guess at either way.
+        record.visibility = Some("unlisted".to_string());
+        assert!(!record.is_public());
+        assert!(!record.is_private());
     }
 
     const ONLY_US: &str = "did:key:z6MkkfM3tPXNPrPevKr3uSiQtHPuwnNhu2yUVjgd2jXVsVz5";

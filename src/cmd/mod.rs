@@ -186,8 +186,15 @@ impl Drop for Scratch {
 /// verbatim out of somebody else's archive, put the 24-word mnemonic in the title of the
 /// recovery sheet. Scanning once means an inserted value is never looked at again, so no
 /// value can name another key, whatever it holds.
+///
+/// Sized for the template AND every value before the first byte goes in, because one of the
+/// documents this fills is the recovery sheet: growing the buffer frees the old one with a
+/// partial copy of the key still in it, which the `Zeroizing` around the result never reaches.
+/// An over-estimate, since a substituted marker also removes the `{{KEY}}` it replaced, and a
+/// buffer larger than needed is the harmless direction.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
-    let mut filled = String::with_capacity(template.len());
+    let room = template.len() + values.iter().map(|(_, value)| value.len()).sum::<usize>();
+    let mut filled = String::with_capacity(room);
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
         let after = &rest[start + 2..];

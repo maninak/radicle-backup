@@ -232,7 +232,9 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         record,
     )?);
     checks.push(check_archive_location(home.path(), newest.as_ref(), record));
-    checks.push(check_private_coverage(&inventory, record).qualified_by_unread(unread));
+    checks.push(
+        check_private_coverage(&inventory, record, newest.as_ref()).qualified_by_unread(unread),
+    );
     checks.push(check_sole_delegate(&inventory).qualified_by_unread(unread));
     checks.push(check_replication(&inventory, &routing).qualified_by_unread(unread));
     checks.push(check_second_key_copy(&stored));
@@ -306,6 +308,24 @@ impl Aside {
     }
 }
 
+/// Why the archive the record names was not among the ones listed here.
+///
+/// "Is not there now" was said from the record alone, without looking, and `--output
+/// /backups/mine.tar.zst.age` names a file this tool writes and then does not recognise: the
+/// listing wants a `-<short node id>-` in the name. So a report said an archive was gone while
+/// it sat there, and `check_archive_location` two checks down said it existed, in one run.
+fn not_listed_here(path: &str) -> String {
+    // Anything the filesystem will not answer about is not proof of absence either.
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!("{path} is not there now"),
+        Err(e) => format!("{path} could not be looked at: {e}"),
+        Ok(_) => format!(
+            "{path} is there, but is not named the way this tool lists archives, so no verb \
+             that takes an archive will find it on its own"
+        ),
+    }
+}
+
 /// The record's own archive, when it is newer than the file found on this disk.
 ///
 /// Both ages are needed, so a record or a file whose stamp does not parse produces nothing:
@@ -365,7 +385,7 @@ fn check_backup_freshness(
             days: record.age_in_days(now),
             named: format!("the newest {} archive this tool recorded", record.tier),
             caveat: Some(Aside::NotAtHand(match &record.archive {
-                Some(path) => format!("{path} is not there now"),
+                Some(path) => not_listed_here(path),
                 None => "it went to stdout, so this tool never knew where it landed".to_string(),
             })),
         },
@@ -376,7 +396,7 @@ fn check_backup_freshness(
                     Verdict::Unknown,
                     format!(
                         "no archive of this identity in {looked_in}, and the record of earlier \
-                         ones no longer parses"
+                         ones could not be read"
                     ),
                 )
                 .with_remedy("take another to replace it: rad backup");
@@ -524,12 +544,13 @@ fn check_archive_encryption(
                 Verdict::Pass,
                 format!("{name} is encrypted to a key, and the key offered here opens it"),
             ),
-            // The key is here and locked, so nothing was learnt about the archive either way.
-            // Reported as a Fail this was a permanent red line, and an exit 3 every night, for
-            // the setup the README asks for.
-            Err(Error::KeysStayedLocked { what, remedy }) => {
-                Check::new(TOPIC, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy)
-            }
+            // The key never came unlocked, or came unlocked and was of a type age cannot use.
+            // Either way nothing was learnt about the archive, and reported as a Fail this was
+            // a permanent red line, and an exit 3 every night, for the setup the README asks
+            // for.
+            Err(
+                Error::KeysStayedLocked { what, remedy } | Error::KeyNotUsable { what, remedy },
+            ) => Check::new(TOPIC, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy),
             Err(e) => Check::new(TOPIC, Verdict::Fail, format!("{name} did not open: {e}"))
                 .with_remedy(
                     "an archive whose key is gone is not a backup; take another one you can open",
@@ -601,12 +622,32 @@ fn check_archive_location(
     }
 }
 
-fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>) -> Check {
+/// Whether the record is about the archive this run found on the disk.
+///
+/// `Record::carries` answers off the record, which is hearsay about a file this run may never
+/// have seen: the timer may run as another user, the archive may have been pruned or moved
+/// since, and `restore.sh` writes no record at all. The freshness and encryption checks were
+/// moved onto the file for exactly that reason. The coverage check below still has only the
+/// record to go on, because knowing which repositories are inside an archive means opening it,
+/// so it says whose word it is taking instead.
+fn record_is_about(record: &state::Record, newest: Option<&crate::archives::Archive>) -> bool {
+    match (record.archive.as_deref(), newest) {
+        (Some(recorded), Some(found)) => std::path::Path::new(recorded) == found.path,
+        _ => false,
+    }
+}
+
+fn check_private_coverage(
+    inventory: &Inventory,
+    record: Option<&state::Record>,
+    newest: Option<&crate::archives::Archive>,
+) -> Check {
     const TOPIC: &str = "private repositories";
     let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
     if private.is_empty() {
         return Check::new(TOPIC, Verdict::Pass, "there are none to lose");
     }
+    let vouched = record.is_some_and(|record| record_is_about(record, newest));
 
     // A private repository is not automatically the only copy. Its owner can allow peers to
     // hold it, and the routing table knows when one announces it. Those are different degrees
@@ -617,11 +658,32 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
         .filter(|repo| !record.is_some_and(|record| record.carries(&repo.rid)))
         .collect();
     if missing.is_empty() {
-        return Check::new(
-            TOPIC,
-            Verdict::Pass,
-            format!("all {} of them are in the newest archive", private.len()),
-        );
+        return match vouched {
+            true => Check::new(
+                TOPIC,
+                Verdict::Pass,
+                format!(
+                    "all {} of them are in the newest archive here",
+                    private.len()
+                ),
+            ),
+            // A pass on the strength of a record about a file nothing here matched. Said as an
+            // unknown, because "they are all backed up" about an archive this run never found
+            // is the shape of claim this whole report exists not to make.
+            false => Check::new(
+                TOPIC,
+                Verdict::Unknown,
+                format!(
+                    "all {} of them are in the last archive this tool recorded, which is not \
+                     the newest one found here",
+                    private.len()
+                ),
+            )
+            .with_remedy(
+                "point --dir at where that archive went, or take one here with `rad backup \
+                 --repos private`",
+            ),
+        };
     }
     let alone = missing
         .iter()
@@ -630,8 +692,8 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
     let (count, verb) = (missing.len(), term::is_or_are(missing.len()));
     let detail = if alone == 0 {
         format!(
-            "{count} of {} {verb} in no archive, though every one of those is allowed to a peer \
-             that could hold a copy",
+            "{count} of {} {verb} in no archive, though somebody else holds every one of \
+             those: a delegate, an allowed peer, or a node announcing it",
             private.len(),
         )
     } else if alone == missing.len() {
@@ -700,10 +762,14 @@ fn check_sole_delegate(inventory: &Inventory) -> Check {
 }
 
 fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check {
+    // `is_public`, not `!is_private`: a record whose identity document was never read has no
+    // visibility, and passing it here put a repository that may well be private into a list
+    // whose remedy is `rad sync --announce`. The caller qualifies the count with how many
+    // could not be described.
     let alone: Vec<&str> = inventory
         .records
         .iter()
-        .filter(|repo| !repo.is_private())
+        .filter(|repo| repo.is_public())
         .filter(|repo| routing.get(&repo.rid).copied().unwrap_or(0) == 0)
         .map(|repo| repo.display_name())
         .collect();
@@ -768,7 +834,9 @@ fn check_sigrefs_propagation(
 
     let mut here_only = Vec::new();
     for repo in &inventory.records {
-        if repo.is_private() {
+        // Only a repository known to be public. One whose identity document was never read is
+        // not known to be anything, and this list ends in `rad sync --announce`.
+        if !repo.is_public() {
             continue;
         }
         // No signed refs of our own means nothing of ours to propagate, not work stuck here.
@@ -838,7 +906,7 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
             return Check::new(
                 TOPIC,
                 Verdict::Unknown,
-                "the record of where this home came from no longer parses, so whether another \
+                "the record of where this home came from could not be read, so whether another \
                  machine holds the same key is not known here",
             )
             .with_remedy(
@@ -912,6 +980,17 @@ mod tests {
     use age::secrecy::ExposeSecret as _;
 
     use super::*;
+    use crate::key::tests::TestScratch;
+
+    /// A key file for a test, owner-only inside an owner-only directory, because these used
+    /// to be `std::fs::write` into `/tmp` at the umask default under a pid-guessable name.
+    fn secret_file(path: &std::path::Path, contents: &str) {
+        use std::io::Write as _;
+
+        let mut file = crate::perms::create_private_file(path).expect("scratch file is creatable");
+        file.write_all(contents.as_bytes())
+            .expect("scratch file is writable");
+    }
 
     /// Freshness judged with nothing on disk, which is the case every state-record test is
     /// about: what the tool remembers, when the directory it looked in holds nothing.
@@ -1011,11 +1090,11 @@ mod tests {
         // one of the checks it exists to police reports a conformance it is not checking.
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
-        let path = std::env::temp_dir().join(format!("rad-backup-topics-{}", std::process::id()));
-        std::fs::write(&path, &*openssh).expect("scratch key is writable");
+        let scratch = TestScratch::create("doctor-topics");
+        let path = scratch.path_of("radicle");
+        secret_file(&path, &openssh);
         let secret = SecretKey::read(&path).expect("key is readable");
         let key = check_key_protection(&secret, &path);
-        let _ = std::fs::remove_file(path);
 
         vec![
             key,
@@ -1028,7 +1107,7 @@ mod tests {
             check_archive_encryption(&Default::default(), None, None)
                 .expect("no archive is not an error"),
             check_archive_location(std::path::Path::new("/nowhere"), None, None),
-            check_private_coverage(&empty, None),
+            check_private_coverage(&empty, None, None),
             check_sole_delegate(&empty),
             check_replication(&empty, &BTreeMap::new()),
             check_second_key_copy(&state::Stored::Absent),
@@ -1100,8 +1179,9 @@ mod tests {
     fn a_plaintext_key_fails_and_says_how_to_fix_it() {
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
-        let path = std::env::temp_dir().join(format!("rad-backup-doctor-{}", std::process::id()));
-        std::fs::write(&path, &*openssh).expect("scratch key is writable");
+        let scratch = TestScratch::create("doctor-plaintext-key");
+        let path = scratch.path_of("radicle");
+        secret_file(&path, &openssh);
 
         let secret = SecretKey::read(&path).expect("key is readable");
         let check = check_key_protection(&secret, &path);
@@ -1111,8 +1191,6 @@ mod tests {
         let remedy = check.remedy.clone().expect("a failing key names its fix");
         assert!(remedy.contains(&path.display().to_string()), "{remedy}");
         assert!(!remedy.contains("RAD_HOME"), "{remedy}");
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -1253,6 +1331,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The freshness check said "is not there now" straight off the record, without looking.
+    /// `rad backup --output /backups/mine.tar.zst.age` writes a name the listing does not
+    /// recognise (it wants the short node id in it), so a report called an archive gone while
+    /// it sat on the disk, and `archive location` in the same report said it was there.
+    #[test]
+    fn an_archive_the_listing_does_not_recognise_is_not_reported_as_gone() {
+        let scratch = crate::cmd::Scratch::create(std::env::temp_dir().as_path())
+            .expect("a working directory is creatable");
+        let here = scratch.path_of("mine.tar.zst.age");
+        std::fs::write(&here, b"not an archive, but a file that is there")
+            .expect("the scratch is writable");
+
+        let said = not_listed_here(&here.display().to_string());
+        assert!(said.contains("is there"), "{said}");
+        assert!(!said.contains("is not there now"), "{said}");
+
+        let gone = scratch.path_of("never-written.tar.zst.age");
+        let said = not_listed_here(&gone.display().to_string());
+        assert!(said.contains("is not there now"), "{said}");
+    }
+
     #[test]
     fn an_archive_sealed_with_a_passphrase_passes_without_asking_for_it() {
         let dir = std::env::temp_dir().join(format!("rad-backup-pass-{}", std::process::id()));
@@ -1272,7 +1371,8 @@ mod tests {
 
     #[test]
     fn an_archive_encrypted_to_a_key_is_unknown_until_a_key_is_offered_and_passes_once_it_is() {
-        let dir = std::env::temp_dir().join(format!("rad-backup-keyed-{}", std::process::id()));
+        let scratch = TestScratch::create("doctor-keyed");
+        let dir = scratch.path_of("backups");
         let identity = age::x25519::Identity::generate();
         let keyed = crate::crypt::Encryption::Recipients(vec![identity.to_public().to_string()]);
         let archive = archive_at(&dir, "keyed.tar.zst.age", &keyed);
@@ -1288,8 +1388,7 @@ mod tests {
         );
 
         let key_file = dir.join("identity.txt");
-        std::fs::write(&key_file, identity.to_string().expose_secret())
-            .expect("scratch key is writable");
+        secret_file(&key_file, identity.to_string().expose_secret());
         let offered = crate::crypt::Identities {
             files: vec![key_file],
             ..Default::default()
@@ -1299,13 +1398,12 @@ mod tests {
         assert_eq!(opened.verdict, Verdict::Pass, "{}", opened.detail);
 
         let stranger = dir.join("stranger.txt");
-        std::fs::write(
+        secret_file(
             &stranger,
             age::x25519::Identity::generate()
                 .to_string()
                 .expose_secret(),
-        )
-        .expect("scratch key is writable");
+        );
         let wrong = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![stranger],
@@ -1316,8 +1414,6 @@ mod tests {
         )
         .expect("the header is readable");
         assert_eq!(wrong.verdict, Verdict::Fail, "{}", wrong.detail);
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The bug: an ssh key with a passphrase on it is what the README tells people to have,
@@ -1326,7 +1422,8 @@ mod tests {
     /// worse and stopped to ask for the passphrase.
     #[test]
     fn a_key_that_stayed_locked_is_a_question_doctor_could_not_put_rather_than_a_failure() {
-        let dir = std::env::temp_dir().join(format!("rad-backup-locked-{}", std::process::id()));
+        let scratch = TestScratch::create("doctor-locked");
+        let dir = scratch.path_of("backups");
         let seed = zeroize::Zeroizing::new([7u8; 32]);
         let identity = crate::key::identity_from_seed(&seed).expect("a seed makes a key");
         let keyed = crate::crypt::Encryption::Recipients(vec![
@@ -1336,13 +1433,12 @@ mod tests {
 
         let passphrase = zeroize::Zeroizing::new("open sesame".to_string());
         let key_file = dir.join("id_ed25519");
-        std::fs::write(
+        secret_file(
             &key_file,
             crate::key::openssh_from_seed(&seed, Some(&passphrase))
                 .expect("the key is writable")
                 .as_str(),
-        )
-        .expect("scratch key is writable");
+        );
 
         // Interactive on purpose, which is how `doctor` is usually called. What this asserts
         // is the verdict; that the check hands age a non-interactive copy of the identities
@@ -1367,7 +1463,7 @@ mod tests {
 
         // The same key, unlocked by a passphrase file, opens it.
         let passphrase_file = dir.join("passphrase");
-        std::fs::write(&passphrase_file, passphrase.as_str()).expect("scratch file is writable");
+        secret_file(&passphrase_file, passphrase.as_str());
         let opened = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![key_file],
@@ -1379,8 +1475,6 @@ mod tests {
         )
         .expect("the header is readable");
         assert_eq!(opened.verdict, Verdict::Pass, "{}", opened.detail);
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     const ME: &str = "z6MkAAA";
@@ -1540,6 +1634,43 @@ mod tests {
             let check = check_second_key_copy(&stored);
             assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
             assert!(check.remedy.is_some(), "{}", check.detail);
+        }
+    }
+
+    /// The coverage answer comes off the state record, which is hearsay about a file this run
+    /// may never have seen: the timer may run as another user, and the archive it names may
+    /// have been pruned or moved. Every other check moved onto the file on disk for that
+    /// reason, and this one could not, so it has to say whose word it is taking. It used to
+    /// print "all 2 of them are in the newest archive" as a Pass in the same report whose
+    /// freshness line said that archive was not there.
+    #[test]
+    fn coverage_taken_off_the_record_is_not_a_pass_about_the_archive_that_is_here() {
+        let mut private = public_repo_signed_at("rad:zAAA", "aaa");
+        private.visibility = Some("private".to_string());
+        let inventory = holding(vec![private]);
+
+        let mut record = record();
+        record.archive = Some("/backups/one.tar.zst.age".to_string());
+        record.carried = ["rad:zAAA".to_string()].into_iter().collect();
+
+        let found = crate::archives::Archive {
+            path: std::path::PathBuf::from("/backups/one.tar.zst.age"),
+            bytes: 1,
+            taken: None,
+            encrypted: Some(true),
+        };
+        let check = check_private_coverage(&inventory, Some(&record), Some(&found));
+        assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
+
+        // The same record beside a different archive, and beside none at all.
+        let other = crate::archives::Archive {
+            path: std::path::PathBuf::from("/backups/another.tar.zst.age"),
+            ..found
+        };
+        for newest in [Some(&other), None] {
+            let check = check_private_coverage(&inventory, Some(&record), newest);
+            assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
+            assert!(check.detail.contains("recorded"), "{}", check.detail);
         }
     }
 

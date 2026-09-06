@@ -161,6 +161,17 @@ fn timer_verdict(said: &str, load_state: &str) -> Option<String> {
         .map(|_| "disabled".to_string())
 }
 
+/// Whether what `systemctl is-enabled` said means the timer will fire.
+///
+/// `enabled-runtime` is a timer that is on until the next reboot, and reading only the exact
+/// word `enabled` told the owner of one that no backup was scheduled on the machine. Every
+/// other answer systemd gives (`static`, `indirect`, `masked`, `disabled`, `linked`, and the
+/// `unknown` this tool writes when systemd could not be reached at all) is not this tool's
+/// timer being on, so the prefix is the whole test.
+fn timer_is_on(state: &str) -> bool {
+    state.starts_with("enabled")
+}
+
 fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
     let is_enabled = systemctl.spoken(&["--user", "is-enabled", TIMER])?;
     // Only when there is nothing to go on, so the ordinary path still costs one spawn.
@@ -197,9 +208,10 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
         })
         .filter(|what| !what.is_empty() && what != "success");
 
+    let is_on = timer_is_on(&timer_state);
     if ctx.global.json {
         return ctx.term.print_json(&serde_json::json!({
-            "enabled": timer_state == "enabled",
+            "enabled": is_on,
             // The word systemd used, because "enabled: false" cannot tell a timer that is off
             // from a systemd that could not be reached.
             "state": timer_state,
@@ -210,13 +222,19 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
     if timer_state == "unknown" {
         ctx.term
             .detail("run `systemctl --user is-enabled rad-backup.timer` on the machine itself");
-    } else if timer_state == "enabled" {
+    } else if is_on {
         ctx.term.ok(&format!(
             "the timer is on{}",
             next_run
                 .map(|at| format!(", next run {at}"))
                 .unwrap_or_default()
         ));
+        if timer_state == "enabled-runtime" {
+            ctx.term.detail(
+                "only until the next reboot; `systemctl --user enable rad-backup.timer` makes \
+                 it permanent",
+            );
+        }
     } else {
         ctx.term.warn("no backup is scheduled on this machine");
         ctx.term.detail("turn one on with `rad backup schedule`");
@@ -471,6 +489,21 @@ fn describe(every: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `systemctl is-enabled` answers `enabled-runtime` for a timer that is on until the next
+    /// reboot. Compared against the exact word `enabled`, that read as off, so the owner of a
+    /// live timer was told no backup was scheduled on the machine and sent to create one.
+    #[test]
+    fn a_timer_enabled_only_until_the_next_reboot_is_still_a_timer_that_is_on() {
+        assert!(super::timer_is_on("enabled"));
+        assert!(super::timer_is_on("enabled-runtime"));
+
+        for off in [
+            "disabled", "static", "indirect", "masked", "linked", "unknown", "",
+        ] {
+            assert!(!super::timer_is_on(off), "{off}");
+        }
+    }
+
     use super::*;
 
     /// The bug: an unreadable file was read as no file, so `rad backup schedule` overwrote a

@@ -14,6 +14,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const EXIT_CHECKS_FAILED: u8 = 3;
 /// Exit code for a run that stopped on purpose to avoid destroying something.
 pub const EXIT_REFUSED: u8 = 4;
+/// Exit code for a run that simply failed. `ExitCode::FAILURE` in a name the tests can compare.
+pub const EXIT_FAILURE: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -78,6 +80,13 @@ pub enum Error {
     #[error("{what}\n{remedy}")]
     KeysStayedLocked { what: String, remedy: String },
 
+    /// A key was unlocked with the passphrase given and still could not be used, which age
+    /// reports the same way whether the passphrase was wrong or the key is of a type it
+    /// cannot use. A separate variant for the same reason as the one above: this is a
+    /// question nobody answered, not a proof that the archive cannot be opened.
+    #[error("{what}\n{remedy}")]
+    KeyNotUsable { what: String, remedy: String },
+
     #[error("{0}")]
     Json(#[from] serde_json::Error),
 
@@ -117,10 +126,22 @@ impl Error {
         }
     }
 
+    /// `EXIT_REFUSED` means the run stopped because going on would have been unsafe, and
+    /// everything is intact. A key that stayed locked or could not be used is neither: it is
+    /// the ordinary failure of not being given what was needed, and a script that reads it as
+    /// "refused, safe to try again later" loops on a typo. Those two exit `1`, the same code
+    /// as a wrong passphrase on the archive itself, which is the same news about the other
+    /// secret.
     pub fn exit_code(&self) -> ExitCode {
+        ExitCode::from(self.exit_status())
+    }
+
+    /// The same answer as a number, because `ExitCode` cannot be compared and an exit code
+    /// nothing asserts is one the README can drift away from.
+    pub fn exit_status(&self) -> u8 {
         match self {
-            Self::Refused { .. } | Self::KeysStayedLocked { .. } => ExitCode::from(EXIT_REFUSED),
-            _ => ExitCode::FAILURE,
+            Self::Refused { .. } => EXIT_REFUSED,
+            _ => EXIT_FAILURE,
         }
     }
 }
@@ -144,5 +165,34 @@ impl From<age::DecryptError> for Error {
                 "{other}: if the passphrase was right, this archive is damaged"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `4` is documented as "everything is intact and nothing was written, because doing it
+    /// would have been unsafe". A key that never unlocked, or one age could not use, is not
+    /// that: nothing was unsafe, the run was simply not given what it needed. Both used to
+    /// exit `4`, so a script reading `4` as "safe to retry later" looped on a typo. They exit
+    /// `1`, the code a wrong passphrase on the archive already used.
+    #[test]
+    fn only_a_refusal_on_safety_grounds_exits_four() {
+        let locked = Error::KeysStayedLocked {
+            what: "it stayed locked".to_string(),
+            remedy: "unlock it".to_string(),
+        };
+        let unusable = Error::KeyNotUsable {
+            what: "it could not be used".to_string(),
+            remedy: "check the passphrase".to_string(),
+        };
+        assert_eq!(locked.exit_status(), EXIT_FAILURE);
+        assert_eq!(unusable.exit_status(), EXIT_FAILURE);
+        assert_eq!(Error::WrongPassphrase.exit_status(), EXIT_FAILURE);
+        assert_eq!(
+            Error::refused("nothing was written", "decide, then run it again").exit_status(),
+            EXIT_REFUSED
+        );
     }
 }

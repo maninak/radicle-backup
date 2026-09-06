@@ -165,6 +165,53 @@ impl Home {
         }
     }
 
+    /// What a restore into this home would write over, besides the secret key.
+    ///
+    /// Occupancy is a wider question than "is there an identity". A restore replaces
+    /// `config.json` and the node databases, and fetches every bundle with `--force`, which
+    /// rewinds every ref in every stored repository, other peers' namespaces and their signed
+    /// refs included. A home whose key `move` retired, or whose key was deleted by hand, still
+    /// holds all of that, and asking only about the key walked a restore past both the refusal
+    /// and the confirmation: a stale archive then took its refs over newer ones that, for a
+    /// private repository, nobody else holds.
+    ///
+    /// Named rather than counted, because a refusal that says what is there is one somebody
+    /// can act on. Anything the filesystem will not answer about counts as present, because
+    /// being wrong towards "present" costs one `--force` and being wrong the other way costs
+    /// the refs.
+    pub fn what_a_restore_would_overwrite(&self) -> Vec<&'static str> {
+        let mut found = Vec::new();
+        if !self.is_absent(&self.storage()) && !self.is_empty_dir(&self.storage()) {
+            found.push("stored repositories");
+        }
+        if !self.is_absent(&self.node_dir()) && !self.is_empty_dir(&self.node_dir()) {
+            found.push("node databases");
+        }
+        if !self.is_absent(&self.config()) {
+            found.push("config.json");
+        }
+        if !self.is_absent(&crate::cmd::migrate::retired_path(&self.keys_dir())) {
+            found.push("a retired key");
+        }
+        found
+    }
+
+    /// Whether nothing is at `path`. Anything the filesystem refuses to answer about counts as
+    /// something being there, because every caller is deciding whether it is safe to write.
+    fn is_absent(&self, path: &Path) -> bool {
+        matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    /// Whether `path` is a directory with nothing in it. `rad auth` leaves an empty `storage`
+    /// and an empty `node`, and refusing over those would refuse the ordinary case of restoring
+    /// into a home somebody has just created. A directory that cannot be listed is not empty.
+    fn is_empty_dir(&self, path: &Path) -> bool {
+        match std::fs::read_dir(path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => false,
+        }
+    }
+
     pub fn require_identity(&self) -> Result<()> {
         match self.holds_identity()? {
             true => Ok(()),

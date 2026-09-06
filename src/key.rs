@@ -187,7 +187,7 @@ pub fn identity_from_seed(seed: &Zeroizing<[u8; 32]>) -> Result<Identity> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Kostis' own public key, and the DID and fingerprint `rad self` prints for it on rad
@@ -221,7 +221,8 @@ mod tests {
         let passphrase = Zeroizing::new("correct horse battery staple".to_string());
         let openssh = openssh_from_seed(&seed, Some(&passphrase)).expect("key is buildable");
 
-        let path = scratch_file("encrypted-key", &openssh);
+        let scratch = TestScratch::create("key-encrypted");
+        let path = scratch_file(&scratch, "encrypted-key", &openssh);
         let key = SecretKey::read(&path).expect("key is readable");
         assert!(key.protection().is_encrypted());
         assert_eq!(*key.seed(Some(&passphrase)).expect("decrypts"), *seed);
@@ -231,7 +232,6 @@ mod tests {
             key.seed(Some(&wrong)),
             Err(Error::WrongPassphrase)
         ));
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -239,18 +239,19 @@ mod tests {
         let seed = Zeroizing::new([9u8; 32]);
         let openssh = openssh_from_seed(&seed, None).expect("key is buildable");
 
-        let path = scratch_file("plaintext-key", &openssh);
+        let scratch = TestScratch::create("key-plaintext");
+        let path = scratch_file(&scratch, "plaintext-key", &openssh);
         let key = SecretKey::read(&path).expect("key is readable");
         assert_eq!(key.protection(), Protection::Plaintext);
         assert_eq!(*key.seed(None).expect("needs no passphrase"), *seed);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn the_identity_rebuilt_from_a_seed_matches_the_one_stored_beside_it() {
         let seed = Zeroizing::new([3u8; 32]);
         let openssh = openssh_from_seed(&seed, None).expect("key is buildable");
-        let path = scratch_file("identity-key", &openssh);
+        let scratch = TestScratch::create("key-identity");
+        let path = scratch_file(&scratch, "identity-key", &openssh);
         let stored = SecretKey::read(&path).expect("key is readable");
 
         let from_seed = identity_from_seed(&seed).expect("seed yields an identity");
@@ -258,13 +259,103 @@ mod tests {
             from_seed.did(),
             stored.identity().expect("key has a public half").did()
         );
-        let _ = std::fs::remove_file(path);
     }
 
-    fn scratch_file(name: &str, contents: &str) -> std::path::PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("rad-backup-test-{name}-{}", std::process::id()));
-        std::fs::write(&path, contents).expect("scratch file is writable");
+    /// A key file for a test, owner-only inside an owner-only directory, because it used to be
+    /// `std::fs::write` straight into `/tmp` under a name anyone could guess from the pid.
+    fn scratch_file(scratch: &TestScratch, name: &str, contents: &str) -> std::path::PathBuf {
+        use std::io::Write as _;
+
+        let path = scratch.path_of(name);
+        let mut file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
+        file.write_all(contents.as_bytes())
+            .expect("scratch file is writable");
         path
+    }
+
+    /// The guard this crate's tests write key material behind: nothing but this puts a
+    /// fixture in `/tmp`.
+    ///
+    /// `crate::cmd::Scratch` already does the two things that matter, an owner-only directory
+    /// that refuses to exist twice and a `Drop` that removes it however the test ends. What it
+    /// does not do is tell tests apart: it names its directory after the process id alone, and
+    /// every test in a binary shares one process, so two tests creating one under the same
+    /// parent would refuse each other. Each test therefore gets its own parent, named after
+    /// the test, with the `Scratch` inside it.
+    pub(crate) struct TestScratch {
+        parent: std::path::PathBuf,
+        // An `Option` only so that `Drop` can remove the inner directory BEFORE the parent
+        // holding it, because a struct's fields drop after its own `Drop` has run.
+        scratch: Option<crate::cmd::Scratch>,
+    }
+
+    impl TestScratch {
+        /// `name` has to be unique across the test binary, because two tests sharing one
+        /// would refuse each other the way a squatted directory is refused.
+        pub(crate) fn create(name: &str) -> Self {
+            let parent =
+                std::env::temp_dir().join(format!("rad-backup-test-{name}-{}", std::process::id()));
+            // Owner-only and never pre-existing, for the same reason the inner directory is:
+            // a parent somebody else made first would be a parent they can rename from under
+            // the test. A leftover from a crashed run with this pid fails here, on purpose.
+            crate::perms::create_private_dir(&parent)
+                .expect("the test's own scratch parent is creatable and was not already there");
+            let scratch =
+                crate::cmd::Scratch::create(&parent).expect("the test's scratch is creatable");
+            Self {
+                parent,
+                scratch: Some(scratch),
+            }
+        }
+
+        pub(crate) fn path_of(&self, name: &str) -> std::path::PathBuf {
+            self.scratch
+                .as_ref()
+                .expect("the scratch is only taken by Drop")
+                .path_of(name)
+        }
+    }
+
+    impl Drop for TestScratch {
+        fn drop(&mut self) {
+            drop(self.scratch.take());
+            if let Err(e) = std::fs::remove_dir(&self.parent) {
+                eprintln!(
+                    "! could not remove the test's scratch parent {}: {e}",
+                    self.parent.display()
+                );
+            }
+        }
+    }
+
+    /// The defect this guards: fixtures wrote key material into `/tmp` at the umask default,
+    /// through calls that follow a symlink planted under the guessable name. Every fixture file
+    /// now sits in a directory only its owner can enter.
+    #[test]
+    #[cfg(unix)]
+    fn a_fixture_key_file_sits_in_a_directory_nobody_else_can_enter() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let seed = Zeroizing::new([5u8; 32]);
+        let openssh = openssh_from_seed(&seed, None).expect("key is buildable");
+        let scratch = TestScratch::create("key-owner-only");
+        let path = scratch_file(&scratch, "owner-only-key", &openssh);
+
+        let dir = path.parent().expect("a fixture file has a directory");
+        let mode = std::fs::metadata(dir)
+            .expect("the fixture directory is there")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, crate::perms::MODE_DIR, "{}", dir.display());
+        let mode = std::fs::metadata(&path)
+            .expect("the fixture file is there")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            crate::perms::MODE_SECRET,
+            "{}",
+            path.display()
+        );
     }
 }

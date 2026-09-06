@@ -301,6 +301,14 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         ctx.term.warn(&warning);
         warnings.push(warning);
     }
+    // A count this archive records as zero because the table it came from has been renamed is
+    // a number a restore would otherwise take at face value. Carried in the manifest for the
+    // same reason as the line above: the reader of an archive is not the person who took it.
+    for drift in crate::db::drain_schema_drift() {
+        let warning = crate::db::schema_drift_warning(&drift);
+        ctx.term.warn(&warning);
+        warnings.push(warning);
+    }
 
     manifest.warnings = warnings;
     writer.finish(&mut manifest)?;

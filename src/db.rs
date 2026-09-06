@@ -135,8 +135,15 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
         return Ok(BTreeMap::new());
     }
     let db = open_read_only(node_db)?;
-    let mut statement =
-        db.prepare("select repo, count(*) from routing where node != ?1 group by repo")?;
+    let Some(mut statement) = prepare_against_heartwood(
+        &db,
+        node_db,
+        "select repo, count(*) from routing where node != ?1 group by repo",
+        "routing table",
+    )?
+    else {
+        return Ok(BTreeMap::new());
+    };
     let rows = statement.query_map([own_node_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
     })?;
@@ -158,7 +165,9 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
 ///
 /// Empty when the node has never run or the table is not there, which a caller must read as
 /// "not known" rather than as "nothing has propagated". Every repository would otherwise look
-/// stranded on a machine whose node has simply never been started.
+/// stranded on a machine whose node has simply never been started. The second case is also
+/// recorded for `drain_schema_drift`, because "not known" has two remedies and the map alone
+/// cannot say which.
 pub fn read_synced_heads(
     node_db: &Path,
     own_node_id: &str,
@@ -167,17 +176,14 @@ pub fn read_synced_heads(
         return Ok(BTreeMap::new());
     }
     let db = open_read_only(node_db)?;
-    let mut statement = match db
-        .prepare("select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head")
-    {
-        Ok(statement) => statement,
-        // Only the table or the column being absent, which is heartwood moving its schema on.
-        // Anything else, a database that will not open or an image that is corrupt, is
-        // propagated: rendered as an empty map it reached `doctor` as "the node has no record
-        // of what any other node holds", which sent the reader to start a node that is
-        // already running.
-        Err(e) if is_absent_from_this_schema(&e) => return Ok(BTreeMap::new()),
-        Err(e) => return Err(e.into()),
+    let Some(mut statement) = prepare_against_heartwood(
+        &db,
+        node_db,
+        "select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head",
+        "sync status table",
+    )?
+    else {
+        return Ok(BTreeMap::new());
     };
     let rows = statement.query_map([own_node_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -198,7 +204,15 @@ pub fn read_alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
         return Ok(BTreeMap::new());
     }
     let db = open_read_only(node_db)?;
-    let mut statement = db.prepare("select id, alias from nodes where alias != '' order by id")?;
+    let Some(mut statement) = prepare_against_heartwood(
+        &db,
+        node_db,
+        "select id, alias from nodes where alias != '' order by id",
+        "nodes table",
+    )?
+    else {
+        return Ok(BTreeMap::new());
+    };
     let rows = statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -282,6 +296,94 @@ pub fn touched_warning(path: &Path) -> String {
          cannot be read without one, and read-only stops writes to the database, not to the \
          directory it sits in",
         path.display()
+    )
+}
+
+/// Prepare a statement that reads heartwood's schema, or `None` when this schema does not
+/// have what it names.
+///
+/// Only the table or the column being absent is tolerated, because that is heartwood moving
+/// its schema on, and an archive never depends on a `rad` version. Anything else, a database
+/// that will not open or an image that is corrupt, is propagated: rendered as an empty map it
+/// reached `doctor` as "the node has no record of what any other node holds", which sent the
+/// reader to start a node that is already running.
+///
+/// One function for every reader, because the tolerance used to live in `read_synced_heads`
+/// alone and a heartwood release that renamed `routing` or `nodes` failed `rad backup` outright
+/// with an sqlite error. The absence is recorded for `drain_schema_drift`, because the empty
+/// map a reader hands back is the same answer as "the node has never run", and the two want
+/// different remedies.
+fn prepare_against_heartwood<'db>(
+    db: &'db Connection,
+    path: &Path,
+    sql: &str,
+    wanted: &'static str,
+) -> Result<Option<rusqlite::Statement<'db>>> {
+    match db.prepare(sql) {
+        Ok(statement) => Ok(Some(statement)),
+        Err(e) if is_absent_from_this_schema(&e) => {
+            record_schema_drift(path, wanted, &e);
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Something a reader went looking for in the node's database and this schema does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaDrift {
+    pub path: PathBuf,
+    /// What was wanted, in words: "routing table", "nodes table".
+    pub wanted: &'static str,
+    /// What sqlite said, so a reader of the warning can tell a renamed table from a renamed
+    /// column without opening the database.
+    pub reason: String,
+}
+
+/// Tables and columns this run went looking for and this schema did not have.
+///
+/// Process-wide for the same reason `TOUCHED` is: the readers hand back maps that four
+/// callers pass on as maps, and an empty one cannot say whether the node has never run or
+/// heartwood renamed the table. The command layer drains this once and says so, beside the
+/// touched databases.
+static SCHEMA_DRIFT: Mutex<Vec<SchemaDrift>> = Mutex::new(Vec::new());
+
+fn record_schema_drift(path: &Path, wanted: &'static str, e: &rusqlite::Error) {
+    if let Ok(mut drift) = SCHEMA_DRIFT.lock()
+        && !drift
+            .iter()
+            .any(|seen| seen.path == path && seen.wanted == wanted)
+    {
+        drift.push(SchemaDrift {
+            path: path.to_path_buf(),
+            wanted,
+            reason: e.to_string(),
+        });
+    }
+}
+
+/// Take the list of such absences, leaving it empty.
+// `expect` rather than `allow`, so the attribute fails the build the moment the command layer
+// drains this, because it must be removed then and an `allow` would sit on live code forever.
+// Off the test build, where the tests below are the only caller either way.
+pub fn drain_schema_drift() -> Vec<SchemaDrift> {
+    SCHEMA_DRIFT
+        .lock()
+        .map(|mut drift| std::mem::take(&mut *drift))
+        .unwrap_or_default()
+}
+
+/// The warning for a table or column this schema did not have. In one place for the same
+/// reason `touched_warning` is: printed by the run and recorded in a manifest, and the two
+/// must not drift apart.
+pub fn schema_drift_warning(drift: &SchemaDrift) -> String {
+    format!(
+        "{} does not have the {} this tool reads ({}): the node's schema has moved on, so \
+         whatever would have been read from it is reported as not known rather than as empty; \
+         a newer rad-backup may read it",
+        drift.path.display(),
+        drift.wanted,
+        drift.reason
     )
 }
 
@@ -444,6 +546,51 @@ mod tests {
 
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(destination);
+    }
+
+    /// The bug: only `read_synced_heads` tolerated a table heartwood had renamed. The other
+    /// two readers called `?` on `prepare`, so a node database whose `routing` or `nodes`
+    /// table had moved on failed `rad backup`, `doctor` and `diff` outright with an sqlite
+    /// error, against the guardrail that an archive never depends on a `rad` version. And an
+    /// empty map on its own is the same answer as "the node has never run", so the absence is
+    /// also on record for the command layer to say.
+    #[test]
+    fn a_node_database_whose_tables_moved_on_reads_as_not_known_and_says_which_table_moved() {
+        let path = scratch("moved-on");
+        Connection::open(&path)
+            .expect("scratch database opens")
+            .execute_batch("create table routing_v2 (repo text, node text)")
+            .expect("fixture schema applies");
+
+        let _ = drain_schema_drift();
+        let routing = read_routing_counts(&path, "z6MkAAA")
+            .expect("a renamed routing table is not a failure");
+        let aliases = read_alias_book(&path).expect("a renamed nodes table is not a failure");
+        let heads = read_synced_heads(&path, "z6MkAAA")
+            .expect("a renamed sync status table is not a failure");
+        assert!(routing.is_empty() && aliases.is_empty() && heads.is_empty());
+
+        // Other tests drain the same list, so what is asserted is presence and not the exact
+        // set.
+        let drift = drain_schema_drift();
+        let wanted: Vec<&str> = drift
+            .iter()
+            .filter(|seen| seen.path == path)
+            .map(|seen| seen.wanted)
+            .collect();
+        for table in ["routing table", "nodes table", "sync status table"] {
+            assert!(
+                wanted.contains(&table),
+                "{table} is not on record: {drift:?}"
+            );
+        }
+        let warning = schema_drift_warning(&drift[0]);
+        assert!(
+            warning.contains("no such table"),
+            "the warning has to carry what sqlite said: {warning}"
+        );
+
+        let _ = std::fs::remove_file(path);
     }
 
     /// The predicate decides between "heartwood moved its schema on" and "this database is

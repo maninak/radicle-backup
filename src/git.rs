@@ -89,8 +89,18 @@ impl Git {
     /// Whether `ancestor` is reachable from `descendant`. This is the fork test: a restored
     /// namespace is safe to build on only when its signed refs are an ancestor of what the
     /// network holds.
-    pub fn is_ancestor(&self, git_dir: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-        self.tool.succeeds(&[
+    ///
+    /// Three answers, not two. `git merge-base` exits 128 over an oid it cannot resolve or an
+    /// object it cannot read, and read as "not an ancestor" in both directions that becomes
+    /// the divergence verdict, which tells somebody their identity is forked on the strength
+    /// of an error nobody read.
+    pub fn is_ancestor(
+        &self,
+        git_dir: &Path,
+        ancestor: &str,
+        descendant: &str,
+    ) -> Result<crate::exec::Answer> {
+        self.tool.answers(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "merge-base".as_ref(),
@@ -218,6 +228,22 @@ pub fn names_a_ref(target: &str) -> bool {
         })
 }
 
+/// Whether a value out of a manifest names an object git could be asked about.
+///
+/// The signed-ref oids in a manifest reach `git merge-base --is-ancestor <a> <b>`, which takes
+/// no `--` and reads a leading `-` as one of its own flags. The rid and the `HEAD` in the same
+/// manifest are already gated (`reject_hostile_rid`, `names_a_ref`) and these were not, so this
+/// closes the last argv position an unvouched-for archive reaches.
+///
+/// Hexadecimal and nothing else, at sha1 or sha256 length, because that is what a sigref oid
+/// is. Not a revision expression: `HEAD@{1}`, `master^`, and every other thing git resolves are
+/// values a real archive never carries, and accepting them would put a parser between an
+/// archive and a command line for no gain. Revisit if Radicle ever writes a sigref as anything
+/// but a full oid.
+pub fn names_an_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// The bundle file name for a repository inside an archive. One place, so the writer and the
 /// reader cannot disagree about it.
 ///
@@ -254,6 +280,79 @@ mod tests {
             config_entry("z3gqcJUoA1n9HaHKufZs5FCSGazv5"),
             "repos/z3gqcJUoA1n9HaHKufZs5FCSGazv5.config"
         );
+    }
+
+    /// A helper that drives the real `git` to build a repository with two commits in it,
+    /// returning its `--git-dir` and the two oids, oldest first.
+    fn two_commits(scratch: &crate::cmd::Scratch) -> (std::path::PathBuf, String, String) {
+        let work = scratch.path_of("repo");
+        std::fs::create_dir(&work).expect("the scratch directory is writable");
+        let run = |args: &[&str]| {
+            let finished = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .expect("git runs");
+            assert!(finished.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&finished.stdout).trim().to_string()
+        };
+        run(&["init", "-q", "-b", "master"]);
+        run(&["config", "user.email", "nobody@example.invalid"]);
+        run(&["config", "user.name", "Nobody"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        let first = run(&["rev-parse", "HEAD"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "second"]);
+        let second = run(&["rev-parse", "HEAD"]);
+        (work.join(".git"), first, second)
+    }
+
+    /// Three answers, and the third is the one that matters. `git merge-base --is-ancestor`
+    /// exits 0 for yes, 1 for no, and 128 when it cannot resolve an oid at all, and that last
+    /// one used to fold into "not an ancestor". Asked both ways round, two of those became
+    /// `Unrelated`, which a restore reports as the user's own peer history having forked: the
+    /// loudest thing this tool says, on the strength of an error nobody read.
+    #[test]
+    fn an_oid_git_cannot_resolve_is_not_an_answer_about_ancestry() {
+        let git = Git::new();
+        assert!(git.is_available(), "these tests drive the real git");
+        let scratch = crate::cmd::Scratch::create(std::env::temp_dir().as_path())
+            .expect("a working directory is creatable");
+        let (git_dir, first, second) = two_commits(&scratch);
+
+        assert_eq!(
+            git.is_ancestor(&git_dir, &first, &second).expect("git ran"),
+            crate::exec::Answer::Yes
+        );
+        assert_eq!(
+            git.is_ancestor(&git_dir, &second, &first).expect("git ran"),
+            crate::exec::Answer::No
+        );
+
+        let nowhere = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let unanswered = git
+            .is_ancestor(&git_dir, nowhere, &second)
+            .expect("git ran");
+        assert!(
+            matches!(unanswered, crate::exec::Answer::CouldNotAsk { .. }),
+            "{unanswered:?}"
+        );
+    }
+
+    /// The signed-ref oids in a manifest are the last values from an archive that reach a
+    /// command line. `merge-base` takes no `--`, so a leading `-` would be read as a flag, and
+    /// a revision expression would have git resolve something nobody vouched for.
+    #[test]
+    fn only_a_plain_hexadecimal_oid_out_of_a_manifest_reaches_git() {
+        assert!(names_an_oid("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
+        assert!(names_an_oid(&"a".repeat(64)));
+
+        assert!(!names_an_oid("--output=/etc/passwd"));
+        assert!(!names_an_oid("-h"));
+        assert!(!names_an_oid("HEAD"));
+        assert!(!names_an_oid("master^"));
+        assert!(!names_an_oid("da39a3ee"));
+        assert!(!names_an_oid(""));
+        assert!(!names_an_oid(&"g".repeat(40)));
     }
 
     #[test]

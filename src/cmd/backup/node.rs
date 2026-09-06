@@ -73,6 +73,19 @@ impl Drop for NodeGuard<'_> {
 /// Only git storage is at risk from a running node: the databases are snapshotted through
 /// SQLite's own backup API, and keys and config do not change. So a running node is a warning
 /// with a reason attached, not a refusal.
+/// Whether this run still owes the node a restart, after a stop whose result it never saw.
+///
+/// Three cases and only one of them owes anything. With no doubt on the probe, the socket
+/// demonstrably kept answering, so nothing went down and there is nothing to put back. With a
+/// doubt and a `rad node stop` that failed, there is nothing to put back either. With a doubt
+/// and a stop that was ACCEPTED, nobody knows: the same error that made the state a doubt made
+/// every poll after it a doubt too, and the stop may well have worked. That one owes a
+/// restart, because starting a node that never went down costs a line of `rad` output and
+/// leaving one down that this run stopped costs the machine its node until somebody notices.
+fn owes_a_restart(stop_accepted: bool, why_running_is_unknown: Option<&str>) -> bool {
+    stop_accepted && why_running_is_unknown.is_some()
+}
+
 pub(super) fn quiesce<'a>(
     ctx: &'a Ctx,
     args: &Create,
@@ -162,8 +175,7 @@ pub(super) fn quiesce<'a>(
         }
         std::thread::sleep(NODE_STOP_POLL);
     }
-    // It never went down, so there is nothing this run stopped and nothing to put back.
-    node.was_stopped_by_backup = false;
+    node.was_stopped_by_backup = owes_a_restart(stop_accepted, why_running_is_unknown.as_deref());
     // Both of these say the socket is still being served, and neither knows that when the
     // socket is the thing that could not be reached: the same EACCES that made the state a
     // doubt made every poll above a doubt too. Saying so is the difference between sending
@@ -175,7 +187,16 @@ pub(super) fn quiesce<'a>(
     Err(if stop_accepted {
         Error::refused(
             format!("{still_up} after being asked to stop"),
-            "stop it by hand and run again, or run without --stop-node",
+            match why_running_is_unknown.is_some() {
+                // The stop may have worked and this run may simply be unable to see it, so
+                // the node is being started again on the way out and the advice is about the
+                // thing that actually went wrong.
+                true => {
+                    "check who owns the node directory and its control socket, then run \
+                         again; the node is being started again in case the stop did work"
+                }
+                false => "stop it by hand and run again, or run without --stop-node",
+            },
         )
     } else {
         Error::refused(
@@ -183,4 +204,29 @@ pub(super) fn quiesce<'a>(
             "read what it said above, stop it by hand, or run without --stop-node",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::owes_a_restart;
+
+    /// A `--stop-node` run whose probe could not see the socket used to walk away leaving the
+    /// node down. The stop was accepted, no poll could confirm anything, and the run recorded
+    /// that it had stopped nothing, so the guard put nothing back and the message sent the
+    /// user to stop a node that may already have been down.
+    #[test]
+    fn a_stop_this_run_could_not_confirm_still_owes_the_node_a_restart() {
+        const DOUBT: &str = "permission denied on the control socket";
+
+        assert!(owes_a_restart(true, Some(DOUBT)));
+        assert!(
+            !owes_a_restart(false, Some(DOUBT)),
+            "a stop that failed outright stopped nothing"
+        );
+        assert!(
+            !owes_a_restart(true, None),
+            "the socket kept answering, so nothing went down"
+        );
+        assert!(!owes_a_restart(false, None));
+    }
 }
