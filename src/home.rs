@@ -369,8 +369,8 @@ mod tests {
     fn a_socket_that_could_not_be_asked_is_not_reported_as_a_stopped_node() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let root = std::env::temp_dir().join(format!("rad-backup-socket-{}", std::process::id()));
-        let home = Home::at(&root);
+        let scratch = crate::key::tests::TestScratch::create("home-socket");
+        let home = Home::at(scratch.path_of("home"));
         std::fs::create_dir_all(home.node_dir()).expect("scratch home is creatable");
 
         // Nothing there at all, which is the ordinary shape of a machine with no node.
@@ -388,7 +388,14 @@ mod tests {
             home.control_socket_at().exists(),
             "the socket file outlives its listener"
         );
-        assert_eq!(home.probe_node_state(), NodeState::Stopped);
+        // Dropping the listener does not always unbind on the instant. Every subprocess
+        // another test spawns holds a copy of this fd for the moment between `fork` and
+        // `exec`, and a socket stays bound while any copy is open, so a connect made in that
+        // window is accepted by a listener nobody owns any more. Measured at 646 connects in
+        // 2000 with eight spawning threads, which is a run failing at random under load.
+        // Waited out rather than probed once, because the state being asked about is "the
+        // last copy of the fd is gone", and it arrives in microseconds.
+        assert_eq!(settled_state(&home), NodeState::Stopped);
 
         // The directory holding the socket cannot be entered, so this process cannot ask.
         let unreadable = std::fs::Permissions::from_mode(0o000);
@@ -416,8 +423,24 @@ mod tests {
                 "{state:?}"
             );
         }
+    }
 
-        let _ = std::fs::remove_dir_all(root);
+    /// What the probe answers once no file descriptor for the socket is left open anywhere.
+    ///
+    /// A test that wants the answer for an unowned socket file has to outlast the descriptors
+    /// other tests' subprocesses are carrying, so `Running` is waited out. Any other answer is
+    /// returned as it stands: `Unknown` is a verdict about this process, not a state that
+    /// settles, and waiting on it would only turn a real regression into a slow one.
+    #[cfg(unix)]
+    fn settled_state(home: &Home) -> NodeState {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let state = home.probe_node_state();
+            if !state.is_running() || std::time::Instant::now() >= deadline {
+                return state;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     /// heartwood resolves `RAD_SOCKET` before the home-relative default, so a node started
