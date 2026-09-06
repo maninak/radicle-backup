@@ -300,7 +300,7 @@ Nine checks. The left of each line names what was looked at and the right says w
 
 The line between a `!` and a `✗` is whether anything else holds a copy: a private repository in no archive fails when nobody else can hold it and warns when a second delegate, an allowed peer or a node announcing it could, and an archive older than 30 days warns rather than fails.
 
-`doctor --json` prints the same as structured data. It exits `3` when any check fails, which makes it a monitoring probe.
+`doctor --json` prints the same as structured data. It exits `3` when any check fails, and also when every check came back "could not be checked", because a probe reading the exit code cannot tell a posture nothing looked at from a clean one. Unknowns beside real answers still exit `0`: a machine with no `rad` on `PATH` cannot answer several of these and may be perfectly covered.
 
 ## `diff`
 

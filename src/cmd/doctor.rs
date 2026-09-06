@@ -151,11 +151,25 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
         }
     }
 
-    Ok(if failed == 0 {
+    Ok(if is_a_clean_report(passed, warned, failed) {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::from(EXIT_CHECKS_FAILED)
     })
+}
+
+/// Whether a report has earned an exit 0.
+///
+/// A failing check is the ordinary reason not to. So is a report that answered nothing: `doctor
+/// --json` is documented as a monitoring probe, and a run where every check came back "could
+/// not be checked" has established no posture at all, which a probe reading the exit code
+/// cannot tell from a clean one.
+///
+/// Unknowns alongside answers keep the exit 0 they have always had. A machine with no `rad` on
+/// PATH cannot answer several of these and may be perfectly covered, and exiting 3 at it every
+/// night is how a red line stops being read.
+fn is_a_clean_report(passed: usize, warned: usize, failed: usize) -> bool {
+    failed == 0 && passed + warned > 0
 }
 
 /// Name every bucket that has something in it, rather than reporting a score.
@@ -1019,6 +1033,16 @@ mod tests {
 
     use super::*;
     use crate::key::tests::TestScratch;
+
+    #[test]
+    fn a_report_that_could_not_check_anything_is_not_a_clean_one() {
+        assert!(is_a_clean_report(9, 0, 0));
+        assert!(is_a_clean_report(7, 2, 0));
+        assert!(!is_a_clean_report(8, 0, 1));
+        // Nine checks, nine "could not be checked": no `rad`, no node database, no archive to
+        // open. Green here is a monitoring probe reporting a posture nothing looked at.
+        assert!(!is_a_clean_report(0, 0, 0));
+    }
 
     /// A key file for a test, owner-only inside an owner-only directory, because these used
     /// to be `std::fs::write` into `/tmp` at the umask default under a pid-guessable name.
