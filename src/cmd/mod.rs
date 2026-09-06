@@ -139,7 +139,9 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
 /// be added to a tar, because tar needs a size before it takes content. They are put next to
 /// whatever the command is producing, the archive for `backup` and the home for `restore`, on
 /// a filesystem the user already chose, rather than in a shared temporary directory where a
-/// private repository's contents would be a surprise.
+/// private repository's contents would be a surprise. `backup --stdout` produces no file to
+/// sit beside, so it alone falls back to the system temporary directory; `--scratch-dir`
+/// overrides either.
 pub struct Scratch {
     path: PathBuf,
 }

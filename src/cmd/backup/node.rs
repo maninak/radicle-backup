@@ -144,9 +144,9 @@ pub(super) fn quiesce<'a>(
         )
     })?;
     ctx.term.step("stopping the node");
-    // The exit status, not just the spawn. A `rad node stop` that fails outright used to be
-    // discarded here, and the run then spent the whole timeout watching a socket that was
-    // never going to close before blaming the node for not stopping.
+    // The exit status, and not only the spawn. A `rad node stop` that fails outright used
+    // to be discarded here, and the run then spent the whole timeout watching a socket that
+    // was never going to close before blaming the node for not stopping.
     let stop_accepted = rad.stop_node()?;
 
     // The guard exists from the moment the stop is asked for, not from the moment it is
@@ -192,7 +192,7 @@ pub(super) fn quiesce<'a>(
         Error::refused(
             format!("{still_up} after being asked to stop"),
             match why_running_is_unknown.is_some() {
-                // The stop may have worked and this run may simply be unable to see it, so
+                // The stop may have worked and this run may be unable to see it, so
                 // the node is being started again on the way out and the advice is about the
                 // thing that actually went wrong.
                 true => {
