@@ -236,13 +236,16 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         check_private_coverage(&inventory, record, newest.as_ref()).qualified_by_unread(unread),
     );
     checks.push(check_sole_delegate(&inventory).qualified_by_unread(unread));
-    checks.push(check_replication(&inventory, &routing).qualified_by_unread(unread));
+    checks.push(
+        check_replication(&inventory, &routing, db::saw_schema_drift()).qualified_by_unread(unread),
+    );
     checks.push(check_second_key_copy(&stored));
     checks.push(
         check_sigrefs_propagation(
             &inventory,
             &db::read_synced_heads(&home.node_db(), &node_id)?,
             &node_id,
+            db::saw_schema_drift(),
         )
         .qualified_by_unread(unread),
     );
@@ -761,7 +764,25 @@ fn check_sole_delegate(inventory: &Inventory) -> Check {
     )
 }
 
-fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> Check {
+/// What to tell somebody an empty table sent here.
+///
+/// "Start the node" is right when the node has never gossiped and wrong when it is running
+/// perfectly against a schema this build cannot read, and the two arrive as the same empty map.
+/// The warning naming the file and the sqlite reason is printed by the command layer either
+/// way; this is only about not sending a reader to start a node that is already up.
+fn empty_because(schema_has_moved_on: bool, then: &str) -> String {
+    if schema_has_moved_on {
+        "this build cannot read part of the node's schema; see the warnings below".to_string()
+    } else {
+        format!("start the node with `rad node start` and {then}")
+    }
+}
+
+fn check_replication(
+    inventory: &Inventory,
+    routing: &BTreeMap<String, u64>,
+    schema_has_moved_on: bool,
+) -> Check {
     // `is_public`, not `!is_private`: a record whose identity document was never read has no
     // visibility, and passing it here put a repository that may well be private into a list
     // whose remedy is `rad sync --announce`. The caller qualifies the count with how many
@@ -781,9 +802,7 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
             Verdict::Unknown,
             "the routing table is empty, so no other node is known to hold anything",
         )
-        .with_remedy(
-            "start the node with `rad node start` and let it gossip, then run this again",
-        );
+        .with_remedy(empty_because(schema_has_moved_on, "let it gossip"));
     }
     if alone.is_empty() {
         return Check::new(
@@ -821,6 +840,7 @@ fn check_sigrefs_propagation(
     inventory: &Inventory,
     synced_heads: &BTreeMap<String, BTreeSet<String>>,
     node_id: &str,
+    schema_has_moved_on: bool,
 ) -> Check {
     const TOPIC: &str = "signed refs propagation";
     if synced_heads.is_empty() {
@@ -829,7 +849,10 @@ fn check_sigrefs_propagation(
             Verdict::Unknown,
             "the node has no record of what any other node holds, so nothing can be compared",
         )
-        .with_remedy("start the node with `rad node start` and run this again once it has synced");
+        .with_remedy(empty_because(
+            schema_has_moved_on,
+            "run this again once it has synced",
+        ));
     }
 
     let mut here_only = Vec::new();
@@ -1109,9 +1132,9 @@ mod tests {
             check_archive_location(std::path::Path::new("/nowhere"), None, None),
             check_private_coverage(&empty, None, None),
             check_sole_delegate(&empty),
-            check_replication(&empty, &BTreeMap::new()),
+            check_replication(&empty, &BTreeMap::new(), false),
             check_second_key_copy(&state::Stored::Absent),
-            check_sigrefs_propagation(&empty, &BTreeMap::new(), "z6MkAAA"),
+            check_sigrefs_propagation(&empty, &BTreeMap::new(), "z6MkAAA", false),
         ]
         .into_iter()
         .map(|check| check.topic)
@@ -1523,7 +1546,7 @@ mod tests {
             ),
         ]);
 
-        let check = check_sigrefs_propagation(&inventory, &synced, ME);
+        let check = check_sigrefs_propagation(&inventory, &synced, ME, false);
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.detail.contains("rad:zBBB"), "{}", check.detail);
         assert!(!check.detail.contains("rad:zAAA"), "{}", check.detail);
@@ -1538,15 +1561,34 @@ mod tests {
         let synced =
             BTreeMap::from([("rad:zOther".to_string(), BTreeSet::from(["x".to_string()]))]);
 
-        let check = check_sigrefs_propagation(&holding(vec![private]), &synced, ME);
+        let check = check_sigrefs_propagation(&holding(vec![private]), &synced, ME, false);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
     }
 
     #[test]
     fn a_node_that_has_never_run_is_unknown_rather_than_everything_being_stranded() {
         let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);
-        let check = check_sigrefs_propagation(&inventory, &BTreeMap::new(), ME);
+        let check = check_sigrefs_propagation(&inventory, &BTreeMap::new(), ME, false);
         assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
+        let remedy = check.remedy.expect("an unknown says what would answer it");
+        assert!(remedy.contains("rad node start"), "{remedy}");
+    }
+
+    /// An empty table has two causes, and only one of them is answered by starting a node. A
+    /// reader whose node is running fine against a schema this build cannot read was being sent
+    /// to start it again, which does nothing and makes the report look wrong about everything.
+    #[test]
+    fn a_table_this_build_cannot_read_is_not_answered_by_starting_the_node() {
+        let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);
+        let check = check_sigrefs_propagation(&inventory, &BTreeMap::new(), ME, true);
+        assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
+        let remedy = check.remedy.expect("an unknown says what would answer it");
+        assert!(!remedy.contains("rad node start"), "{remedy}");
+        assert!(remedy.contains("schema"), "{remedy}");
+
+        let check = check_replication(&inventory, &BTreeMap::new(), true);
+        let remedy = check.remedy.expect("an unknown says what would answer it");
+        assert!(!remedy.contains("rad node start"), "{remedy}");
     }
 
     #[test]

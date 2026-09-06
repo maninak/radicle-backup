@@ -362,6 +362,19 @@ fn record_schema_drift(path: &Path, wanted: &'static str, e: &rusqlite::Error) {
     }
 }
 
+/// Whether anything read so far has met a schema it could not follow.
+///
+/// A peek and not a drain: the command layer owns the draining and prints every entry with the
+/// file and the sqlite reason in it. A check that took them to explain itself would silence
+/// that. It exists so that an empty answer is not handed to a reader with the one remedy that
+/// suits the other cause of it, "start the node".
+pub fn saw_schema_drift() -> bool {
+    SCHEMA_DRIFT
+        .lock()
+        .map(|drift| !drift.is_empty())
+        .unwrap_or(false)
+}
+
 /// Take the list of such absences, leaving it empty.
 // `expect` rather than `allow`, so the attribute fails the build the moment the command layer
 // drains this, because it must be removed then and an `allow` would sit on live code forever.
