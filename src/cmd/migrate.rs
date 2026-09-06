@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::{Create, Migrate, TierArg, Verify};
 use crate::cmd::{Ctx, backup, verify};
 use crate::error::{Error, Result};
+use crate::perms::MODE_DOC;
 
 /// What the retired key is renamed to. It stays on disk rather than being deleted, because a
 /// move that goes wrong halfway needs a way back.
@@ -166,22 +167,70 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
         .unwrap_or(RETIRED_KEY.as_ref())
         .to_string_lossy();
     let note_path = ctx.home.keys_dir().join(RETIRED_NOTE);
-    let already = match std::fs::read_to_string(&note_path) {
-        Ok(already) => Some(already),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(Error::io(&note_path, e)),
-    };
-    let note = retirement_note(
-        already.as_deref(),
-        &retired_as,
-        &crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
-        archive,
-    );
-    std::fs::write(&note_path, note).map_err(|e| Error::io(&note_path, e))?;
+    // Every failure from here on is reported and none of it propagates. The rename above has
+    // already happened, so an error out of this block hands a machine whose key IS retired a
+    // message saying the move failed, and withholds the one line naming the file it went to.
+    // The note is a courtesy for whoever finds these files years later; where the key is now
+    // is what the person standing here needs.
+    match read_former_note(&note_path) {
+        // Left exactly as it is. Writing a fresh note over it would drop whatever it holds,
+        // which is the record of an earlier retirement, and this command is not the one that
+        // gets to decide that is worth less than a tidy file.
+        FormerNote::Unreadable(e) => {
+            ctx.term.warn(&format!(
+                "the note beside the retired key is there and could not be read, so it was \
+                 left alone: {e}"
+            ));
+        }
+        former => {
+            let note = retirement_note(
+                former.said(),
+                &retired_as,
+                &crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
+                archive,
+            );
+            if let Err(e) = crate::perms::write_atomically(&note_path, note.as_bytes(), MODE_DOC) {
+                ctx.term.warn(&format!(
+                    "the note beside the retired key was not written: {e}"
+                ));
+                ctx.term.detail(
+                    "the key was retired all the same, and nothing in this home explains \
+                     that to whoever finds it next",
+                );
+            }
+        }
+    }
 
     ctx.term
         .ok(&format!("retired this machine's key to {}", to.display()));
     Ok(())
+}
+
+/// Whatever `RETIRED.txt` held before this retirement.
+enum FormerNote {
+    /// No note yet, which is every first move.
+    Absent,
+    /// What it said, to be carried into the note this move writes.
+    Said(String),
+    /// There, and this run could not read it.
+    Unreadable(std::io::Error),
+}
+
+impl FormerNote {
+    fn said(&self) -> Option<&str> {
+        match self {
+            Self::Said(said) => Some(said.as_str()),
+            _ => None,
+        }
+    }
+}
+
+fn read_former_note(path: &Path) -> FormerNote {
+    match std::fs::read_to_string(path) {
+        Ok(said) => FormerNote::Said(said),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FormerNote::Absent,
+        Err(e) => FormerNote::Unreadable(e),
+    }
 }
 
 /// What `RETIRED.txt` says after this retirement, given whatever it said before.

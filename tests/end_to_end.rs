@@ -967,6 +967,40 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     );
 }
 
+/// A `move` whose note will not go still retires the key and still says where it went.
+///
+/// The rename happens before the note, so a failure reading or writing it left a machine whose
+/// key IS retired reading a message that says the move failed, and withheld the one line
+/// naming the file the key went to. A directory at the note's own name makes both fail.
+#[test]
+fn a_move_whose_note_cannot_be_written_still_says_where_the_key_went() {
+    let fixture = Fixture::create("move-note");
+    std::fs::create_dir(fixture.home().join("keys/RETIRED.txt"))
+        .expect("the note's name is occupiable");
+
+    let archive = fixture.path("moved.tar.zst");
+    let ran = fixture.run(
+        &["move", "--yes", &archive.to_string_lossy()],
+        &fixture.home(),
+    );
+    assert_success(&ran, "moving the identity");
+
+    let said = stderr(&ran);
+    let retired = fixture.home().join("keys/radicle.retired");
+    assert!(
+        retired.is_file(),
+        "the key must be retired whatever the note did: {said}"
+    );
+    assert!(
+        said.contains("radicle.retired"),
+        "the run must say where the key went: {said}"
+    );
+    assert!(
+        said.contains("could not be read, so it was left alone"),
+        "a note that could not be read must be said out loud: {said}"
+    );
+}
+
 /// Restoring over a home that holds a DIFFERENT identity must file the old key, not delete
 /// it: the key is the identity, and there is no way back from overwriting one.
 #[test]
