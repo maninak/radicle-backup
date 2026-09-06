@@ -43,7 +43,7 @@ impl Git {
     /// `fetch.fsckObjects` in `unbundle` below asks for and what older gits accept and ignore.
     /// `None` when the version could not be read, which is a different sentence from "no".
     pub fn fsck_reaches_a_bundle(&self) -> Option<bool> {
-        Some(parse_version(&self.version().ok()?)? >= FSCK_ON_A_BUNDLE_SINCE)
+        version_checks_a_bundle(&self.version().ok()?)
     }
 
     /// Every ref in the repository, sorted by name so that two runs over an unchanged
@@ -179,17 +179,7 @@ impl Git {
     /// and never consult it on this path, so the objects land unchecked and nothing says so:
     /// `fsck_reaches_a_bundle` is what the restore asks in order to say it out loud.
     pub fn unbundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
-        self.tool.output(&[
-            "-c".as_ref(),
-            "fetch.fsckObjects=true".as_ref(),
-            "--git-dir".as_ref(),
-            git_dir.as_os_str(),
-            "fetch".as_ref(),
-            "--quiet".as_ref(),
-            "--force".as_ref(),
-            bundle.as_os_str(),
-            "refs/*:refs/*".as_ref(),
-        ])?;
+        self.tool.output(&unbundle_args(git_dir, bundle))?;
         Ok(())
     }
 
@@ -247,11 +237,44 @@ pub fn names_a_ref(target: &str) -> bool {
         })
 }
 
+/// What `unbundle` runs, apart from the name of git itself.
+///
+/// A function of its own so that the object check can be asserted on any machine. Read off a
+/// real fetch it can only be seen where git honours it, which is to say on nobody's Ubuntu
+/// 22.04, and a test that passes whether or not the flag is there is the shape of test this
+/// one exists to not be.
+fn unbundle_args<'a>(git_dir: &'a Path, bundle: &'a Path) -> [&'a std::ffi::OsStr; 9] {
+    [
+        "-c".as_ref(),
+        FSCK_ON_FETCH.as_ref(),
+        "--git-dir".as_ref(),
+        git_dir.as_os_str(),
+        "fetch".as_ref(),
+        "--quiet".as_ref(),
+        "--force".as_ref(),
+        bundle.as_os_str(),
+        "refs/*:refs/*".as_ref(),
+    ]
+}
+
+/// The setting that asks git to check the objects a fetch is about to write.
+///
+/// `fetch.` and not `transfer.`, because the two are read in that order and the narrower one
+/// wins: a user who turned `transfer.fsckObjects` off for their own remotes would otherwise
+/// turn this off with it.
+pub(crate) const FSCK_ON_FETCH: &str = "fetch.fsckObjects=true";
+
 /// The first git that runs `fsck` over a bundle it fetches from. Before it,
 /// `fetch_refs_from_bundle` never asked, so `-c fetch.fsckObjects=true` was accepted and had
 /// no effect on this one code path. Measured against git 2.34.1, where a bundle carrying a
 /// tree entry named `.git` unbundles without a word.
-const FSCK_ON_A_BUNDLE_SINCE: (u32, u32) = (2, 46);
+pub(crate) const FSCK_ON_A_BUNDLE_SINCE: (u32, u32) = (2, 46);
+
+/// The same question as `fsck_reaches_a_bundle`, asked of a version string rather than of the
+/// git that is installed, so that both sides of the boundary can be put to it on one machine.
+fn version_checks_a_bundle(said: &str) -> Option<bool> {
+    Some(parse_version(said)? >= FSCK_ON_A_BUNDLE_SINCE)
+}
 
 /// The major and minor out of whatever `git --version` printed.
 ///
@@ -435,16 +458,68 @@ pub(crate) mod tests {
         let unbundled = git.unbundle(&target, &bundle);
 
         match git.fsck_reaches_a_bundle() {
-            Some(true) => assert!(
-                unbundled.is_err(),
-                "this git checks a bundle, so a `.git` tree entry must not reach storage"
-            ),
+            Some(true) => {
+                let refusal = unbundled.expect_err(
+                    "this git checks a bundle, so a `.git` tree entry must not reach storage",
+                );
+                // Named, because any error at all would satisfy a bare `is_err`, and a
+                // refusal for an unrelated reason would then read as this check firing.
+                assert!(
+                    refusal.to_string().contains("hasDotgit"),
+                    "the refusal is meant to be fsck naming the entry: {refusal}"
+                );
+            }
             Some(false) => assert!(
                 unbundled.is_ok(),
                 "this git does not check a bundle, so the refusal came from somewhere else \
                  and the warning the restore prints is describing the wrong thing"
             ),
             None => panic!("the version of the git running this test could not be read"),
+        }
+    }
+
+    /// The fetch that opens a bundle asks for the object check, whatever git is installed.
+    ///
+    /// The test above can only watch the check fire on a git that runs it on this path, which
+    /// leaves every developer on an older one with a green suite and no guard at all. This is
+    /// the half that holds on any machine: the flag is either in the command or it is not.
+    #[test]
+    fn the_fetch_that_opens_a_bundle_asks_git_to_check_what_it_writes() {
+        let args = unbundle_args(
+            Path::new("/storage/repo.git"),
+            Path::new("/archive/a.bundle"),
+        );
+        let spelled: Vec<&str> = args
+            .iter()
+            .map(|arg| arg.to_str().expect("the fixed arguments are utf-8"))
+            .collect();
+        assert!(
+            spelled.windows(2).any(|pair| pair == ["-c", FSCK_ON_FETCH]),
+            "the object check is no longer asked for: {spelled:?}"
+        );
+    }
+
+    /// The version the warning turns on, pinned away from the one machine running the suite.
+    ///
+    /// Without this the constant is asserted by nothing: on a git older than the boundary
+    /// every wrong boundary older than that one answers identically, so `(2, 40)` and a `>`
+    /// in place of the `>=` both pass. `ci/pins.sh` holds the same number in the shipped
+    /// script to this one, so the two readers of an archive cannot drift apart either.
+    #[test]
+    fn the_boundary_is_the_first_git_that_checks_a_bundle_and_not_the_one_before_it() {
+        for (said, expected) in [
+            ("git version 1.9.1", Some(false)),
+            ("git version 2.34.1", Some(false)),
+            ("git version 2.39.5 (Apple Git-154)", Some(false)),
+            ("git version 2.45.2", Some(false)),
+            ("git version 2.46.0", Some(true)),
+            ("git version 2.46", Some(true)),
+            ("git version 2.51.0.windows.1", Some(true)),
+            ("git version 3.0.0", Some(true)),
+            ("git version 2", None),
+            ("git version next", None),
+        ] {
+            assert_eq!(version_checks_a_bundle(said), expected, "{said}");
         }
     }
 
