@@ -103,7 +103,7 @@ impl Git {
     /// Write every ref in the repository, namespaces included, into one bundle file.
     ///
     /// `--all` covers `refs/*` and `HEAD`, which on a Radicle repository means every peer's
-    /// namespace and their `rad/sigrefs`. Verified against real storage rather than assumed.
+    /// namespace and their `rad/sigrefs`.
     pub fn bundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
         self.tool.output(&[
             "--git-dir".as_ref(),
@@ -273,7 +273,7 @@ mod tests {
     fn a_head_under_refs_that_climbs_out_of_the_repository_is_refused() {
         // `git symbolic-ref` stores this without complaint, and the next update of the ref
         // writes the file it names: `refs/../../evil` lands beside the repository, which in
-        // a Radicle home is `storage` itself. Verified against git 2.34 before it was fixed.
+        // a Radicle home is `storage` itself. Reproduced against git 2.34.
         assert!(!names_a_ref("refs/../../evil"));
         assert!(!names_a_ref("refs/heads/../../../etc/x"));
         assert!(!names_a_ref("refs/"));

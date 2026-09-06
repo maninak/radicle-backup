@@ -306,14 +306,6 @@ impl Aside {
     }
 }
 
-/// How recently an archive of this identity was taken.
-///
-/// Two sources, because neither alone is the answer. The state file remembers what this user
-/// on this machine last wrote, which is nothing at all when the timer runs as another user,
-/// when the state directory has been wiped, or when the home came back through `restore.sh`.
-/// The directory holds what is actually there, which is nothing once the last archive has been
-/// pruned or carried off. Reading only the first is how "no archive has ever been taken for
-/// this identity" was printed at a machine with a working nightly backup.
 /// The record's own archive, when it is newer than the file found on this disk.
 ///
 /// Both ages are needed, so a record or a file whose stamp does not parse produces nothing:
@@ -336,6 +328,14 @@ fn newer_elsewhere(
     })
 }
 
+/// How recently an archive of this identity was taken.
+///
+/// Two sources, because neither alone is the answer. The state file remembers what this user
+/// on this machine last wrote, which is nothing at all when the timer runs as another user,
+/// when the state directory has been wiped, or when the home came back through `restore.sh`.
+/// The directory holds what is actually there, which is nothing once the last archive has been
+/// pruned or carried off. Reading only the first is how "no archive has ever been taken for
+/// this identity" was printed at a machine with a working nightly backup.
 fn check_backup_freshness(
     stored: &state::Stored,
     newest: Option<&crate::archives::Archive>,
@@ -610,7 +610,8 @@ fn check_private_coverage(inventory: &Inventory, record: Option<&state::Record>)
 
     // A private repository is not automatically the only copy. Its owner can allow peers to
     // hold it, and the routing table knows when one announces it. Those are different degrees
-    // of safety and this check says which is which rather than crying wolf about all three.
+    // of safety, and this check says which one each repository is in rather than failing them
+    // all alike.
     let missing: Vec<&&crate::manifest::RepoRecord> = private
         .iter()
         .filter(|repo| !record.is_some_and(|record| record.carries(&repo.rid)))
@@ -748,8 +749,8 @@ fn check_replication(inventory: &Inventory, routing: &BTreeMap<String, u64>) -> 
 /// Private repositories are left out. They are announced to nobody by design, so counting them
 /// here would report the feature working as a failure. A repository whose identity document
 /// nothing could read is not known to be public either, which is why the caller qualifies this
-/// answer the way it qualifies its three siblings: without it, a home with no `rad` on PATH
-/// was told to announce repositories that must never be announced.
+/// answer the way it qualifies every other check that reads identity documents: without it, a
+/// home with no `rad` on PATH was told to announce repositories that must never be announced.
 fn check_sigrefs_propagation(
     inventory: &Inventory,
     synced_heads: &BTreeMap<String, BTreeSet<String>>,
@@ -1007,8 +1008,7 @@ mod tests {
             warnings: Vec::new(),
         };
         // The key check is built the long way rather than left out: a sweep that exempts
-        // one of the nine checks it exists to police is a sweep that reports a conformance
-        // it is not checking.
+        // one of the checks it exists to police reports a conformance it is not checking.
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
         let path = std::env::temp_dir().join(format!("rad-backup-topics-{}", std::process::id()));
@@ -1047,8 +1047,8 @@ mod tests {
     #[test]
     fn no_topic_asserts_a_state_so_a_failing_line_cannot_contradict_its_own_marker() {
         // ` on ` and `elsewhere` were added after `key on another machine` and `signed refs
-        // elsewhere` both printed a topic the detail beside them then denied. The seven before
-        // them caught neither.
+        // elsewhere` both printed a topic the detail beside them then denied, and none of the
+        // earlier claims caught either.
         const CLAIMS: [&str; 9] = [
             "exists",
             " is ",

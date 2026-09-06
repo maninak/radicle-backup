@@ -23,10 +23,10 @@ const MARKER_UNIT: &str = concat!(
     "# Delete both these lines to keep your own edits."
 );
 
-/// The header on the environment file. Deliberately not MARKER: that one tells the reader
-/// that deleting it keeps their edits, which is true of a unit, because `write_unit` refuses a
-/// file without the mark, and false here, because this file is rewritten in full by every run
-/// whatever it holds. The same promise the marker rewording set out to stop making.
+/// The header on the environment file. Not `MARKER_UNIT`, because that one tells the reader
+/// that deleting it keeps their edits: true of a unit, since `write_unit` refuses a file
+/// without the mark, and false here, since every run rewrites this file in full whatever it
+/// holds. Reusing it would make the same promise the unit marker was reworded to stop making.
 const MARKER_ENVIRONMENT: &str = concat!(
     "# Written by `rad backup schedule`, and rewritten in full by its next run.\n",
     "# A lasting change belongs on the command line, not in this file."
@@ -76,8 +76,9 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     // What this process can see is not what the timer will see. A `RAD_BACKUP_PASSPHRASE`
     // exported in the shell that runs this command reaches this process and nothing else:
     // systemd starts the service from its own environment, and the environment file this
-    // command writes deliberately never carries the passphrase itself. Accepting that passed
+    // command writes never carries the passphrase itself. Accepting the shell's copy passed
     // the check and installed a timer that then failed every night at the prompt.
+    //
     // Nothing to unlock, so nothing to ask for: an archive written to a recipient needs
     // only their public key, and a plaintext one needs nothing at all.
     let needs_no_passphrase = !args.recipient.is_empty() || args.plaintext;
@@ -334,12 +335,9 @@ fn write_environment(
     Ok(())
 }
 
-/// Write one unit file, refusing to overwrite anything this tool did not write.
-///
-/// The three-way split matters: `is_ok_and` folded "not there" together with "there and
-/// unreadable" and overwrote both. A hand-written unit saved mode 000, or holding bytes that
-/// are not UTF-8, is exactly the file the marker check exists to protect, and it was the one
-/// file the check could not see.
+/// Write one unit file, refusing to overwrite anything this tool did not write. The read
+/// result goes to `may_replace` whole, error and all: which errors mean "nothing there" is its
+/// decision, not this function's.
 fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
     let existing = std::fs::read_to_string(path);
     may_replace(path, existing.as_deref())?;
@@ -350,9 +348,10 @@ fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
 
 /// Whether whatever is already at `path` may be replaced, decided from the read alone. Pure.
 ///
-/// Three answers, and the third is the one that matters: a file that is there and cannot be
-/// read is not a file that is not there. Read as absent, this overwrote a unit somebody wrote
-/// by hand on any machine where the directory was readable and the file was not.
+/// A file that is there and cannot be read is not a file that is not there. Folding the two
+/// together (an `is_ok_and` on the read) overwrote a hand-written unit saved mode 000, or
+/// holding bytes that are not UTF-8: exactly the file the marker check exists to protect, and
+/// the one file it could not see.
 fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>) -> Result<()> {
     match existing {
         Ok(text) if !text.contains(MARKER_SIGNATURE) => Err(Error::refused(
@@ -600,8 +599,8 @@ mod tests {
     fn the_environment_file_does_not_promise_that_an_edit_will_survive() {
         let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None);
 
-        // MARKER says deleting it keeps your edits, which `write_unit` honours and this file
-        // cannot: every run rewrites it in full whatever it holds.
+        // MARKER_UNIT says deleting it keeps the user's edits, which `write_unit` honours and
+        // this file cannot: every run rewrites it in full whatever it holds.
         assert!(!text.contains("Delete both these lines"), "{text}");
         assert!(text.contains("rewritten in full"), "{text}");
         for line in text.lines().take(2) {

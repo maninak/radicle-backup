@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// Pages per step and the pause between steps. Small enough that a busy node keeps its lock
-/// turns, large enough that a 46 MB database does not take minutes.
+/// turns, large enough that a database of tens of megabytes does not take minutes.
 const BACKUP_PAGES_PER_STEP: std::ffi::c_int = 256;
 const BACKUP_PAUSE: Duration = Duration::from_millis(25);
 
@@ -167,16 +167,15 @@ pub fn read_synced_heads(
         return Ok(BTreeMap::new());
     }
     let db = open_read_only(node_db)?;
-    // A table this version has not met is not a failure: the node's schema is heartwood's, and
-    // this tool is not entitled to a release every time heartwood adds or renames one.
     let mut statement = match db
         .prepare("select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head")
     {
         Ok(statement) => statement,
-        // Only the table or the column being absent. Anything else, a database that will not
-        // open or an image that is corrupt, is propagated: rendered as an empty map it reached
-        // `doctor` as "the node has no record of what any other node holds", which sent the
-        // reader to start a node that is already running.
+        // Only the table or the column being absent, which is heartwood moving its schema on.
+        // Anything else, a database that will not open or an image that is corrupt, is
+        // propagated: rendered as an empty map it reached `doctor` as "the node has no record
+        // of what any other node holds", which sent the reader to start a node that is
+        // already running.
         Err(e) if is_absent_from_this_schema(&e) => return Ok(BTreeMap::new()),
         Err(e) => return Err(e.into()),
     };
@@ -220,13 +219,11 @@ pub fn read_alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
 /// function promises, so it is recorded here and reported by the caller, rather than found
 /// afterwards by the person whose home it is.
 ///
-/// There used to be a fallback here to a writable connection, for "a log a read-only
-/// connection cannot recover". It never ran, and would not have helped if it had.
-/// `open_with_flags` is lazy, so a read-only open of a database whose log cannot be indexed
-/// succeeds and the first query is what fails; the fallback sat behind an `Err` arm that a
-/// write-ahead log never reaches. And the only case where the read genuinely fails is a
-/// directory this process may not write, where a writable connection cannot make the `-shm`
-/// any more than a read-only one can.
+/// No fallback to a writable connection, because one cannot help: `open_with_flags` is lazy,
+/// so a read-only open succeeds even when the log cannot be indexed and the first query is
+/// what fails, and the only case where reading genuinely fails is a directory this process may
+/// not write, where a writable connection cannot make the `-shm` any more than a read-only one
+/// can.
 fn open_read_only(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
     let db = Connection::open_with_flags(path, flags).map_err(Error::Sqlite)?;
@@ -277,8 +274,8 @@ pub fn drain_touched() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// What to say about one of them. In one place because it is both printed by the run and
-/// recorded in the manifest of a backup, and those two must not drift apart.
+/// The warning for a database that reading touched. In one place because it is both printed
+/// by the run and recorded in the manifest of a backup, and those two must not drift apart.
 pub fn touched_warning(path: &Path) -> String {
     format!(
         "reading {} created the `-shm` index beside it: a database with a write-ahead log \

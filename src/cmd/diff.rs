@@ -131,11 +131,10 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
                 term::count(added.len(), "repository", "repositories")
             ));
             for rid in &added {
-                // By name here and by rid in the report above, for the same reason each way
+                // By name here and by rid in the JSON report, for the same reason each way
                 // round: a person cannot recognise a rid, and a machine cannot look anything
                 // up with a name. A repository that is new is in the inventory, so its name
-                // is known; one that has gone is not, which is why the line below only counts
-                // them.
+                // is known; one that has gone is not, which is why gone ones are only counted.
                 term.hint(&inventory.display_name(rid));
             }
         }

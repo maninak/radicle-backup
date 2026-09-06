@@ -88,7 +88,7 @@ impl Home {
         self.path.join("keys")
     }
 
-    /// The 444 bytes that are the identity. Losing this file is the only unrecoverable loss.
+    /// The secret key, which is the identity. Losing this file is the only unrecoverable loss.
     pub fn secret_key(&self) -> PathBuf {
         self.keys_dir().join("radicle")
     }
@@ -265,9 +265,6 @@ impl Home {
             match name.to_str() {
                 Some(name) if name.starts_with('z') => rids.push(format!("rad:{name}")),
                 Some(_) => {}
-                // Skipped, and said so. Dropping it silently would write an archive missing a
-                // repository and call the run a success, which is the failure this whole tool
-                // exists to make impossible.
                 None => unreadable.push(entry.file_name().to_string_lossy().into_owned()),
             }
         }
@@ -318,8 +315,8 @@ mod tests {
     /// stopped". A control socket is created `srwxrwxr-x` inside a directory, so a home
     /// reached over a mount another user owns answers "stopped" about a node that is up.
     /// `restore --force` then wrote over storage a live node was holding, and `--stop-node`
-    /// recorded a stop it never performed. The three answers it can give are walked in turn:
-    /// nothing listening, somebody listening, and a question this process cannot put.
+    /// recorded a stop it never performed. Every answer it can give is walked in turn: nothing
+    /// listening, somebody listening, and a question this process cannot put.
     #[cfg(unix)]
     #[test]
     fn a_socket_that_could_not_be_asked_is_not_reported_as_a_stopped_node() {

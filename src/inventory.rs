@@ -1,6 +1,6 @@
 //! Deciding which repositories an archive carries, and what it knows about them.
 //!
-//! Two costs are kept apart on purpose. Deciding what is yours reads files and spawns nothing,
+//! Two costs are kept apart. Deciding what is yours reads files and spawns nothing,
 //! so it stays cheap on a seed holding twelve thousand repositories. Gathering the paperwork
 //! (name, delegates, visibility) asks `rad`, so it happens only for repositories that are
 //! actually yours.
@@ -145,7 +145,7 @@ pub fn collect(
     // prevent. One warning for all of them, not one each: a `rad` that has stopped answering
     // fails for every repository at once, and a seed holding thousands would otherwise put
     // thousands of lines into `manifest.warnings`, which is the same manifest the writer
-    // refuses its own archive over at 8 MiB.
+    // refuses its own archive over past `MAX_MANIFEST_BYTES`.
     if let Some(why) = first_unreadable {
         warnings.push(unreadable_warning(&unreadable, &selected, &why));
     }
@@ -453,9 +453,9 @@ mod tests {
         let many: BTreeSet<String> = (0..9).map(|n| format!("rad:z{n:02}")).collect();
         let warning = unreadable_warning(&many, &many, "fatal: not a git repository");
 
-        // Same ceiling as the line above it: a storage directory that has gone would fail for
+        // Same ceiling as the `rad` warning: a storage directory that has gone would fail for
         // every repository at once, and one line each would fill the manifest that the writer
-        // then refuses its own archive over at 8 MiB.
+        // then refuses its own archive over past `MAX_MANIFEST_BYTES`.
         assert_eq!(warning.lines().count(), 1);
         assert!(warning.contains("9 repositories"), "{warning}");
         assert!(warning.contains("and 4 more"), "{warning}");
@@ -471,7 +471,7 @@ mod tests {
 
         // A `rad` that has stopped answering fails for every repository at once. One line per
         // repository would put thousands of them in `manifest.warnings`, and that manifest is
-        // the one the writer refuses its own archive over at 8 MiB.
+        // the one the writer refuses its own archive over past `MAX_MANIFEST_BYTES`.
         assert_eq!(warning.lines().count(), 1);
         assert!(warning.contains("12 repositories"), "{warning}");
         assert!(warning.contains("and 7 more"), "{warning}");

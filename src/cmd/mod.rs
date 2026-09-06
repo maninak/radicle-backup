@@ -48,9 +48,9 @@ impl Ctx {
 
 /// The passphrase for opening an archive, if that archive wants one.
 ///
-/// One place, because `restore`, `show` and `verify` each carried a verbatim copy of it, and
-/// a change to the wording or to where a passphrase may come from had to land in all three or
-/// two verbs would start asking differently from the third.
+/// One place, because every verb that opens an archive carried its own copy of this, and a
+/// change to the wording or to where a passphrase may come from had to land in each copy or
+/// the verbs would start asking differently from one another.
 pub fn read_archive_passphrase(
     ctx: &Ctx,
     archive: &Path,
@@ -234,10 +234,10 @@ pub fn rfc3339_stamp(at: jiff::Timestamp) -> String {
 mod tests {
     use super::*;
 
-    /// Four sources for one answer, and the order between them decides whether `ls`, `prune`
-    /// and `doctor` look where the last archive actually went or at the working directory.
-    /// Untestable while the variable was read inside the function: setting one for a test sets
-    /// it for every other test in the process.
+    /// Several sources for one answer, and the order between them decides whether a verb
+    /// looks where the last archive actually went or at the working directory. Untestable
+    /// while the variable was read inside the function: setting one for a test sets it for
+    /// every other test in the process.
     #[test]
     fn where_archives_live_prefers_the_flag_then_the_variable_then_where_the_last_one_went() {
         let mut record = crate::state::Record {

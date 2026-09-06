@@ -72,7 +72,7 @@ pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
             Some(Archive {
                 bytes: entry.metadata().map(|meta| meta.len()).unwrap_or_default(),
                 taken: parse_stamp(&stamp),
-                // Nineteen bytes per archive in a directory listing, which is cheaper than
+                // One short read per archive in a directory listing, which is cheaper than
                 // being wrong about whether somebody's key is readable.
                 encrypted: crate::crypt::looks_encrypted(&path).ok(),
                 path,
@@ -286,8 +286,8 @@ mod tests {
 
         // The writer used to spell the length of the short node id by hand while this reader
         // matched on SHORT_NODE_ID_LEN. They agreed only by coincidence, and moving the
-        // constant would
-        // have made every new archive invisible to `ls`, `prune` and `--keep` at once.
+        // constant would have made every new archive invisible to `ls`, `prune` and `--keep`
+        // at once.
         let found = in_dir(&dir, NODE).expect("the directory is readable");
         assert_eq!(found.iter().map(Archive::name).collect::<Vec<_>>(), [name]);
 

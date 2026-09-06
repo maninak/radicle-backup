@@ -2,7 +2,7 @@
 //!
 //! Separate from the archiving itself because it is the one part of a backup that changes the
 //! machine: everything else reads. A guard type keeps the restart on the unwinding path, which
-//! is where it has to be when `run` has a dozen ways to fail between the stop and the finish.
+//! is where it has to be when `run` can fail anywhere between the stop and the finish.
 
 use std::time::{Duration, Instant};
 
@@ -23,10 +23,10 @@ const NODE_STOP_POLL: Duration = Duration::from_millis(200);
 /// cannot strand a seed, and the person who pressed Ctrl-C is by definition at the keyboard.
 /// Revisit if `--stop-node` ever becomes something a machine turns on by itself.
 ///
-/// A guard rather than a pair of booleans and a call at the end, because `run` has about
-/// fifteen `?` sites between the stop and the restart: a passphrase that cannot be read, a
-/// repository that changes size mid-read, a full disk. Every one of them used to unwind past
-/// the restart and leave a seed offline until somebody noticed. `Drop` runs on all of them.
+/// A guard rather than a pair of booleans and a call at the end, because every `?` in `run`
+/// between the stop and the restart (a repository that changes size mid-read, a full disk)
+/// used to unwind past the restart and leave a seed offline until somebody noticed. `Drop`
+/// runs on all of them.
 pub(super) struct NodeGuard<'a> {
     ctx: &'a Ctx,
     rad: Option<&'a Rad>,
@@ -68,7 +68,7 @@ impl Drop for NodeGuard<'_> {
     }
 }
 
-/// Stop the node if asked, and say so plainly if it is running and we were not.
+/// Stop the node when `--stop-node` asks for it, and warn when it is running and nothing asked.
 ///
 /// Only git storage is at risk from a running node: the databases are snapshotted through
 /// SQLite's own backup API, and keys and config do not change. So a running node is a warning
@@ -144,9 +144,9 @@ pub(super) fn quiesce<'a>(
     };
 
     // A stop that failed outright is asked about once and no more: there is nothing in
-    // flight to wait for, and spending the whole timeout on it only delays the refusal by
-    // twenty seconds. A stop that was accepted gets the full deadline, because the node closes
-    // its socket when it is done serving and that is not instant.
+    // flight to wait for, and the whole timeout spent on it only delays the refusal. A stop
+    // that was accepted gets the full deadline, because the node closes its socket when it is
+    // done serving and that is not instant.
     let deadline = Instant::now()
         + if stop_accepted {
             NODE_STOP_TIMEOUT
@@ -166,8 +166,8 @@ pub(super) fn quiesce<'a>(
     node.was_stopped_by_backup = false;
     // Both of these say the socket is still being served, and neither knows that when the
     // socket is the thing that could not be reached: the same EACCES that made the state a
-    // doubt makes every poll below a doubt too. Saying so is the difference between sending
-    // somebody to stop a node and sending them to look at a permission.
+    // doubt made every poll above a doubt too. Saying so is the difference between sending
+    // the user to stop a node and sending them to look at a permission.
     let still_up = match &why_running_is_unknown {
         Some(doubt) => format!("the node could not be asked whether it stopped ({doubt})"),
         None => "the node is still serving its control socket".to_string(),

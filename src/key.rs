@@ -13,8 +13,10 @@ use crate::error::{Error, Result};
 
 /// Multicodec prefix for an ed25519 public key, as the varint pair `did:key` expects.
 const MULTICODEC_ED25519_PUB: [u8; 2] = [0xed, 0x01];
-/// The comment `rad auth` writes into the key file. Kept so a rebuilt key is byte-comparable
-/// with one `rad` would have written.
+/// The comment `rad auth` writes into the key file. Kept so a key rebuilt from a seed carries
+/// the same one, which is what a reader comparing two key files looks at. An unprotected key
+/// then matches `rad`'s byte for byte; an encrypted one never can, because the salt and the
+/// ciphertext come from `OsRng`.
 const RADICLE_KEY_COMMENT: &str = "radicle";
 
 /// A public key, and the two names Radicle shows it under.

@@ -3,9 +3,9 @@
 //! Named for the container rather than for archives, because `archives.rs` beside it is a
 //! different subject: what this identity's archives are called and where they are found.
 //!
-//! Layers are ordinary formats in an ordinary order on purpose. Somebody with no copy of this
-//! tool, five years from now, can recover an identity with `age`, `tar` and `git` alone, and
-//! the instructions for doing that ride inside the archive.
+//! Layers are ordinary formats in an ordinary order, because somebody with no copy of this
+//! tool, five years from now, has to be able to recover an identity with `age`, `tar` and
+//! `git` alone. The instructions for doing that ride inside the archive.
 //!
 //! The manifest is written last, because it carries the digest of every entry as that entry
 //! was written. A manifest written first could only carry digests of what was on disk before
@@ -270,7 +270,7 @@ impl<'a> Reader<'a> {
 
             // `entry.size()`, not `header().size()`: a PAX header can override the ustar
             // size field, and the override is what bounds the reader. Reading the ustar field
-            // instead, both ceilings below saw a declared 1 while the entry handed out
+            // instead, the ceilings below saw a declared 1 while the entry handed out
             // gigabytes.
             let declared = entry.size();
 
@@ -401,11 +401,11 @@ fn is_portable_entry_name(entry_path: &str) -> bool {
 
 /// Refuse a repository id that would not stay a single directory under `storage/`.
 ///
-/// Entry names are checked above, but the ids in the manifest are a second, separate source of
-/// paths: `Home::repository_path` joins one onto the home, and `Path::join` with an absolute
-/// component throws the base away. An id of `rad:../../x` got `git init --bare` run on it
-/// outside the home. A real id is `rad:` and base58, so anything else is refused here, once,
-/// rather than at each of restore, verify and sync.
+/// `reject_traversal` checks entry names, but the ids in the manifest are a second, separate
+/// source of paths: `Home::repository_path` joins one onto the home, and `Path::join` with an
+/// absolute component throws the base away. An id of `rad:../../x` got `git init --bare` run
+/// on it outside the home. A real id is `rad:` and base58, so anything else is refused here,
+/// once, rather than at each of restore, verify and sync.
 fn reject_hostile_rid(rid: &str, archive: &Path) -> Result<()> {
     if !crate::rad::is_identifier(rid) {
         return Err(Error::NotAnArchive {
@@ -702,9 +702,9 @@ mod tests {
         encoder.write_all(&tar).expect("the tar compresses");
         encoder.finish().expect("the encoder closes");
 
-        // Refused by `scan`, which is what every verb calls before it writes anything: the
-        // entry names are checked elsewhere, and this is the second, separate place an
-        // archive gets to state a path.
+        // Refused by `scan`, which is what every verb calls before it writes anything:
+        // `reject_traversal` covers entry names, and the manifest is the second, separate
+        // place an archive gets to state a path.
         let refused = Reader::open(&path, None, &crypt::Identities::default())
             .expect("the outer layers still open")
             .scan(&path);

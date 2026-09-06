@@ -22,7 +22,7 @@ pub struct Report {
     pub manifest: Manifest,
     pub problems: Vec<String>,
     pub checks: Vec<(String, bool)>,
-    /// the archive that was checked, which is not always the one the caller named: with no
+    /// The archive that was checked, which is not always the one the caller named: with no
     /// argument this is whichever one was newest.
     pub archive: std::path::PathBuf,
 }

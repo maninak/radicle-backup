@@ -549,9 +549,8 @@ fn archive_repositories(
 
     let mut archived = 0;
     let mut bundle_failures = Vec::new();
-    // Where each record sits, looked up once. Finding it by scanning the whole vec per
-    // bundle is a scan per repository, and a seed archiving thousands of them pays for that
-    // twice over: once here and once in whatever reads the result.
+    // Where each record sits, indexed once, because a scan of `manifest.repos` per bundle is
+    // quadratic in the repository count and a seed carries thousands.
     let by_rid: std::collections::BTreeMap<String, usize> = manifest
         .repos
         .iter()
@@ -753,12 +752,11 @@ fn report(
     // A private repository left out of the archive is only lost if nobody else has it: the
     // owner may have allowed a peer to hold it, and a peer that holds it can hand it back.
     //
-    // Judged on what REACHED the archive, not on what was selected for it.
-    // `inventory.records`
-    // never has its `bundle` set (that field is filled on `manifest.repos`, a different
-    // collection), so the old first clause was a constant true, and a repository whose bundle
-    // failed stayed in `selected` and was therefore counted as carried. The one repository
-    // that had just become unrecoverable was the one this line stayed silent about.
+    // Judged on what REACHED the archive, not on what was selected for it. `bundle` is set on
+    // `manifest.repos`, never on `inventory.records`, so a check against the inventory was a
+    // constant, and a repository whose bundle failed stayed in `selected` and counted as
+    // carried. The one repository that had just become unrecoverable was the one this warning
+    // stayed silent about.
     let carried: BTreeSet<&str> = manifest
         .repos
         .iter()

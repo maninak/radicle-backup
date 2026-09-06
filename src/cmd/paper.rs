@@ -62,14 +62,15 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
 
     // The QR encodes the key, so the SVG carrying it is key material as much as the text is.
     let qr = Zeroizing::new(qr_svg(&secret_text)?);
-    // Both hold the key or its 24 words in the clear. `render` returns its buffer by move, so
-    // wrapping the result wipes the sheet itself rather than a copy of it.
+    // Holds the key or its 24 words in the clear, as the QR does.
     let secret_html = Zeroizing::new(if args.words {
         word_grid(&secret_text)
     } else {
         format!("<pre class=\"key\">{}</pre>", escape(&secret_text))
     });
 
+    // `render` returns its buffer by move, so wrapping the result wipes the sheet itself
+    // rather than a copy of it.
     let sheet = Zeroizing::new(render(Sheet {
         alias: ctx.home.read_alias()?.as_deref().unwrap_or("unnamed"),
         did: &identity.did(),
@@ -107,7 +108,8 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
 /// Everything the sheet says, already computed. Split from `run` so that the escaping can be
 /// tested against the real template without a home to read it from.
 struct Sheet<'a> {
-    /// Raw, straight out of `config.json`. `render` escapes it; nothing else may.
+    /// Raw, straight out of `config.json`. `render` escapes it and nothing else may, because
+    /// escaping twice prints `&amp;lt;` on the sheet where the alias should be.
     alias: &'a str,
     did: &'a str,
     fingerprint: &'a str,

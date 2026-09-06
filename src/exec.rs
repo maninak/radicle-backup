@@ -1,10 +1,10 @@
 //! Running the two programs this tool delegates to, `rad` and `git`.
 //!
-//! Delegating instead of linking is deliberate. The user's own `rad` and `git` are by
-//! definition the right versions for the home being backed up, so an archive taken by an old
-//! build of this tool still reads a new storage format, and a new build still reads an old
-//! one. Revisit when heartwood publishes a stable on-disk format guarantee that makes linking
-//! `radicle` safe across versions.
+//! Delegated rather than linked, because the user's own `rad` and `git` are by definition the
+//! right versions for the home being backed up: an archive taken by an old build of this tool
+//! still reads a new storage format, and a new build still reads an old one. Revisit when
+//! heartwood publishes a stable on-disk format guarantee that makes linking `radicle` safe
+//! across versions.
 
 use std::ffi::OsStr;
 use std::io;
@@ -151,14 +151,16 @@ impl Tool {
         if let Some(home) = &self.home {
             cmd.env("RAD_HOME", home);
         }
-        // Git must not read the invoking user's aliases, hooks or pager: this tool parses
-        // git's output, and a `[pager] log = less` in someone's config would hang the run.
+        // No pager and no credential prompt, because this tool parses git's output and runs
+        // unattended: a `[pager] log = less` in the user's config, or a prompt for a password,
+        // would hang the run. The system-wide config is skipped for the same reason; the user's
+        // own config, aliases and hooks are still read.
         cmd.env("GIT_PAGER", "cat");
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.env("GIT_TERMINAL_PROMPT", "0");
         // Removed here, in the one place every spawn goes through, and by walking `Protects`
-        // rather than by naming variables: a fourth secret added to that enum is scrubbed by
-        // this loop on the day it appears, where a list here would have to be remembered. The
+        // rather than by naming variables: a secret added to that enum is scrubbed by this
+        // loop on the day it appears, where a list here would have to be remembered. The
         // walk is a `match` chain and not an array precisely so the compiler asks.
         for protects in crate::crypt::Protects::all() {
             if self.secrets == Secrets::Only(protects) {

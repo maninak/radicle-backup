@@ -24,8 +24,8 @@ pub const RESTORE_SCRIPT_ENTRY: &str = "restore.sh";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
-    /// The 524 bytes nothing can give back, secret key and public half together, plus the
-    /// config that names them.
+    /// The secret key and its public half, which nothing can give back, plus the config that
+    /// names them.
     Identity,
     /// Identity, plus the policies, aliases and inventory a person cannot retype.
     State,
@@ -55,12 +55,14 @@ pub enum RepoSelection {
     None,
     /// Only the repositories the open network does not carry: the private ones.
     Private,
-    /// Private repositories, the ones you delegate, and any whose namespace holds your refs.
+    /// Private repositories, the ones the user delegates, and any whose namespace holds the
+    /// user's refs.
     Mine,
     /// Everything the seeding policy allows.
     Seeded,
     /// Every repository in storage.
     All,
+    /// Written by a newer build than this one.
     #[serde(other)]
     Unknown,
 }
@@ -112,7 +114,7 @@ pub struct Manifest {
     #[serde(default)]
     pub policies: PolicySummary,
     /// Things the user should know that did not stop the run: a skipped repository, a
-    /// database that had to be opened writable, a node that was running.
+    /// database whose reading left an `-shm` index beside it, a node that was running.
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -181,9 +183,9 @@ pub struct SourceInfo {
     /// which only `move` does.
     ///
     /// A home restored from an archive where this is false may not be the only one holding the
-    /// identity, and two nodes signing under one peer id is the one hazard everyone in the
-    /// thread that produced this tool agreed on. `None` in an archive written before this
-    /// field existed, which is the case nothing here can resolve either way.
+    /// identity, and two nodes signing under one peer id fork that peer's history. `None` in an
+    /// archive written before this field existed, which is the case nothing here can resolve
+    /// either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retires_key: Option<bool>,
 }

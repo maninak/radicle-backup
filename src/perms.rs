@@ -14,7 +14,7 @@ pub fn set_dir_owner_only(path: &Path) -> Result<()> {
 }
 
 /// Copy a file that may hold key material, landing it owner-only. Missing sources are not an
-/// error: an archive of one tier simply does not carry what another tier would.
+/// error: an archive of one tier does not carry what another tier would.
 pub fn copy_secret(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
@@ -155,11 +155,11 @@ mod platform {
 
     static ANNOUNCED: Once = Once::new();
 
-    /// Windows has no mode bits, and restricting an ACL from here would mean carrying a
-    /// Windows API dependency into a tool whose whole point is being easy to audit. So the
-    /// file inherits the permissions of the folder it is written into, and this says so once,
-    /// out loud, rather than letting a caller believe in a `0600` that is not there. The same
-    /// holds for any other platform that cannot express "mine alone".
+    /// Windows has no mode bits, and restricting an ACL from here would mean a Windows API
+    /// dependency. So the file inherits the permissions of the folder it is written into, and
+    /// this says so once, out loud, rather than letting a caller believe in a `0600` that is
+    /// not there. The same holds for any other platform that cannot express "mine alone".
+    /// Revisit if a dependency-free way to set an ACL turns up.
     fn announce(path: &Path) {
         ANNOUNCED.call_once(|| {
             eprintln!(
@@ -226,11 +226,11 @@ pub use platform::create_private_dir;
 /// Put `bytes` at `path` so that whatever happens, the path holds either what was there
 /// before or the whole of the new content, and never a prefix of it or nothing at all.
 ///
-/// `write_owner_only` unlinks the target before creating it, which is what makes the mode
-/// argument mean anything (see `create_private_file`) and what makes the window dangerous: a
-/// `restore --force` over an occupied home has already destroyed the old secret key by the
-/// time the first byte of the new one is written, so a crash, a full disk or a killed run
-/// leaves a home with no identity at all. Staged beside the target and renamed over it, the
+/// `create_private_file` unlinks the target before creating it, which is what makes the mode
+/// argument mean anything and what makes writing in place dangerous: a `restore --force` over
+/// an occupied home has already destroyed the old secret key by the time the first byte of the
+/// new one is written, so a crash, a full disk or a killed run leaves a home with no identity
+/// at all. Staged beside the target and renamed over it, the
 /// same failure leaves the old file exactly as it was, because a rename within a directory is
 /// atomic. There is no corresponding fsync of the parent: a crash may lose the rename, but
 /// losing the rename means keeping the old file, which is the promise this function makes.
