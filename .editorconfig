@@ -17,6 +17,11 @@ max_line_length = 100
 [justfile]
 indent_size = 4
 
+# Tabs, because the shell scripts here were lifted out of `just` recipes, which are tab
+# indented, and `assets/restore.sh` is read back by a test that matches on its indentation.
+[*.sh]
+indent_style = tab
+
 # A trailing double space is a line break in markdown, so trimming it changes the text.
 [*.md]
 trim_trailing_whitespace = false
