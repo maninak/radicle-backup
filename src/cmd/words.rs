@@ -11,6 +11,10 @@ use crate::crypt;
 use crate::error::{Error, Result};
 use crate::perms::{set_dir_owner_only, write_owner_only};
 
+/// Room for the longest 24-word BIP-39 line in English, so the buffer it is read into never
+/// grows: 24 words of 8 letters, 23 spaces, and a line ending.
+const TYPED_LINE: usize = 24 * 8 + 23 + 2;
+
 /// Rebuild an identity from a mnemonic, for when the paper sheet is all that is left.
 pub fn restore(ctx: &Ctx) -> Result<()> {
     use std::io::BufRead;
@@ -31,7 +35,12 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     }
     // Zeroizing, like every other buffer that holds key material: these 24 words ARE the key,
     // so the line they arrive on cannot be left in freed heap for a later allocation to see.
-    let mut line = Zeroizing::new(String::new());
+    //
+    // Sized before the first byte, because `read_line` grows a buffer that starts empty, and
+    // every growth frees a block still holding the words read so far, which the `Zeroizing`
+    // around the final buffer never reaches. Room for the longest mnemonic English spells: 24
+    // words of at most 8 letters, their separators, and a line ending.
+    let mut line = Zeroizing::new(String::with_capacity(TYPED_LINE));
     std::io::stdin()
         .lock()
         .read_line(&mut line)
@@ -86,4 +95,25 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     ctx.term
         .hint("your repositories come back with `rad clone <rid>` or `rad seed <rid>`");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The constant against the word list itself, not against a number typed twice. A buffer
+    /// one byte short still grows, and growing is the whole of what it is there to stop.
+    #[test]
+    fn the_typed_line_has_room_for_the_longest_words_english_spells() {
+        let longest = bip39::Language::English
+            .word_list()
+            .iter()
+            .map(|word| word.len())
+            .max()
+            .expect("the english word list is not empty");
+        assert!(
+            TYPED_LINE >= 24 * longest + 23 + 2,
+            "the longest word is {longest} letters, so 24 of them do not fit in {TYPED_LINE}"
+        );
+    }
 }
