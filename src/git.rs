@@ -97,6 +97,26 @@ impl Git {
         ])
     }
 
+    /// Whether this copy actually holds the object `oid` names.
+    ///
+    /// `restore` asks this only after `merge-base` has failed, to read that failure. A peer's
+    /// sigrefs commit that is genuinely not on this disk is the fork hazard, because our own
+    /// namespace is the one thing a pull never brings back; a `merge-base` that failed for any
+    /// other reason is a fact about this machine and must not be reported as one about a peer.
+    ///
+    /// `cat-file -e` without a `^{commit}` peel, which turns a missing object into the same
+    /// exit 128 an unreadable repository gives and so answers nothing. Bare, it exits 1 for
+    /// absent and keeps 128 for a repository it could not open.
+    pub fn holds_object(&self, git_dir: &Path, oid: &str) -> Result<crate::exec::Answer> {
+        self.tool.answers(&[
+            "--git-dir".as_ref(),
+            git_dir.as_os_str(),
+            "cat-file".as_ref(),
+            "-e".as_ref(),
+            oid.as_ref(),
+        ])
+    }
+
     /// Write every ref in the repository, namespaces included, into one bundle file.
     ///
     /// `--all` covers `refs/*` and `HEAD`, which on a Radicle repository means every peer's
@@ -249,7 +269,7 @@ pub fn config_entry(rid: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -266,7 +286,9 @@ mod tests {
 
     /// A helper that drives the real `git` to build a repository with two commits in it,
     /// returning its `--git-dir` and the two oids, oldest first.
-    fn two_commits(scratch: &crate::cmd::Scratch) -> (std::path::PathBuf, String, String) {
+    pub(crate) fn two_commits(
+        scratch: &crate::key::tests::TestScratch,
+    ) -> (std::path::PathBuf, String, String) {
         let work = scratch.path_of("repo");
         std::fs::create_dir(&work).expect("the scratch directory is writable");
         let run = |args: &[&str]| {
@@ -288,6 +310,48 @@ mod tests {
         (work.join(".git"), first, second)
     }
 
+    /// One revision resolved in an existing repository, for a test that needs an oid the
+    /// helper above does not hand back.
+    pub(crate) fn rev_parse(git_dir: &std::path::Path, revision: &str) -> String {
+        let finished = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["rev-parse", revision])
+            .output()
+            .expect("git runs");
+        assert!(finished.status.success(), "git rev-parse {revision}");
+        String::from_utf8_lossy(&finished.stdout).trim().to_string()
+    }
+
+    /// Three answers again, and the point is that they are not the same three. `merge-base`
+    /// gives 128 both for an object that is not here and for a repository it cannot open, so
+    /// reading its failure needs a question that separates those, and `cat-file -e` bare is
+    /// it: 1 for absent, 128 kept for the repository itself.
+    #[test]
+    fn an_object_that_is_absent_answers_differently_from_a_repository_that_cannot_be_opened() {
+        let git = Git::new();
+        assert!(git.is_available(), "these tests drive the real git");
+        let scratch = crate::key::tests::TestScratch::create("git-holds-object");
+        let (git_dir, _, second) = two_commits(&scratch);
+
+        assert_eq!(
+            git.holds_object(&git_dir, &second).expect("git ran"),
+            crate::exec::Answer::Yes
+        );
+        assert_eq!(
+            git.holds_object(&git_dir, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+                .expect("git ran"),
+            crate::exec::Answer::No
+        );
+        let unopenable = git
+            .holds_object(std::path::Path::new("/nonexistent-git-dir"), &second)
+            .expect("git ran");
+        assert!(
+            matches!(unopenable, crate::exec::Answer::CouldNotAsk { .. }),
+            "{unopenable:?}"
+        );
+    }
+
     /// Three answers, and the third is the one that matters. `git merge-base --is-ancestor`
     /// exits 0 for yes, 1 for no, and 128 when it cannot resolve an oid at all, and that last
     /// one used to fold into "not an ancestor". Asked both ways round, two of those became
@@ -297,8 +361,7 @@ mod tests {
     fn an_oid_git_cannot_resolve_is_not_an_answer_about_ancestry() {
         let git = Git::new();
         assert!(git.is_available(), "these tests drive the real git");
-        let scratch = crate::cmd::Scratch::create(std::env::temp_dir().as_path())
-            .expect("a working directory is creatable");
+        let scratch = crate::key::tests::TestScratch::create("git-ancestry");
         let (git_dir, first, second) = two_commits(&scratch);
 
         assert_eq!(

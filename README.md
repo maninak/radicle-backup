@@ -214,9 +214,12 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ✓ installed the identity into ~/.radicle
 · restoring 2 repositories
 · comparing 2 repositories with the network
+· waiting for other nodes to say what they hold of these refs
 
 ✓ restored alice into ~/.radicle
   2 repositories, 16 seeding and 3 following policies
+  no other node has reported holding signed refs of yours missing here
+  that is not proof there are none: a fetch never brings your own back
 
   start the node with `rad node start`
 ```
@@ -231,15 +234,15 @@ So after restoring, and before handing control back, every restored repository i
 
 | Standing | What it means | What happens |
 |---|---|---|
-| no other node has reported holding anything else | Nobody has announced signed refs of yours that are missing here | Nothing to do, but see below |
+| no other node has reported holding anything else | Nothing on record contradicts this copy | Nothing to do, but see below |
 | holds work the network has not seen | The archive is ahead, as after a crash | Kept; push when ready |
 | another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here | **Named, and the restore exits `3`** |
-| could not be compared | The fetch failed, or no node has said what it holds since the archive was taken | Named; leave the node running and look again |
+| could not be compared | The fetch failed, `git` could not answer, or the node's own record could not be read | Named; leave the node running and look again |
 | nothing to compare it with | Delegated to you alone and announced to nobody, so no node will ever hold it | Nothing to do |
 
-A refs announcement is a separate message from a fetch, so after the fetches the run waits up to twenty seconds for other nodes to say what they hold, ending the moment every repository has an answer. Only what a node said more than an hour after the archive was taken counts: the record a restored home starts with is the archive's own, every row in it agrees with the archive by construction, and the hour is heartwood's own tolerance for a peer whose clock runs ahead. So an archive taken minutes ago reports `could not be compared` for everything, which is the truth about it.
+A refs announcement is a separate message from a fetch, so after the fetches the run waits twenty seconds for other nodes to say what they hold. It is a flat wait with nothing to poll for: heartwood rewrites a peer's row only when that peer announces a *different* head, so a node that holds exactly what you hold writes nothing, and no observable state ever says the answers are in.
 
-There is no "in step with the network" row, because this tool cannot establish it. A node's record of a peer is rewritten only when that peer announces a *different* head, so disagreement announces itself and agreement is silent. The check catches the hazard; it does not certify its absence. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
+That same rule is why there is no "in step with the network" row: this tool cannot establish it. A record with nothing in it against this copy is worth the first row's sentence and no more. What the check does catch is the case that matters, a node holding a head that is not yours, whether it recorded that before the backup or in the twenty seconds after the fetch. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
 
 `--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push.
 

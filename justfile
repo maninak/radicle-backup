@@ -148,9 +148,21 @@ names:
     fi
     rules=$((rules + 1))
 
+    # A test staging its files straight into the shared temporary directory. `Scratch` names
+    # its directory after the process id alone and refuses one that is already there, and the
+    # whole test binary is one process, so two such tests running at once refuse each other:
+    # a failure that depends on how the runner interleaves them and names neither cause.
+    # `TestScratch` exists for this and gives each test a parent of its own.
+    shared_scratch=$(grep -rn 'Scratch::create(std::env::temp_dir()' src/ || true)
+    if [ -n "$shared_scratch" ]; then
+    	echo "$shared_scratch" | sed 's/$/: two tests cannot share one scratch parent; use TestScratch::create("name")/' >&2
+    	found=1
+    fi
+    rules=$((rules + 1))
+
     # Zero rules run means the recipe stopped doing anything, not that the tree is clean.
-    if [ "$rules" -ne 3 ]; then
-    	echo "the name check ran $rules of its 3 rules, so it checked less than it claims" >&2
+    if [ "$rules" -ne 4 ]; then
+    	echo "the name check ran $rules of its 4 rules, so it checked less than it claims" >&2
     	found=1
     fi
     exit "$found"

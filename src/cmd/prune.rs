@@ -96,7 +96,6 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::unremoved_sidecar;
-    use crate::cmd::Scratch;
 
     /// A note that is simply not there is the ordinary case and says nothing. A note that is
     /// there and would not go is a note left standing over a deleted archive, and `prune` used
@@ -104,7 +103,7 @@ mod tests {
     /// longer held and nobody was told why.
     #[test]
     fn a_note_that_would_not_go_is_reported_and_one_that_was_never_there_is_not() {
-        let scratch = Scratch::create(std::env::temp_dir().as_path()).expect("a directory");
+        let scratch = crate::key::tests::TestScratch::create("prune-sidecar");
 
         assert!(unremoved_sidecar(&scratch.path_of("absent.txt")).is_none());
 

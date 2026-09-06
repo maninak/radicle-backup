@@ -68,7 +68,7 @@ jobs:
             missing=1
           fi
           exit "$missing"
-      # Three naming rules, spelled out here for the same reason the audit map above is. The
+      # Four naming rules, spelled out here for the same reason the audit map above is. The
       # rationale for each is in the `names` recipe in the justfile; a rule added there has
       # to be added here too.
       - name: Names
@@ -119,9 +119,15 @@ jobs:
             found=1
           fi
           rules=$((rules + 1))
+          shared_scratch=$(grep -rn 'Scratch::create(std::env::temp_dir()' src/ || true)
+          if [ -n "$shared_scratch" ]; then
+            echo "$shared_scratch" | sed 's/$/: two tests cannot share one scratch parent; use TestScratch::create("name")/' | sed 's/^/::error::/'
+            found=1
+          fi
+          rules=$((rules + 1))
           # Zero rules run means the step stopped doing anything, not that the tree is clean.
-          if [ "$rules" -ne 3 ]; then
-            echo "::error::the name check ran $rules of its 3 rules, so it checked less than it claims"
+          if [ "$rules" -ne 4 ]; then
+            echo "::error::the name check ran $rules of its 4 rules, so it checked less than it claims"
             found=1
           fi
           exit "$found"

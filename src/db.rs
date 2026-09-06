@@ -6,7 +6,7 @@
 //! database that is being written to, which is why a backup does not have to stop the node
 //! for these files.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -167,11 +167,12 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
 /// else is work that has left this machine; one whose head appears against nobody is work that
 /// exists on this disk and nowhere in the world.
 ///
-/// The timestamp comes back because a restored home's copy of this table is the archive's own,
-/// and a row that has not moved since then says what a peer held *when the backup was taken*,
-/// not what it holds now. Heartwood writes the column in milliseconds since the epoch. Two
-/// nodes on one head collapse to the later of the two: which node it was is nobody's question
-/// here, and the later timestamp is the stronger claim.
+/// Heads only, and no timestamp beside them. A restored home's copy of this table is the
+/// archive's own, so the obvious use for the column is to tell a row a peer wrote since the
+/// restore from a row the archive carried. It cannot: heartwood stamps each row with the
+/// ANNOUNCING node's clock, and replays historical gossip with its original timestamp, so the
+/// column orders nothing this reader's caller could act on. Which node said it is nobody's
+/// question here either, so two nodes on one head collapse to one entry.
 ///
 /// Empty when the node has never run or the table is not there, which a caller must read as
 /// "not known" rather than as "nothing has propagated". Every repository would otherwise look
@@ -181,7 +182,7 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
 pub fn read_synced_heads(
     node_db: &Path,
     own_node_id: &str,
-) -> Result<BTreeMap<String, BTreeMap<String, i64>>> {
+) -> Result<BTreeMap<String, BTreeSet<String>>> {
     if !node_db.is_file() {
         return Ok(BTreeMap::new());
     }
@@ -189,30 +190,20 @@ pub fn read_synced_heads(
     let Some(mut statement) = prepare_against_heartwood(
         &db,
         node_db,
-        "select repo, head, timestamp from \"repo-sync-status\" where node != ?1 \
-         order by repo, head",
+        "select repo, head from \"repo-sync-status\" where node != ?1 order by repo, head",
         "sync status table",
     )?
     else {
         return Ok(BTreeMap::new());
     };
     let rows = statement.query_map([own_node_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    let mut heads: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+    let mut heads: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for row in rows {
-        let (repo, head, said_at) = row?;
-        heads
-            .entry(repo)
-            .or_default()
-            .entry(head)
-            .and_modify(|seen| *seen = (*seen).max(said_at))
-            .or_insert(said_at);
+        let (repo, head) = row?;
+        heads.entry(repo).or_default().insert(head);
     }
     Ok(heads)
 }

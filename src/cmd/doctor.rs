@@ -5,7 +5,7 @@
 //! and every check says what it actually looked at, because a score nobody can audit is a
 //! score nobody should trust.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -838,7 +838,7 @@ fn check_replication(
 /// home with no `rad` on PATH was told to announce repositories that must never be announced.
 fn check_sigrefs_propagation(
     inventory: &Inventory,
-    synced_heads: &BTreeMap<String, BTreeMap<String, i64>>,
+    synced_heads: &BTreeMap<String, BTreeSet<String>>,
     node_id: &str,
     schema_has_moved_on: bool,
 ) -> Check {
@@ -866,12 +866,11 @@ fn check_sigrefs_propagation(
         let Some(mine) = repo.sigrefs.get(node_id) else {
             continue;
         };
-        // When each node said so is not this check's question: a head that reached anybody,
-        // ever, has left this disk. `restore` is the caller that has to date the same rows,
-        // because there the copy of this table came out of the archive being restored.
+        // When each node said so is not this check's question, and the reader no longer
+        // offers it: a head that reached anybody, ever, has left this disk.
         let elsewhere = synced_heads
             .get(&repo.rid)
-            .is_some_and(|heads| heads.contains_key(mine));
+            .is_some_and(|heads| heads.contains(mine));
         if !elsewhere {
             here_only.push(repo.display_name());
         }
@@ -1364,8 +1363,7 @@ mod tests {
     /// it sat on the disk, and `archive location` in the same report said it was there.
     #[test]
     fn an_archive_the_listing_does_not_recognise_is_not_reported_as_gone() {
-        let scratch = crate::cmd::Scratch::create(std::env::temp_dir().as_path())
-            .expect("a working directory is creatable");
+        let scratch = TestScratch::create("doctor-unlisted-archive");
         let here = scratch.path_of("mine.tar.zst.age");
         std::fs::write(&here, b"not an archive, but a file that is there")
             .expect("the scratch is writable");
@@ -1542,13 +1540,10 @@ mod tests {
         // Somebody else has zAAA's current head. Nobody has zBBB's: it was committed and
         // signed here and has reached nothing, which no file copy of the home can tell you.
         let synced = BTreeMap::from([
-            (
-                "rad:zAAA".to_string(),
-                BTreeMap::from([("aaa".to_string(), 1_700_000_000_000)]),
-            ),
+            ("rad:zAAA".to_string(), BTreeSet::from(["aaa".to_string()])),
             (
                 "rad:zBBB".to_string(),
-                BTreeMap::from([("older".to_string(), 1_700_000_000_000)]),
+                BTreeSet::from(["older".to_string()]),
             ),
         ]);
 
@@ -1564,10 +1559,8 @@ mod tests {
         // report the feature working as a fault, on every run, for everyone who has one.
         let mut private = public_repo_signed_at("rad:zPriv", "aaa");
         private.visibility = Some("private".to_string());
-        let synced = BTreeMap::from([(
-            "rad:zOther".to_string(),
-            BTreeMap::from([("x".to_string(), 1_700_000_000_000)]),
-        )]);
+        let synced =
+            BTreeMap::from([("rad:zOther".to_string(), BTreeSet::from(["x".to_string()]))]);
 
         let check = check_sigrefs_propagation(&holding(vec![private]), &synced, ME, false);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
