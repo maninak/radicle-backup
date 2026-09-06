@@ -282,6 +282,20 @@ impl RepoRecord {
     pub fn has_another_holder(&self) -> bool {
         self.other_seeds.is_some_and(|seeds| seeds > 0) || !self.allowed.is_empty()
     }
+
+    /// Whether a fetch has anybody at all to ask about this repository.
+    ///
+    /// "Private" is about announcement, not about reachability: `rad sync --fetch` has a
+    /// separate path for a private repository that goes to its delegates and its allowed
+    /// peers. So only one delegated to us alone and allowed to nobody has no network side,
+    /// and a private repository shared with a collaborator is exactly the one that can fork.
+    ///
+    /// A delegate list that is empty means nothing was read, not that there is nobody, so
+    /// that case falls through to the fetch: an unnecessary fetch costs a few seconds, and a
+    /// skipped comparison costs a peer history.
+    pub fn has_nowhere_to_fetch_from(&self) -> bool {
+        self.is_private() && self.allowed.is_empty() && self.delegates.len() == 1
+    }
 }
 
 #[cfg(test)]
@@ -370,4 +384,59 @@ mod tests {
             "a private repository allowed to a seed can be fetched back from it"
         );
     }
+
+    /// The gate `restore` uses to skip the sigrefs comparison. Skipping it for a repository
+    /// somebody else holds is how a restored copy forks its own peer history, so each way a
+    /// repository stays reachable is spelled out here rather than left to the one boolean.
+    #[test]
+    fn only_a_private_repository_delegated_to_us_alone_has_nobody_to_ask() {
+        let mut record = RepoRecord {
+            rid: "rad:zAAA".to_string(),
+            name: None,
+            visibility: Some("private".to_string()),
+            allowed: Vec::new(),
+            is_delegate: true,
+            delegates: vec![ONLY_US.to_string()],
+            scope: None,
+            policy: None,
+            head: None,
+            refs: 0,
+            sigrefs: BTreeMap::new(),
+            other_seeds: None,
+            bundle: None,
+        };
+        assert!(record.has_nowhere_to_fetch_from());
+
+        record.allowed = vec![SOMEBODY_ELSE.to_string()];
+        assert!(
+            !record.has_nowhere_to_fetch_from(),
+            "a private repository allowed to a peer is fetched from that peer"
+        );
+
+        record.allowed = Vec::new();
+        record.delegates.push(SOMEBODY_ELSE.to_string());
+        assert!(
+            !record.has_nowhere_to_fetch_from(),
+            "a private repository with a second delegate is fetched from that delegate"
+        );
+
+        record.delegates = Vec::new();
+        assert!(
+            !record.has_nowhere_to_fetch_from(),
+            "an archive too old to name the delegates says nothing about who holds it"
+        );
+
+        record.delegates = vec![ONLY_US.to_string()];
+        record.visibility = Some("public".to_string());
+        assert!(!record.has_nowhere_to_fetch_from());
+
+        record.visibility = None;
+        assert!(
+            !record.has_nowhere_to_fetch_from(),
+            "a repository nothing could ask about is not a repository nobody holds"
+        );
+    }
+
+    const ONLY_US: &str = "did:key:z6MkkfM3tPXNPrPevKr3uSiQtHPuwnNhu2yUVjgd2jXVsVz5";
+    const SOMEBODY_ELSE: &str = "did:key:z6MkjDYUKMUeY58Vtr8dGJrHRvnTfjKWVGCBYJDVTHXsXzm5";
 }

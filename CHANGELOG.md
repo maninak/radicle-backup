@@ -29,6 +29,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - A home whose key is there and cannot be looked at is no longer treated as an empty home. `restore --force` and `words --restore` both decided on `is_file()`, which is false for an unreadable directory as well as for an absent key.
 - `doctor` no longer reports "the node has no record of what any other node holds" when the node database is there and will not open.
 - A dry run now says when part of storage could not be measured. The estimate is meant to run high, and an unreadable directory silently counted as zero was the one thing making it run low.
+- `restore` compares a private repository with the network again when anybody else can hold it. Private means announced to nobody, not unreachable: `rad sync --fetch` goes to a private repository's delegates and allowed peers, so one shared with a collaborator was exactly the case the sigrefs check was skipped for, and skipping it is how a restored copy forks its own peer history. Only a private repository delegated to you alone and allowed to nobody is left uncompared now.
 
 ### Changed
 

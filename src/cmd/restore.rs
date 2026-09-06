@@ -659,10 +659,12 @@ fn compare_with_network(
         term::count(restored.len(), "repository", "repositories")
     ));
     for repo in restored {
-        // Announced to nobody on purpose, so there is no network side and never will be.
+        // Nobody to ask: announced to nobody, delegated to us alone, allowed to nobody.
         // Asking anyway spends a fetch per repository to fail, and reports the feature working
-        // as a fault.
-        if repo.is_private() {
+        // as a fault. Private on its own is not enough, because `rad sync --fetch` reaches the
+        // delegates and allowed peers of a private repository, and one shared with a
+        // collaborator is precisely the one whose sigrefs can be behind theirs.
+        if repo.has_nowhere_to_fetch_from() {
             standings.insert(repo.rid.clone(), Standing::NothingToCompare);
             continue;
         }
