@@ -59,7 +59,7 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     // not be the one it is retired against. `backup` carries on past a repository it cannot
     // bundle, which is right for a backup and wrong for the last copy before a machine is
     // left.
-    if outcome.incomplete {
+    if outcome.is_incomplete {
         return Err(Error::refused(
             "the archive this move would rely on is missing repositories that could not be bundled",
             "fix or remove the damaged repositories, then run the move again",

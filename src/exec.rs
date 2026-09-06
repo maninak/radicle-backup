@@ -72,11 +72,11 @@ impl Tool {
 
     /// Run and capture stdout, failing when the program does.
     pub fn output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<String> {
-        let out = self.raw(args)?;
-        if !out.status.success() {
-            return Err(self.failure(args, &out));
+        let finished = self.raw(args)?;
+        if !finished.status.success() {
+            return Err(self.failure(args, &finished));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(String::from_utf8_lossy(&finished.stdout).into_owned())
     }
 
     /// Run and capture stdout, treating a non-zero exit as "no answer" rather than as a
@@ -87,11 +87,11 @@ impl Tool {
     /// plumbing every one of these sits on and sharing that word said the wrong thing about
     /// which of them is the low-level one.
     pub fn answer<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
-        let out = self.raw(args)?;
-        if !out.status.success() {
+        let finished = self.raw(args)?;
+        if !finished.status.success() {
             return Ok(None);
         }
-        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+        Ok(Some(String::from_utf8_lossy(&finished.stdout).into_owned()))
     }
 
     /// Run and keep what the program said, whatever it exited with.
@@ -101,10 +101,10 @@ impl Tool {
     /// `answer` threw the word away and left the caller unable to tell a real answer from
     /// a systemd that could not be reached at all.
     pub fn spoken<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Spoken> {
-        let out = self.raw(args)?;
+        let finished = self.raw(args)?;
         Ok(Spoken {
-            stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
-            stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            stdout: String::from_utf8_lossy(&finished.stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&finished.stderr).trim().to_string(),
         })
     }
 
@@ -179,14 +179,16 @@ impl Tool {
             })
     }
 
-    fn failure<S: AsRef<OsStr>>(&self, args: &[S], out: &Output) -> Error {
+    fn failure<S: AsRef<OsStr>>(&self, args: &[S], finished: &Output) -> Error {
         Error::Command {
             command: self.display(args),
-            status: match out.status.code() {
+            status: match finished.status.code() {
                 Some(code) => format!("exit code {code}"),
                 None => "a signal".to_string(),
             },
-            stderr: String::from_utf8_lossy(&out.stderr).trim_end().to_string(),
+            stderr: String::from_utf8_lossy(&finished.stderr)
+                .trim_end()
+                .to_string(),
         }
     }
 

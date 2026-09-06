@@ -158,7 +158,12 @@ pub struct IdentityInfo {
     pub public_key: String,
     pub fingerprint: String,
     /// Whether the archived secret key carries its own passphrase.
-    pub key_encrypted: bool,
+    ///
+    /// The wire name stays `keyEncrypted`: an archive is read by versions that were never
+    /// built, and a field this one renamed would come back as `false` for every key that has
+    /// a passphrase.
+    #[serde(rename = "keyEncrypted")]
+    pub key_is_encrypted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,7 +194,8 @@ pub struct NodeInfo {
     /// Whether the node was serving its control socket when the archive was taken.
     pub was_running: bool,
     /// Whether this run stopped it, which is the only case where a restart is owed.
-    pub stopped_by_backup: bool,
+    #[serde(rename = "stoppedByBackup")]
+    pub was_stopped_by_backup: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,7 +232,8 @@ pub struct RepoRecord {
     pub allowed: Vec<String>,
     /// Whether the archived identity is one of this repository's delegates. A sole delegate
     /// who loses this key loses the repository's governance for good.
-    pub delegate: bool,
+    #[serde(rename = "delegate")]
+    pub is_delegate: bool,
     #[serde(default)]
     pub delegates: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -341,7 +348,7 @@ mod tests {
             name: None,
             visibility: Some("private".to_string()),
             allowed: Vec::new(),
-            delegate: true,
+            is_delegate: true,
             delegates: Vec::new(),
             scope: None,
             policy: None,

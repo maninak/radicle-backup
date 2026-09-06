@@ -175,13 +175,13 @@ fn remember(
     manifest: &Manifest,
     restored: &[RepoRecord],
     archive: &Path,
-    encrypted: bool,
+    is_encrypted: bool,
 ) {
     let mut record = state::Record::of(
         manifest,
         Some(archive),
         &manifest.identity.node_id,
-        encrypted,
+        is_encrypted,
     );
     // The archive described repositories it deliberately did not carry, the public ones the
     // network still has. A record that claimed those are here would make the next `diff`

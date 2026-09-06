@@ -63,7 +63,7 @@ pub fn run(ctx: &Ctx, args: &Target) -> Result<()> {
             let marks = [
                 repo.bundle.is_some().then_some("archived"),
                 repo.is_private().then_some("private"),
-                repo.delegate.then_some("delegate"),
+                repo.is_delegate.then_some("delegate"),
             ]
             .into_iter()
             .flatten()

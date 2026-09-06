@@ -41,14 +41,14 @@ const SCRIPT_MODE: u32 = 0o755;
 
 /// What a run produced, and whether it produced all of it.
 ///
-/// `incomplete` exists because a backup that lost a repository still writes a usable archive:
+/// `is_incomplete` exists because a backup that lost a repository still writes a usable archive:
 /// refusing the whole run over one damaged repository is worse for the user than carrying the
 /// rest. So the loss travels out as a flag and becomes exit 3, which is what an unattended
 /// timer can actually see. Without it, `rad backup` exited 0 on a run that dropped the one
 /// repository nothing else has a copy of.
 pub struct Outcome {
     pub path: Option<PathBuf>,
-    pub incomplete: bool,
+    pub is_incomplete: bool,
 }
 
 /// Why an archive is being written, which decides what its manifest says about the fate of the
@@ -138,7 +138,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         node.restart();
         return Ok(Outcome {
             path: None,
-            incomplete: false,
+            is_incomplete: false,
         });
     }
 
@@ -173,7 +173,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
             alias: home.alias()?,
             public_key: identity.to_openssh()?,
             fingerprint: identity.fingerprint(),
-            key_encrypted: secret.protection().is_encrypted(),
+            key_is_encrypted: secret.protection().is_encrypted(),
         },
         source: SourceInfo {
             host: hostname(),
@@ -185,7 +185,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         },
         node: NodeInfo {
             was_running: node.was_running,
-            stopped_by_backup: node.stopped_by_backup,
+            was_stopped_by_backup: node.was_stopped_by_backup,
         },
         entries: Vec::new(),
         repos: inventory.described.clone(),
@@ -315,7 +315,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     report(ctx, &manifest, &inventory, archived, path.as_deref())?;
     Ok(Outcome {
         path,
-        incomplete: bundled.dropped > 0,
+        is_incomplete: bundled.dropped > 0,
     })
 }
 
@@ -723,7 +723,7 @@ fn report(
         manifest.policies.followed
     ));
 
-    if !manifest.identity.key_encrypted {
+    if !manifest.identity.key_is_encrypted {
         term.warn("the archived key has no passphrase of its own");
     }
     // A private repository left out of the archive is only lost if nobody else has it: the

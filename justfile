@@ -5,7 +5,7 @@ default:
 
 # What CI runs on every push, in the order that fails fastest. CI spells the cargo steps
 # out itself rather than calling this, so a gate added here has to be added there too.
-check: fmt-check audit-map lint nonunix test
+check: fmt-check audit-map names lint nonunix test
 
 # Every file SECURITY.md sends a reviewer to still exists.
 #
@@ -31,6 +31,55 @@ audit-map:
     	missing=1
     fi
     exit "$missing"
+
+# Two naming rules a reviewer kept having to enforce by hand.
+#
+# Neither is a matter of taste. A local called `out` next to one called `err` reads as a pair
+# when one is a process and the other a file handle, and `if record.delegate` cannot be checked
+# by eye because it could as easily mean "has a delegate". Both were found across the whole
+# tree in one sweep, so both are worth a gate rather than another sweep later.
+#
+# Shell-only, like the audit map, so it costs nothing on any of the three CI platforms. CI
+# spells this out itself, so a rule added here has to be added there too.
+names:
+    #!/usr/bin/env sh
+    set -eu
+    found=0
+    rules=0
+
+    # A local named after how the value arrived rather than what it holds. Every one of these
+    # in this tree turned out to have a real name waiting: `stdout`, `stderr`, `printed`,
+    # `finished`, `said`, `read_back`.
+    placeholders='out|err|res|ret|val|tmp|data|thing|item|result'
+    named_for_nothing=$(grep -rEn "let (mut )?($placeholders)( |:|=)" src/ || true)
+    if [ -n "$named_for_nothing" ]; then
+    	echo "$named_for_nothing" | sed 's/$/: a local named after how it arrived, not what it holds/' >&2
+    	found=1
+    fi
+    rules=$((rules + 1))
+
+    # A bool that does not read as a claim, so a call site cannot be checked by eye.
+    #
+    # `src/cli.rs` is exempt: a field there IS the long flag clap derives from it, so its name
+    # belongs to the command line and renaming one breaks somebody's script. A field that goes
+    # on the wire is renamed here and pinned there with `#[serde(rename = ...)]`, because an
+    # archive is read by versions that were never built.
+    claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
+    not_a_claim=$(grep -rEn '^[[:space:]]+(pub )?[a-z_]+: bool,$' src/ \
+    	| grep -v '^src/cli.rs:' \
+    	| grep -vE ":[[:space:]]+(pub )?([a-z_]+_)?${claims}_" || true)
+    if [ -n "$not_a_claim" ]; then
+    	echo "$not_a_claim" | sed 's/$/: a bool has to read as a claim (is_, has_, was_, uses_, ...)/' >&2
+    	found=1
+    fi
+    rules=$((rules + 1))
+
+    # Zero rules run means the recipe stopped doing anything, not that the tree is clean.
+    if [ "$rules" -ne 2 ]; then
+    	echo "the name check ran $rules of its 2 rules, so it checked less than it claims" >&2
+    	found=1
+    fi
+    exit "$found"
 
 # Compile the suite the way a target that is not unix sees it.
 #

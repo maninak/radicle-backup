@@ -470,7 +470,7 @@ mod tests {
                 alias: Some("tester".to_string()),
                 public_key: "ssh-ed25519 AAAA".to_string(),
                 fingerprint: "SHA256:test".to_string(),
-                key_encrypted: true,
+                key_is_encrypted: true,
             },
             source: SourceInfo {
                 host: None,

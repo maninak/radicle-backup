@@ -31,17 +31,17 @@ pub(super) struct NodeGuard<'a> {
     ctx: &'a Ctx,
     rad: Option<&'a Rad>,
     pub(super) was_running: bool,
-    pub(super) stopped_by_backup: bool,
+    pub(super) was_stopped_by_backup: bool,
 }
 
 impl NodeGuard<'_> {
     /// Put the node back now rather than at the end of the scope, for the paths that want to
     /// report it in order. Idempotent: the flag is cleared, so `Drop` then does nothing.
     pub(super) fn restart(&mut self) {
-        if !self.stopped_by_backup {
+        if !self.was_stopped_by_backup {
             return;
         }
-        self.stopped_by_backup = false;
+        self.was_stopped_by_backup = false;
         self.ctx.term.step("starting the node again");
         let Some(rad) = self.rad else {
             self.ctx
@@ -94,7 +94,7 @@ pub(super) fn quiesce<'a>(
             ctx,
             rad,
             was_running: false,
-            stopped_by_backup: false,
+            was_stopped_by_backup: false,
         });
     }
     if !args.stop_node {
@@ -109,7 +109,7 @@ pub(super) fn quiesce<'a>(
             ctx,
             rad,
             was_running: true,
-            stopped_by_backup: false,
+            was_stopped_by_backup: false,
         });
     }
 
@@ -132,7 +132,7 @@ pub(super) fn quiesce<'a>(
         ctx,
         rad: Some(rad),
         was_running: true,
-        stopped_by_backup: true,
+        was_stopped_by_backup: true,
     };
 
     // A stop that failed outright is asked about once and no more: there is nothing in
@@ -155,7 +155,7 @@ pub(super) fn quiesce<'a>(
         std::thread::sleep(NODE_STOP_POLL);
     }
     // It never went down, so there is nothing this run stopped and nothing to put back.
-    node.stopped_by_backup = false;
+    node.was_stopped_by_backup = false;
     Err(if stopped {
         Error::refused(
             "the node is still serving its control socket after being asked to stop",

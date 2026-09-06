@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 /// Environment variable holding the archive passphrase, for cron jobs that cannot be asked.
 pub const PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
 /// Environment variable `rad` itself uses for the key passphrase, honoured for the same
-/// reason: so that a scheduled run needs no interactive terminal.
+/// reason: so that a scheduled run needs no is_interactive terminal.
 pub const KEY_PASSPHRASE_ENV: &str = "RAD_PASSPHRASE";
 /// Environment variable holding the passphrase that unlocks a `--identity` key file.
 ///
@@ -135,7 +135,7 @@ pub struct Identities {
     pub passphrase_file: Option<PathBuf>,
     /// Whether there is anybody to prompt. False means a locked key fails at once rather than
     /// blocking a timer on a question that will never be answered.
-    pub interactive: bool,
+    pub is_interactive: bool,
 }
 
 /// Wrap a reader so that it yields plaintext, whatever the archive was encrypted with.
@@ -346,7 +346,7 @@ pub fn read_passphrase(
     file: Option<&Path>,
     prompt: &str,
     purpose: Purpose,
-    interactive: bool,
+    is_interactive: bool,
 ) -> Result<Zeroizing<String>> {
     let variable = protects.env();
     let remedy = protects.remedy_for_empty();
@@ -366,7 +366,7 @@ pub fn read_passphrase(
             remedy,
         );
     }
-    if !interactive {
+    if !is_interactive {
         let file_instead = match protects.passphrase_file_flag() {
             Some(flag) => format!(", or pass {flag} <path>"),
             None => String::new(),
@@ -479,7 +479,7 @@ impl OfferedKeys {
             parsed.push(Box::new(key.with_callbacks(KeyPassphraseSource {
                 key_file: path.clone(),
                 passphrase_file: identities.passphrase_file.clone(),
-                interactive: identities.interactive,
+                is_interactive: identities.is_interactive,
                 asked: passphrases.clone(),
             })));
             offered.push(path.clone());
@@ -686,7 +686,7 @@ impl KeyPassphrases {
 struct KeyPassphraseSource {
     key_file: PathBuf,
     passphrase_file: Option<PathBuf>,
-    interactive: bool,
+    is_interactive: bool,
     asked: KeyPassphrases,
 }
 
@@ -726,7 +726,7 @@ impl age::Callbacks for KeyPassphraseSource {
             self.passphrase_file.as_deref(),
             &format!("Passphrase for the key {}: ", self.key_file.display()),
             Purpose::Opening,
-            self.interactive,
+            self.is_interactive,
         );
         let (remembered, given) = match answer {
             Ok(passphrase) => {
@@ -820,9 +820,9 @@ mod tests {
             &Identities::default(),
         )
         .expect("the header still opens, because the passphrase is right");
-        let mut out = Vec::new();
+        let mut read_back = Vec::new();
         let failure = reader
-            .read_to_end(&mut out)
+            .read_to_end(&mut read_back)
             .expect_err("a flipped byte cannot authenticate");
         assert!(failure.to_string().contains("damaged"), "{failure}");
     }
@@ -911,7 +911,7 @@ mod tests {
             &Identities {
                 files: key_files.to_vec(),
                 passphrase_file: passphrase_file.map(Path::to_path_buf),
-                interactive: false,
+                is_interactive: false,
             },
         )?;
         let mut plaintext = Vec::new();

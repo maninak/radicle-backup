@@ -68,6 +68,36 @@ jobs:
             missing=1
           fi
           exit "$missing"
+      # Two naming rules, spelled out here for the same reason the audit map above is. The
+      # rationale for each is in the `names` recipe in the justfile; a rule added there has
+      # to be added here too.
+      - name: Names
+        shell: bash
+        run: |
+          found=0
+          rules=0
+          placeholders='out|err|res|ret|val|tmp|data|thing|item|result'
+          named_for_nothing=$(grep -rEn "let (mut )?($placeholders)( |:|=)" src/ || true)
+          if [ -n "$named_for_nothing" ]; then
+            echo "$named_for_nothing" | sed 's/$/: a local named after how it arrived, not what it holds/' | sed 's/^/::error::/'
+            found=1
+          fi
+          rules=$((rules + 1))
+          claims='(is|are|has|have|was|were|can|should|must|will|does|did|uses|holds|needs|keeps|stops|starts|retires|assumes)'
+          not_a_claim=$(grep -rEn '^[[:space:]]+(pub )?[a-z_]+: bool,$' src/ \
+            | grep -v '^src/cli.rs:' \
+            | grep -vE ":[[:space:]]+(pub )?([a-z_]+_)?${claims}_" || true)
+          if [ -n "$not_a_claim" ]; then
+            echo "$not_a_claim" | sed 's/$/: a bool has to read as a claim (is_, has_, was_, uses_, ...)/' | sed 's/^/::error::/'
+            found=1
+          fi
+          rules=$((rules + 1))
+          # Zero rules run means the step stopped doing anything, not that the tree is clean.
+          if [ "$rules" -ne 2 ]; then
+            echo "::error::the name check ran $rules of its 2 rules, so it checked less than it claims"
+            found=1
+          fi
+          exit "$found"
       # `--locked`, so a Cargo.toml requirement widened without updating Cargo.lock is an error
       # rather than a silent re-resolve. Without it the dependency-age gate below sees no added
       # versions while the build pulls and runs a crate published this morning.

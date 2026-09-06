@@ -42,14 +42,14 @@ impl Git {
     /// Every ref in the repository, sorted by name so that two runs over an unchanged
     /// repository produce identical output.
     pub fn refs(&self, git_dir: &Path) -> Result<Vec<Ref>> {
-        let out = self.tool.output(&[
+        let printed = self.tool.output(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "for-each-ref".as_ref(),
             "--sort=refname".as_ref(),
             "--format=%(objectname) %(refname)".as_ref(),
         ])?;
-        Ok(out
+        Ok(printed
             .lines()
             .filter_map(|line| line.split_once(' '))
             .map(|(oid, name)| Ref {
@@ -61,7 +61,7 @@ impl Git {
 
     /// The object a ref points at, or `None` when the ref does not exist.
     pub fn ref_oid(&self, git_dir: &Path, name: &str) -> Result<Option<String>> {
-        let out = self.tool.answer(&[
+        let printed = self.tool.answer(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "rev-parse".as_ref(),
@@ -69,7 +69,7 @@ impl Git {
             "--quiet".as_ref(),
             format!("{name}^{{commit}}").as_ref(),
         ])?;
-        Ok(out
+        Ok(printed
             .map(|oid| oid.trim().to_string())
             .filter(|o| !o.is_empty()))
     }
@@ -77,13 +77,13 @@ impl Git {
     /// What `HEAD` is a symbolic ref to, which a bundle does not carry and a restore must set
     /// back by hand.
     pub fn head_target(&self, git_dir: &Path) -> Result<Option<String>> {
-        let out = self.tool.answer(&[
+        let printed = self.tool.answer(&[
             "--git-dir".as_ref(),
             git_dir.as_os_str(),
             "symbolic-ref".as_ref(),
             "HEAD".as_ref(),
         ])?;
-        Ok(out.map(|target| target.trim().to_string()))
+        Ok(printed.map(|target| target.trim().to_string()))
     }
 
     /// Whether `ancestor` is reachable from `descendant`. This is the fork test: a restored
@@ -120,10 +120,10 @@ impl Git {
     /// The refs a bundle carries. Reading them is also how a bundle is checked for being
     /// well formed without a repository to check its prerequisites against.
     pub fn bundle_refs(&self, bundle: &Path) -> Result<Vec<Ref>> {
-        let out =
+        let printed =
             self.tool
                 .output(&["bundle".as_ref(), "list-heads".as_ref(), bundle.as_os_str()])?;
-        Ok(out
+        Ok(printed
             .lines()
             .filter_map(|line| line.split_once(' '))
             .map(|(oid, name)| Ref {

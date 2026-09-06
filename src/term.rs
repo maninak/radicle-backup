@@ -14,14 +14,14 @@ pub enum Verbosity {
 }
 
 pub struct Term {
-    colour: bool,
-    interactive: bool,
+    uses_colour: bool,
+    is_interactive: bool,
     verbosity: Verbosity,
-    assume_yes: bool,
+    assumes_yes: bool,
 }
 
 impl Term {
-    pub fn new(verbosity: Verbosity, assume_yes: bool, force_no_colour: bool) -> Self {
+    pub fn new(assumes_yes: bool, verbosity: Verbosity, force_no_colour: bool) -> Self {
         // Both, and deliberately not `/dev/tty`, which is what rpassword would actually read
         // from and which stays open through a redirect. A tool that opened `/dev/tty` would
         // prompt a person who redirected stderr, which is friendlier, and would also HANG
@@ -29,14 +29,14 @@ impl Term {
         // for a backup means the backups quietly stop. Failing fast with a remedy line is the
         // trade this makes. Revisit if a `--batch` flag ever gives unattended runs their own
         // way to say there is nobody here.
-        let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
+        let is_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
         // NO_COLOR is honoured for any non-empty value, per the no-color.org convention.
         let no_colour_env = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         Self {
-            colour: io::stderr().is_terminal() && !no_colour_env && !force_no_colour,
-            interactive,
+            uses_colour: io::stderr().is_terminal() && !no_colour_env && !force_no_colour,
+            is_interactive,
             verbosity,
-            assume_yes,
+            assumes_yes,
         }
     }
 
@@ -52,12 +52,12 @@ impl Term {
     /// unit and the crontab in the README both pass `--quiet`, so routing warnings through
     /// `say` meant an unattended run could narrow what it archived and still look clean.
     fn always(&self, line: &str) {
-        let mut err = io::stderr();
-        let _ = writeln!(err, "{line}");
+        let mut stderr = io::stderr();
+        let _ = writeln!(stderr, "{line}");
     }
 
     fn paint(&self, code: &str, text: &str) -> String {
-        if self.colour {
+        if self.uses_colour {
             format!("\x1b[{code}m{text}\x1b[0m")
         } else {
             text.to_string()
@@ -123,8 +123,8 @@ impl Term {
     /// from the real thing. A closed pipe is the one exception, because `... | head` closes it
     /// on purpose and the run did nothing wrong.
     pub fn print(&self, line: &str) -> Result<()> {
-        let mut out = io::stdout();
-        match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        let mut stdout = io::stdout();
+        match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
             Err(e) => Err(Error::Bare(e)),
@@ -136,22 +136,22 @@ impl Term {
     }
 
     pub fn is_interactive(&self) -> bool {
-        self.interactive
+        self.is_interactive
     }
 
     /// Ask a yes/no question. With nobody to ask (cron, a pipe) the answer is no unless
     /// `--yes` was passed, because a backup tool that guesses "yes" for someone who is not
     /// there can overwrite a home nobody meant to touch.
     pub fn confirm(&self, question: &str) -> Result<bool> {
-        if self.assume_yes {
+        if self.assumes_yes {
             return Ok(true);
         }
-        if !self.interactive {
+        if !self.is_interactive {
             return Ok(false);
         }
-        let mut err = io::stderr();
-        write!(err, "{question} [y/N] ").map_err(Error::Bare)?;
-        err.flush().map_err(Error::Bare)?;
+        let mut stderr = io::stderr();
+        write!(stderr, "{question} [y/N] ").map_err(Error::Bare)?;
+        stderr.flush().map_err(Error::Bare)?;
 
         let mut answer = String::new();
         io::stdin().read_line(&mut answer).map_err(Error::Bare)?;

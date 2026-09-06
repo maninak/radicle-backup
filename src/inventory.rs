@@ -54,7 +54,7 @@ impl Inventory {
     pub fn sole_delegate(&self) -> impl Iterator<Item = &RepoRecord> {
         self.described
             .iter()
-            .filter(|record| record.delegate && record.delegates.len() == 1)
+            .filter(|record| record.is_delegate && record.delegates.len() == 1)
     }
 }
 
@@ -337,7 +337,7 @@ fn describe(
             name,
             visibility,
             allowed,
-            delegate: delegates.contains(&did),
+            is_delegate: delegates.contains(&did),
             delegates,
             scope: policy.map(|policy| policy.scope.clone()),
             policy: policy.map(|policy| policy.policy.clone()),
@@ -436,7 +436,7 @@ mod tests {
             name: None,
             visibility: visibility.map(str::to_string),
             allowed: Vec::new(),
-            delegate: false,
+            is_delegate: false,
             delegates: Vec::new(),
             scope: None,
             policy: None,

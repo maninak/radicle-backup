@@ -401,7 +401,7 @@ fn check_backup_encryption(
         // Nothing here to open, so the record is all there is, and it is hearsay about a file
         // this run never saw. It is still worth repeating when what it remembers is bad news.
         return Ok(match record {
-            Some(record) if !record.encrypted => Check::new(
+            Some(record) if !record.is_encrypted => Check::new(
                 TOPIC,
                 Verdict::Warn,
                 "no archive of this identity was found here, and the last one this tool wrote \
@@ -586,7 +586,7 @@ fn check_delegate_quorum(inventory: &Inventory) -> Check {
     let delegated = inventory
         .described
         .iter()
-        .filter(|repo| repo.delegate)
+        .filter(|repo| repo.is_delegate)
         .count();
     const TOPIC: &str = "delegate quorum";
     if sole.is_empty() {
@@ -1101,7 +1101,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rad-backup-crypt-{}", std::process::id()));
         let archive = archive_at(&dir, "plain.tar.zst", &crate::crypt::Encryption::None);
         let mut record = record();
-        record.encrypted = true;
+        record.is_encrypted = true;
 
         let check = check_backup_encryption(&Default::default(), Some(&archive), Some(&record))
             .expect("the header is readable");
@@ -1187,7 +1187,7 @@ mod tests {
             name: None,
             visibility: Some("public".to_string()),
             allowed: Vec::new(),
-            delegate: false,
+            is_delegate: false,
             delegates: Vec::new(),
             scope: None,
             policy: None,
@@ -1320,7 +1320,7 @@ mod tests {
             repo_selection: "private".to_string(),
             entries: 5,
             bytes: 1024,
-            encrypted: true,
+            is_encrypted: true,
             carried: Default::default(),
             described: Default::default(),
             sigrefs: Default::default(),

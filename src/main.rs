@@ -33,7 +33,7 @@ use crate::home::Home;
 use crate::term::{Term, Verbosity};
 
 fn backup_exit_code(outcome: cmd::backup::Outcome) -> ExitCode {
-    if outcome.incomplete {
+    if outcome.is_incomplete {
         ExitCode::from(crate::error::EXIT_CHECKS_FAILED)
     } else {
         ExitCode::SUCCESS
@@ -43,12 +43,12 @@ fn backup_exit_code(outcome: cmd::backup::Outcome) -> ExitCode {
 fn main() -> ExitCode {
     let cli = cli::parse();
     let term = Term::new(
+        cli.global.yes,
         if cli.global.quiet {
             Verbosity::Quiet
         } else {
             Verbosity::Normal
         },
-        cli.global.yes,
         cli.global.no_color,
     );
 

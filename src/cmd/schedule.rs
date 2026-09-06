@@ -545,13 +545,13 @@ mod tests {
         assert_eq!(arguments, " --recipient 'ssh-ed25519 AAAA it'\\''s mine'");
 
         // And the shell really does read it back as the one word it went in as.
-        let out = std::process::Command::new("sh")
+        let said = std::process::Command::new("sh")
             .args(["-c", &format!("printf '%s'{arguments}")])
             .output()
             .expect("sh runs");
-        assert!(out.status.success(), "sh refused: {arguments}");
+        assert!(said.status.success(), "sh refused: {arguments}");
         assert_eq!(
-            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&said.stdout),
             "--recipientssh-ed25519 AAAA it's mine"
         );
     }

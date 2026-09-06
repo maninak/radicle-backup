@@ -35,7 +35,7 @@ impl Ctx {
         crate::crypt::Identities {
             files: self.global.identity.clone(),
             passphrase_file: self.global.identity_passphrase_file.clone(),
-            interactive: self.term.is_interactive(),
+            is_interactive: self.term.is_interactive(),
         }
     }
 

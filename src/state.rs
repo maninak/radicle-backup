@@ -27,7 +27,8 @@ pub struct Record {
     pub repo_selection: String,
     pub entries: usize,
     pub bytes: u64,
-    pub encrypted: bool,
+    #[serde(rename = "encrypted")]
+    pub is_encrypted: bool,
     /// The repositories whose data that archive carried.
     ///
     /// Spelled `repos` on disk, because a state file written by an older version has to keep
@@ -70,7 +71,7 @@ impl Record {
         manifest: &crate::manifest::Manifest,
         archive: Option<&Path>,
         node_id: &str,
-        encrypted: bool,
+        is_encrypted: bool,
     ) -> Self {
         Self {
             did: manifest.identity.did.clone(),
@@ -80,7 +81,7 @@ impl Record {
             repo_selection: manifest.repo_selection.as_str().to_string(),
             entries: manifest.entries.len(),
             bytes: manifest.total_bytes(),
-            encrypted,
+            is_encrypted,
             carried: manifest
                 .repos
                 .iter()
@@ -213,7 +214,7 @@ mod tests {
             repo_selection: "private".to_string(),
             entries: 9,
             bytes: 22_371,
-            encrypted: true,
+            is_encrypted: true,
             carried: BTreeSet::from(["rad:zAAA".to_string()]),
             described: BTreeSet::from(["rad:zAAA".to_string(), "rad:zBBB".to_string()]),
             sigrefs: BTreeMap::new(),
