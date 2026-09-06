@@ -544,6 +544,38 @@ struct Restored {
 /// `fetch.fsckObjects` (old history with a malformed object bundles fine and refuses to
 /// unbundle) abandoned every repository after it, and took the state record and the report
 /// with it.
+/// What a restore says about the object check before it opens the first bundle, if anything.
+///
+/// `unbundle` asks git to check the objects it is about to write, and a git older than the
+/// one that started honouring that on a bundle accepts the setting and never looks at it: the
+/// objects land unchecked and the run would otherwise report the same success as one that had
+/// checked them. `None` from the reader is a third answer, not the bad one: not knowing which
+/// git ran is not the same claim as knowing it did not check.
+///
+/// Pure, because the only machine that can watch the first arm is one whose git is new enough
+/// and the only machine that can watch the second is one whose git is not.
+fn bundle_check_notice(reaches: Option<bool>) -> Option<(String, Option<String>)> {
+    match reaches {
+        Some(true) => None,
+        Some(false) => Some((
+            "this git does not check the objects inside a bundle it fetches from, so the \
+             repositories below are written without that check"
+                .to_string(),
+            Some(format!(
+                "git {}.{} or newer runs it; until then, trust the archive's source",
+                crate::git::FSCK_ON_A_BUNDLE_SINCE.0,
+                crate::git::FSCK_ON_A_BUNDLE_SINCE.1
+            )),
+        )),
+        None => Some((
+            "the version of git could not be read, so it is not known whether the objects \
+             inside each bundle were checked"
+                .to_string(),
+            None,
+        )),
+    }
+}
+
 fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<Restored> {
     let carried: Vec<&RepoRecord> = manifest
         .repos
@@ -577,24 +609,13 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
         });
     }
 
-    // Said once, before the first bundle is opened. `unbundle` asks git to check the objects
-    // it is about to write, and a git older than the one that started honouring that on a
-    // bundle accepts the setting and never looks at it: the objects land unchecked and the
-    // run would otherwise report the same success as one that had checked them.
-    match git.fsck_reaches_a_bundle() {
-        Some(true) => {}
-        Some(false) => {
-            ctx.term.warn(
-                "this git does not check the objects inside a bundle it fetches from, so the \
-                 repositories below were written without that check",
-            );
-            ctx.term
-                .detail("git 2.46 or newer runs it; until then, trust the archive's source");
+    // Said once, before the first bundle is opened, and only now that there is at least one
+    // to open: an archive carrying no repositories takes the early return above.
+    if let Some((warning, detail)) = bundle_check_notice(git.fsck_reaches_a_bundle()) {
+        ctx.term.warn(&warning);
+        if let Some(detail) = detail {
+            ctx.term.detail(&detail);
         }
-        None => ctx.term.warn(
-            "the version of git could not be read, so it is not known whether the \
-                   objects inside each bundle were checked",
-        ),
     }
 
     let storage = ctx.home.storage();
@@ -817,7 +838,8 @@ fn wait_for_node(ctx: &Ctx) -> bool {
     false
 }
 
-/// There is no control socket to poll here, so the poll above would spend `NODE_START_TIMEOUT`
+/// There is no control socket to poll here, so the unix `wait_for_node` would spend
+/// `NODE_START_TIMEOUT`
 /// reaching the one answer it can reach and then report that a node which may well be up would
 /// not start. The fetches are asked instead: they fail per repository, saying so per
 /// repository, which is a true sentence where "the node would not start" was not.
@@ -1050,11 +1072,6 @@ fn read_what_others_hold(
     node_id: &str,
 ) -> Option<BTreeMap<String, BTreeSet<String>>> {
     match crate::db::read_synced_heads(node_db, node_id) {
-        // A table this build cannot read comes back empty, and an empty record means "nobody
-        // has reported anything else", which would reassure the reader on the strength of a
-        // table nobody managed to open. Asked about this read rather than about the process,
-        // because any other reader's drift would otherwise discard a record that was read
-        // perfectly. `main` prints which table moved.
         // A table that reads perfectly and whose repository ids are spelled some way this
         // build does not look up. Every lookup would miss, every repository would earn "no
         // other node has reported holding anything else", and the run would reassure its
@@ -1067,6 +1084,11 @@ fn read_what_others_hold(
             );
             None
         }
+        // A table this build cannot read comes back empty, and an empty record means "nobody
+        // has reported anything else", which would reassure the reader on the strength of a
+        // table nobody managed to open. Asked about this read rather than about the process,
+        // because any other reader's drift would otherwise discard a record that was read
+        // perfectly. `main` prints which table moved.
         Ok(_) if crate::db::saw_schema_drift_in(node_db, "sync status table") => {
             term.warn("this build cannot read part of the node's schema, so nothing was compared");
             None
@@ -1207,9 +1229,8 @@ fn compare_with_network(
     for repo in restored {
         // Nobody to ask: announced to nobody, delegated to us alone, allowed to nobody.
         // Asking anyway spends a fetch per repository to fail, and reports the feature working
-        // as a fault. Private on its own is not enough, because `rad sync --fetch` reaches the
-        // delegates and allowed peers of a private repository, and one shared with a
-        // collaborator is precisely the one whose sigrefs can be behind theirs.
+        // as a fault. `no_node_can_hold` says what counts as nobody and why private alone
+        // does not.
         if no_node_can_hold(repo) {
             standings.insert(repo.rid.clone(), Standing::NothingToCompare);
             continue;
@@ -1700,6 +1721,42 @@ mod tests {
         assert!(!asked, "`rad` was asked about an identifier that is a flag");
         assert_eq!(skipped, vec!["--help".to_string()]);
         assert!(failed.is_empty());
+    }
+
+    /// All three answers about the object check, on a machine that can only ever see one.
+    ///
+    /// A git new enough to run the check says nothing, because a restore that behaved as
+    /// promised has nothing to report. The other two are different claims and must not be
+    /// worded as one: "did not check" is a fact about this git, "could not be read" is a fact
+    /// about this reader, and only the first names the version that would fix it.
+    #[test]
+    fn only_the_git_that_checks_a_bundle_passes_without_a_word_about_it() {
+        assert_eq!(bundle_check_notice(Some(true)), None);
+
+        let (warning, detail) =
+            bundle_check_notice(Some(false)).expect("a git that does not check says so");
+        assert!(
+            warning.contains("does not check the objects inside a bundle"),
+            "{warning}"
+        );
+        let detail = detail.expect("the version that would fix it is named");
+        assert!(
+            detail.contains(&format!(
+                "{}.{}",
+                crate::git::FSCK_ON_A_BUNDLE_SINCE.0,
+                crate::git::FSCK_ON_A_BUNDLE_SINCE.1
+            )),
+            "{detail}"
+        );
+
+        let (unknown, detail) =
+            bundle_check_notice(None).expect("a version that could not be read says so");
+        assert!(unknown.contains("could not be read"), "{unknown}");
+        assert!(!unknown.contains("does not check"), "{unknown}");
+        assert_eq!(
+            detail, None,
+            "nothing to advise: which git ran is not known"
+        );
     }
 
     #[test]
@@ -2309,7 +2366,7 @@ mod tests {
 
     /// A home of only private repositories used to get a restore that mentioned the network
     /// nowhere at all: nothing at risk, nothing ahead, nothing unchecked, and no line saying
-    /// why. The standing exists; it was simply never read out.
+    /// why. The standing exists; it was never read out.
     #[test]
     fn repositories_no_node_can_ever_hold_are_named_rather_than_passed_over() {
         let found = reconciled(

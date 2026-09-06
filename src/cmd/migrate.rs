@@ -157,21 +157,26 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
     // is the key that is still where it was.
     std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e))?;
 
-    let note = format!(
-        "This identity was moved to another machine on {}.\n\
-         \n\
-         The key that used to be at keys/radicle is now beside this note as {RETIRED_KEY}.\n\
-         It still works, which is exactly the problem: if you put it back and start a node\n\
-         here while the other machine is also running one, both will sign refs under the same\n\
-         peer id and the network will see your identity fork.\n\
-         \n\
-         Put it back only if the move failed and the other machine never started its node.\n\
-         \n\
-         The archive it was moved with: {}\n",
-        crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
-        archive.display()
-    );
+    // The name the rename actually used, not `RETIRED_KEY`: a second move puts its key at
+    // `radicle.retired.2`, and a note pointing at `radicle.retired` sends the one person who
+    // ever reads this file to the key from the move before. Read at 3am, that is the wrong key
+    // put back on a machine whose node is about to sign under a peer id another node holds.
+    let retired_as = to
+        .file_name()
+        .unwrap_or(RETIRED_KEY.as_ref())
+        .to_string_lossy();
     let note_path = ctx.home.keys_dir().join(RETIRED_NOTE);
+    let already = match std::fs::read_to_string(&note_path) {
+        Ok(already) => Some(already),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(Error::io(&note_path, e)),
+    };
+    let note = retirement_note(
+        already.as_deref(),
+        &retired_as,
+        &crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
+        archive,
+    );
     std::fs::write(&note_path, note).map_err(|e| Error::io(&note_path, e))?;
 
     ctx.term
@@ -179,13 +184,32 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Where a retired key goes. Kept as a function so the note and the rename cannot disagree.
+/// What `RETIRED.txt` says after this retirement, given whatever it said before.
 ///
-/// A second move does not write over the first one's key: the same file name twice would mean
-/// a key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
-/// prevent. The `unwrap_or` below cannot be reached, because the range it searches has no end;
-/// it is there because the type says the search may fail and returning the occupied path is
-/// the answer a caller can at least see going wrong.
+/// Pure, so the two things that were wrong about it can be tested without a home: it named
+/// `RETIRED_KEY` rather than the file the rename produced, so a second move sent its reader to
+/// the key from the move before, and it was written rather than appended, so that second move
+/// took the only record of which archive the first key had left with.
+fn retirement_note(already: Option<&str>, retired_as: &str, when: &str, archive: &Path) -> String {
+    let addition = format!(
+        "This identity was moved to another machine on {when}.\n\
+         \n\
+         The key that used to be at keys/radicle is now beside this note as {retired_as}.\n\
+         It still works, which is exactly the problem: if you put it back and start a node\n\
+         here while the other machine is also running one, both will sign refs under the same\n\
+         peer id and the network will see your identity fork.\n\
+         \n\
+         Put it back only if the move failed and the other machine never started its node.\n\
+         \n\
+         The archive it was moved with: {}\n",
+        archive.display()
+    );
+    match already {
+        Some(already) => format!("{already}\n{addition}"),
+        None => addition,
+    }
+}
+
 /// Where a first retirement puts the key it displaced.
 ///
 /// Separate from `retired_path` below, which answers "where would the NEXT one go" and so
@@ -195,7 +219,31 @@ pub(crate) fn first_retired_path(keys_dir: &Path) -> PathBuf {
     keys_dir.join(RETIRED_KEY)
 }
 
+/// Whether this home holds a key some earlier retirement displaced, under any of its names.
+///
+/// The directory rather than the first name, because `retired_path` never reuses a freed one:
+/// a home whose `radicle.retired` was moved away by hand still holds `radicle.retired.2`, and
+/// a probe that asked only for the first would read that home as empty and let a restore
+/// write over the key in it. A directory that cannot be listed counts as holding one, for the
+/// reason `what_a_restore_would_overwrite` gives: being wrong towards "present" costs one
+/// `--force` and being wrong the other way costs somebody's only key.
+pub(crate) fn holds_a_retired_key(keys_dir: &Path) -> bool {
+    let entries = match std::fs::read_dir(keys_dir) {
+        Ok(entries) => entries,
+        Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(RETIRED_KEY))
+}
+
 /// Where the next retirement should put the key it displaces: the first name free.
+///
+/// A second move does not write over the first one's key: the same file name twice would mean
+/// a key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
+/// prevent. The `unwrap_or` below cannot be reached, because the range it searches has no end;
+/// it is there because the type says the search may fail and returning the occupied path is
+/// the answer a caller can at least see going wrong.
 pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
     let first = first_retired_path(keys_dir);
     if !first.exists() {
@@ -210,6 +258,36 @@ pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug, twice over: the note named `RETIRED_KEY` while the rename had produced
+    /// `radicle.retired.2`, so it sent its reader to the key the move before had displaced,
+    /// and it was written over the first note, taking the only record of which archive that
+    /// key had left with. Both matter at the one moment this file is ever read, which is
+    /// somebody deciding whether to put a key back on a machine whose peer id another node is
+    /// signing under.
+    #[test]
+    fn a_second_move_names_its_own_key_and_keeps_the_first_note() {
+        let first = retirement_note(
+            None,
+            RETIRED_KEY,
+            "2026-01-02T03:04:05Z",
+            Path::new("/backups/first.tar.zst"),
+        );
+        assert!(first.contains("as radicle.retired.\n"), "{first}");
+        assert!(first.contains("/backups/first.tar.zst"), "{first}");
+
+        let second = retirement_note(
+            Some(&first),
+            "radicle.retired.2",
+            "2026-03-04T05:06:07Z",
+            Path::new("/backups/second.tar.zst"),
+        );
+        assert!(second.contains("as radicle.retired.2.\n"), "{second}");
+        // The first paragraph and its archive are still there to be read.
+        assert!(second.contains("/backups/first.tar.zst"), "{second}");
+        assert!(second.contains("/backups/second.tar.zst"), "{second}");
+        assert!(second.starts_with(&first), "{second}");
+    }
 
     #[test]
     fn a_retired_key_sits_beside_the_one_it_replaced() {

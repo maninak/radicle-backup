@@ -19,7 +19,7 @@ use crate::term;
 /// ordinary case, because most archives never had one. Anything else leaves a note standing
 /// over a deletion, which is the one state a reader of that directory is misled by, so it is
 /// said out loud rather than swallowed.
-fn unremoved_sidecar(path: &std::path::Path) -> Option<std::io::Error> {
+pub(crate) fn unremoved_sidecar(path: &std::path::Path) -> Option<std::io::Error> {
     match std::fs::remove_file(path) {
         Ok(()) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -97,7 +97,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
 mod tests {
     use super::unremoved_sidecar;
 
-    /// A note that is simply not there is the ordinary case and says nothing. A note that is
+    /// A note that is not there is the ordinary case and says nothing. A note that is
     /// there and would not go is a note left standing over a deleted archive, and `prune` used
     /// to drop that error on the floor, so the directory kept a description of something it no
     /// longer held and nobody was told why.

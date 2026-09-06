@@ -44,6 +44,16 @@ chmod 644 "$RAD_HOME/keys/radicle.pub"
 [ -f node/notifications.db ] && cp node/notifications.db "$RAD_HOME/node/notifications.db"
 [ -f node/node.db ] && cp node/node.db "$RAD_HOME/node/node.db"
 
+# Whether there is anything for the next block to be about. An identity-only archive carries
+# no bundles, and a warning about "the repositories below" followed by none of them describes
+# a risk this run is not taking.
+bundles=""
+for bundle in repos/*.bundle; do
+	[ -e "$bundle" ] || break
+	bundles=yes
+	break
+done
+
 # Said once, before the first bundle is opened, and for the same reason `rad-backup restore`
 # says it: the `fetch.fsckObjects` below reaches a bundle only from git 2.46. An older git
 # accepts the setting and never consults it on this path, so the objects go into storage
@@ -52,8 +62,9 @@ chmod 644 "$RAD_HOME/keys/radicle.pub"
 # The first word that starts with a digit, rather than a pattern over the whole line, because
 # what follows the number is the distribution's to choose: `2.51.0.windows.1` and
 # `2.39.5 (Apple Git-154)` are both out there.
+git_said=$(git --version 2>/dev/null || true)
 git_version=""
-for word in $(git --version 2>/dev/null); do
+for word in $git_said; do
 	case "$word" in
 	[0-9]*)
 		git_version=$word
@@ -61,19 +72,31 @@ for word in $(git --version 2>/dev/null); do
 		;;
 	esac
 done
-git_major=${git_version%%.*}
-git_minor=${git_version#*.}
-git_minor=${git_minor%%.*}
+# A number with no dot in it is not a version this can read: `${v#*.}` hands back the whole
+# value when there is nothing to strip, so a bare `2` would otherwise read as major 2 minor 2
+# and be warned about, where `rad-backup` says it could not tell.
+git_major=""
+git_minor=""
+if [ "$git_version" != "${git_version#*.}" ]; then
+	git_major=${git_version%%.*}
+	git_minor=${git_version#*.}
+	git_minor=${git_minor%%.*}
+fi
 case "$git_major:$git_minor" in
 [0-9]*:[0-9]*)
-	if [ "$git_major" -lt 2 ] || { [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 46 ]; }; then
+	if [ -n "$bundles" ] && { [ "$git_major" -lt 2 ] ||
+		{ [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 46 ]; }; }; then
 		echo "this git does not check the objects inside a bundle it fetches from, so the" >&2
 		echo "repositories below are written without that check; git 2.46 or newer runs it" >&2
 	fi
 	;;
 *)
-	echo "the version of git could not be read, so it is not known whether the objects" >&2
-	echo "inside each bundle were checked on the way in" >&2
+	# Git printing nothing at all is git not being installed, and the failure this script
+	# then dies of says that far better than a sentence about what a bundle was checked for.
+	if [ -n "$bundles" ] && [ -n "$git_said" ]; then
+		echo "the version of git could not be read, so it is not known whether the objects" >&2
+		echo "inside each bundle were checked on the way in" >&2
+	fi
 	;;
 esac
 

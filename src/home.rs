@@ -199,11 +199,10 @@ impl Home {
         if !self.is_absent(&self.config()) {
             found.push("config.json");
         }
-        // The name a first retirement takes, not the name the next one would: `retired_path`
-        // answers with a free name by construction, so asking it this could only be answered
-        // "nothing here", and a home holding somebody's displaced key read as empty. Any
-        // later retirement took a numbered name, so the first is there whenever any is.
-        if !self.is_absent(&crate::cmd::migrate::first_retired_path(&self.keys_dir())) {
+        // Every name a retirement hands out, not the one the next would take: `retired_path`
+        // answers with a name nothing is at by construction, so asking it this could only be
+        // answered "nothing here", and a home holding somebody's displaced key read as empty.
+        if crate::cmd::migrate::holds_a_retired_key(&self.keys_dir()) {
             found.push("a retired key");
         }
         found
@@ -467,12 +466,14 @@ mod tests {
             home.what_a_restore_would_overwrite()
         );
 
-        // A second retirement, which takes a numbered name and leaves the first where it is.
-        std::fs::write(
-            crate::cmd::migrate::retired_path(&keys),
-            b"another displaced key",
-        )
-        .expect("the second retired key is writable");
+        // A second retirement takes a numbered name, and the first can then be moved away by
+        // hand: `retired_path` never reuses a freed name, so what is left is a home holding a
+        // displaced key under a name no single-name probe would think to ask about.
+        let numbered = crate::cmd::migrate::retired_path(&keys);
+        std::fs::write(&numbered, b"another displaced key").expect("the second key is writable");
+        std::fs::remove_file(crate::cmd::migrate::first_retired_path(&keys))
+            .expect("the first retired key is removable");
+        assert_ne!(numbered, crate::cmd::migrate::first_retired_path(&keys));
         assert!(
             home.what_a_restore_would_overwrite()
                 .contains(&"a retired key"),

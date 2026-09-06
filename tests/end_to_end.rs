@@ -350,9 +350,13 @@ fn assert_success(ran: &Output, what: &str) {
 /// across them (dash has none) and a missing shell fails to spawn at all.
 ///
 /// A shell that is not installed drops out of the list, and a check that quietly covers less
-/// than it claims is the thing these tests exist to prevent. So the list is printed, and on
-/// Linux CI, whose workflow installs all four, a short one is a failure rather than a fact
-/// about the machine.
+/// than it claims is the thing these tests exist to prevent. So on Linux CI, whose workflow
+/// installs all four, a short list is a failure rather than a fact about the machine. Off CI
+/// the list is only printed, and only `--nocapture` or a failing assertion shows it: nothing
+/// there can insist on a shell the developer has not got.
+///
+/// Four names, not four implementations. On Debian and Ubuntu `/bin/sh` is `dash`, so the
+/// same shell is exercised twice; the run is worth what the distinct ones in it are worth.
 // Unix only, like its callers: they run a POSIX script Windows has no shell for.
 #[cfg(unix)]
 fn probe_shells() -> Vec<&'static str> {
@@ -382,6 +386,11 @@ fn probe_shells() -> Vec<&'static str> {
 }
 
 /// One shell running a fragment lifted out of the shipped script, with `variables` exported.
+///
+/// Under `set -eu`, because that is the line the shipped script opens with and a fragment run
+/// without it cannot fail the way the real one would. An unset variable, or a command whose
+/// status nobody reads, aborts the restore there and passes here otherwise, which is the
+/// failure `restore.sh` has already been bitten by once.
 // Unix only, like its callers.
 #[cfg(unix)]
 fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Output {
@@ -389,7 +398,7 @@ fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Outpu
     if shell == "busybox" {
         command.arg("ash");
     }
-    command.arg("-c").arg(fragment);
+    command.arg("-c").arg(format!("set -eu\n{fragment}"));
     for (name, value) in variables {
         command.env(name, value);
     }
@@ -1888,7 +1897,7 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
     let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/restore.sh"))
         .expect("the shipped script is readable");
     let start = script
-        .find("git_version=\"\"")
+        .find("git_said=")
         .expect("the shipped script still reads the version of git");
     let tail = &script[start..];
     let end = start
@@ -1898,7 +1907,7 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
         + "\nesac".len();
     // The version comes from the environment rather than from the git that is installed, so
     // the table below can ask about versions this machine does not have.
-    let lifted = script[start..end].replace("$(git --version 2>/dev/null)", "$SAID");
+    let lifted = script[start..end].replace("$(git --version 2>/dev/null || true)", "$SAID");
     assert!(
         lifted.contains("$SAID") && lifted.contains("2.46"),
         "the block no longer has what this substitutes, so it is not being tested: {lifted}"
@@ -1918,22 +1927,45 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
     ];
     for shell in probe_shells() {
         for (said, warns) in table {
-            let ran = under_shell(shell, &lifted, &[("SAID", said)]);
+            let ran = under_shell(shell, &lifted, &[("SAID", said), ("bundles", "yes")]);
             let printed = stderr(&ran);
             assert_eq!(
                 printed.contains("does not check the objects inside a bundle"),
                 warns,
                 "under {shell}, {said:?} was answered with {printed:?}"
             );
+            // The same version with nothing to unbundle. That is every identity-only
+            // archive, and a warning about the repositories below is describing a risk
+            // this restore is not taking.
+            let ran = under_shell(shell, &lifted, &[("SAID", said), ("bundles", "")]);
+            assert_eq!(
+                stderr(&ran),
+                "",
+                "under {shell}, {said:?} spoke about bundles on an archive carrying none"
+            );
         }
         // Nothing that reads as a version at all: neither claim can be made, and saying
-        // nothing would be the claim that it checked.
-        let ran = under_shell(shell, &lifted, &[("SAID", "git version next")]);
-        assert!(
-            stderr(&ran).contains("could not be read"),
-            "under {shell}: {}",
-            stderr(&ran)
-        );
+        // nothing would be the claim that it checked. `2` is here because the two readers
+        // once disagreed about it, the shell warning where `rad-backup` said it could not
+        // tell, and a bare number is the only shape a dot-stripping reader gets wrong.
+        for said in [
+            "git version next",
+            "git version 2",
+            "git version 2.x",
+            "git version",
+        ] {
+            let ran = under_shell(shell, &lifted, &[("SAID", said), ("bundles", "yes")]);
+            assert!(
+                stderr(&ran).contains("could not be read"),
+                "under {shell}, {said:?}: {}",
+                stderr(&ran)
+            );
+        }
+        // Git absent altogether says nothing here. The script dies a few lines later on the
+        // first git it runs, and that failure names the missing tool; a sentence about what
+        // a bundle was checked for would only be read first and answer a different question.
+        let ran = under_shell(shell, &lifted, &[("SAID", ""), ("bundles", "yes")]);
+        assert_eq!(stderr(&ran), "", "under {shell}, git being absent");
     }
 }
 
