@@ -372,28 +372,27 @@ fn record_schema_drift(path: &Path, wanted: &'static str, e: &rusqlite::Error) {
     }
 }
 
-/// Whether anything read so far has met a schema it could not follow.
+/// Whether the read of one table of one database met a schema it could not follow.
 ///
 /// A peek and not a drain: the command layer owns the draining and prints every entry with the
 /// file and the sqlite reason in it. A check that took them to explain itself would silence
 /// that. It exists so that an empty answer is not handed to a reader with the one remedy that
 /// suits the other cause of it, "start the node".
-pub fn saw_schema_drift() -> bool {
-    SCHEMA_DRIFT
-        .lock()
-        .map(|drift| !drift.is_empty())
-        .unwrap_or(false)
-}
-
-/// The same question about one database, for a caller whose empty answer came from that file.
 ///
-/// A reader that asks the process-wide question treats another database's drift as its own,
-/// so adding an unrelated read anywhere before it would silently turn a table that was read
-/// perfectly into "could not be compared", with a warning naming a table nobody asked about.
-pub fn saw_schema_drift_at(database: &Path) -> bool {
+/// A reader that asks the process-wide question treats every other read's drift as its own, so
+/// an unrelated read anywhere before it silently turns a table that was read perfectly into
+/// "not known", with a warning naming a table nobody asked about. Both halves matter: `doctor`
+/// reads `policies.db` before it reads the node's, and it reads three tables of the node's.
+///
+/// `wanted` is the same word the reader passed to `prepare_against_heartwood`.
+pub fn saw_schema_drift_in(database: &Path, wanted: &str) -> bool {
     SCHEMA_DRIFT
         .lock()
-        .map(|drift| drift.iter().any(|seen| seen.path == database))
+        .map(|drift| {
+            drift
+                .iter()
+                .any(|seen| seen.path == database && seen.wanted == wanted)
+        })
         .unwrap_or(false)
 }
 
@@ -406,6 +405,19 @@ pub fn drain_schema_drift() -> Vec<SchemaDrift> {
         .lock()
         .map(|mut drift| std::mem::take(&mut *drift))
         .unwrap_or_default()
+}
+
+/// Held by every test that reads or drains the drift list.
+///
+/// The list is process-wide, a test binary is one process, and `drain_schema_drift` empties it
+/// for everybody: one test draining between another's read and its assertion turns a table
+/// that did not parse into a table that did, at random, on a machine under load.
+#[cfg(test)]
+pub(crate) fn while_reading_drift() -> std::sync::MutexGuard<'static, ()> {
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The warning for a table or column this schema did not have. In one place for the same
@@ -597,6 +609,7 @@ mod tests {
             .execute_batch("create table routing_v2 (repo text, node text)")
             .expect("fixture schema applies");
 
+        let _reading_drift = while_reading_drift();
         let _ = drain_schema_drift();
         let routing = read_routing_counts(&path, "z6MkAAA")
             .expect("a renamed routing table is not a failure");
@@ -610,10 +623,13 @@ mod tests {
         // table", and the first of those is a sentence that reassures: asked about the
         // process instead, one unrelated read of a renamed table anywhere earlier in the run
         // would turn every repository into "could not be compared".
-        assert!(saw_schema_drift_at(&path));
-        assert!(!saw_schema_drift_at(std::path::Path::new(
-            "/nonexistent.db"
-        )));
+        assert!(saw_schema_drift_in(&path, "sync status table"));
+        // A table of the same database that was never read, and a database nobody touched.
+        assert!(!saw_schema_drift_in(&path, "issues table"));
+        assert!(!saw_schema_drift_in(
+            std::path::Path::new("/nonexistent.db"),
+            "sync status table"
+        ));
 
         // Other tests drain the same list, so what is asserted is presence and not the exact
         // set.

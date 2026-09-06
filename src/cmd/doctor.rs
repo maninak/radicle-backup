@@ -237,7 +237,12 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     );
     checks.push(check_sole_delegate(&inventory).qualified_by_unread(unread));
     checks.push(
-        check_replication(&inventory, &routing, db::saw_schema_drift()).qualified_by_unread(unread),
+        check_replication(
+            &inventory,
+            &routing,
+            db::saw_schema_drift_in(&home.node_db(), "routing table"),
+        )
+        .qualified_by_unread(unread),
     );
     checks.push(check_second_key_copy(&stored));
     checks.push(
@@ -245,7 +250,10 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
             &inventory,
             &db::read_synced_heads(&home.node_db(), &node_id)?,
             &node_id,
-            db::saw_schema_drift(),
+            // Per read, not per process. `doctor` reads `policies.db` before this and two
+            // other tables of the node's, and any of their drift used to make this check
+            // answer "not known" about a table it had read perfectly.
+            db::saw_schema_drift_in(&home.node_db(), "sync status table"),
         )
         .qualified_by_unread(unread),
     );
@@ -1551,6 +1559,22 @@ mod tests {
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.detail.contains("rad:zBBB"), "{}", check.detail);
         assert!(!check.detail.contains("rad:zAAA"), "{}", check.detail);
+    }
+
+    /// One commit in two spellings is one commit. `git` prints an oid in whichever case it was
+    /// handed and heartwood stores whatever the announcing node sent, so compared with `==` a
+    /// home whose work had reached every seed was told to announce it again and to keep an
+    /// archive until it had propagated.
+    #[test]
+    fn a_head_another_node_holds_in_the_other_case_is_the_same_head() {
+        let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "abcdef01")]);
+        let synced = BTreeMap::from([(
+            "rad:zAAA".to_string(),
+            BTreeSet::from(["ABCDEF01".to_string()]),
+        )]);
+
+        let check = check_sigrefs_propagation(&inventory, &synced, ME, false);
+        assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
     }
 
     #[test]
