@@ -75,6 +75,8 @@ for bundle in repos/*.bundle; do
   git init --bare --quiet "$RAD_HOME/storage/$rid"
   # --force because the refs come from the bundle, not from a merge; fsckObjects because
   # nothing else validates a bundle's objects, and one can name a path like `.git` or `..`.
+  # git reads that setting on a bundle only from 2.46: on an older one the objects go in
+  # unchecked, so check where the archive came from before trusting what it carries.
   git --git-dir "$RAD_HOME/storage/$rid" -c fetch.fsckObjects=true \
     fetch --quiet --force "$PWD/$bundle" 'refs/*:refs/*'
   cp "repos/$rid.config" "$RAD_HOME/storage/$rid/config" 2>/dev/null || true

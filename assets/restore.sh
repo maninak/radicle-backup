@@ -44,6 +44,39 @@ chmod 644 "$RAD_HOME/keys/radicle.pub"
 [ -f node/notifications.db ] && cp node/notifications.db "$RAD_HOME/node/notifications.db"
 [ -f node/node.db ] && cp node/node.db "$RAD_HOME/node/node.db"
 
+# Said once, before the first bundle is opened, and for the same reason `rad-backup restore`
+# says it: the `fetch.fsckObjects` below reaches a bundle only from git 2.46. An older git
+# accepts the setting and never consults it on this path, so the objects go into storage
+# unchecked and a run that says nothing looks exactly like one that checked them.
+#
+# The first word that starts with a digit, rather than a pattern over the whole line, because
+# what follows the number is the distribution's to choose: `2.51.0.windows.1` and
+# `2.39.5 (Apple Git-154)` are both out there.
+git_version=""
+for word in $(git --version 2>/dev/null); do
+	case "$word" in
+	[0-9]*)
+		git_version=$word
+		break
+		;;
+	esac
+done
+git_major=${git_version%%.*}
+git_minor=${git_version#*.}
+git_minor=${git_minor%%.*}
+case "$git_major:$git_minor" in
+[0-9]*:[0-9]*)
+	if [ "$git_major" -lt 2 ] || { [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 46 ]; }; then
+		echo "this git does not check the objects inside a bundle it fetches from, so the" >&2
+		echo "repositories below are written without that check; git 2.46 or newer runs it" >&2
+	fi
+	;;
+*)
+	echo "the version of git could not be read, so it is not known whether the objects" >&2
+	echo "inside each bundle were checked on the way in" >&2
+	;;
+esac
+
 restored=0
 for bundle in repos/*.bundle; do
 	[ -e "$bundle" ] || break

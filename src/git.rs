@@ -39,6 +39,13 @@ impl Git {
         Ok(self.tool.output(&["--version"])?.trim().to_string())
     }
 
+    /// Whether this git checks the objects in a bundle it is fetching from, which is what the
+    /// `fetch.fsckObjects` in `unbundle` below asks for and what older gits accept and ignore.
+    /// `None` when the version could not be read, which is a different sentence from "no".
+    pub fn fsck_reaches_a_bundle(&self) -> Option<bool> {
+        Some(parse_version(&self.version().ok()?)? >= FSCK_ON_A_BUNDLE_SINCE)
+    }
+
     /// Every ref in the repository, sorted by name so that two runs over an unchanged
     /// repository produce identical output.
     pub fn refs(&self, git_dir: &Path) -> Result<Vec<Ref>> {
@@ -167,6 +174,10 @@ impl Git {
     /// validates: the digests only prove it is the bundle the archive author shipped. Git's
     /// default is off, which would write a tree entry named `.git`, or a `..` component,
     /// straight into storage for the next checkout to materialise.
+    ///
+    /// It reaches a bundle only from git `FSCK_ON_A_BUNDLE_SINCE`. Older gits read the setting
+    /// and never consult it on this path, so the objects land unchecked and nothing says so:
+    /// `fsck_reaches_a_bundle` is what the restore asks in order to say it out loud.
     pub fn unbundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
         self.tool.output(&[
             "-c".as_ref(),
@@ -234,6 +245,27 @@ pub fn names_a_ref(target: &str) -> bool {
                     .chars()
                     .all(|c| !c.is_ascii_control() && !" ~^:?*[\\".contains(c))
         })
+}
+
+/// The first git that runs `fsck` over a bundle it fetches from. Before it,
+/// `fetch_refs_from_bundle` never asked, so `-c fetch.fsckObjects=true` was accepted and had
+/// no effect on this one code path. Measured against git 2.34.1, where a bundle carrying a
+/// tree entry named `.git` unbundles without a word.
+const FSCK_ON_A_BUNDLE_SINCE: (u32, u32) = (2, 46);
+
+/// The major and minor out of whatever `git --version` printed.
+///
+/// Tolerant of the tails distributions add, `2.51.0.windows.1` and `2.39.5 (Apple Git-154)`
+/// among them, and `None` for anything it cannot read rather than a guess: the caller turns
+/// `None` into "could not tell", which is not the same claim as "does not check".
+fn parse_version(said: &str) -> Option<(u32, u32)> {
+    let numbered = said
+        .split_whitespace()
+        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
+    let mut parts = numbered.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
 }
 
 /// Whether a value out of a manifest names an object git could be asked about.
@@ -319,6 +351,101 @@ pub(crate) mod tests {
         run(&["commit", "-q", "--allow-empty", "-m", "second"]);
         let second = run(&["rev-parse", "HEAD"]);
         (work.join(".git"), first, second)
+    }
+
+    #[test]
+    fn a_version_git_printed_reads_as_a_number_or_as_nothing_at_all() {
+        assert_eq!(parse_version("git version 2.34.1"), Some((2, 34)));
+        assert_eq!(parse_version("git version 2.46.0"), Some((2, 46)));
+        // The tails distributions add, which is the reason this takes a word and not a line.
+        assert_eq!(parse_version("git version 2.51.0.windows.1"), Some((2, 51)));
+        assert_eq!(
+            parse_version("git version 2.39.5 (Apple Git-154)"),
+            Some((2, 39))
+        );
+        // No guess out of something unreadable: the caller says "could not tell" instead.
+        assert_eq!(parse_version("git version next"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    /// The check `unbundle` asks for, asked of the git that is actually here.
+    ///
+    /// A tree entry named `.git` is what `fsck` calls `hasDotgit`, and writing one into
+    /// storage hands the next checkout a path that overwrites the repository's own metadata.
+    /// The bundle is the one part of an archive nothing else validates, so this is the whole
+    /// of that promise, and it holds only from git 2.46: before it the setting was accepted
+    /// and never consulted on the bundle path. Asserted both ways rather than skipped on an
+    /// old git, because "the check did not fire" is the answer this test exists to pin down.
+    #[test]
+    fn a_bundle_carrying_a_dotgit_tree_is_refused_by_exactly_the_gits_that_check_one() {
+        let git = Git::new();
+        assert!(git.is_available(), "these tests drive the real git");
+        let scratch = crate::key::tests::TestScratch::create("git-hostile-bundle");
+        let (git_dir, _, _) = two_commits(&scratch);
+
+        let run = |args: &[&str]| {
+            let finished = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(finished.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&finished.stdout).trim().to_string()
+        };
+        // A tree holding one entry called `.git`, committed and bundled. `mktree` writes what
+        // it is handed, which is how a hostile archive would carry one.
+        let blob = run(&["hash-object", "-w", "--stdin"]);
+        let tree = {
+            let mut child = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&git_dir)
+                .arg("mktree")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("git mktree runs");
+            {
+                use std::io::Write as _;
+                let mut stdin = child.stdin.take().expect("mktree reads its input");
+                writeln!(stdin, "100644 blob {blob}\t.git").expect("the entry is writable");
+            }
+            let finished = child.wait_with_output().expect("git mktree finishes");
+            assert!(finished.status.success(), "git mktree");
+            String::from_utf8_lossy(&finished.stdout).trim().to_string()
+        };
+        let commit = run(&["commit-tree", "-m", "hostile", &tree]);
+        run(&["update-ref", "refs/heads/hostile", &commit]);
+        let bundle = scratch.path_of("hostile.bundle");
+        let bundled = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .arg("bundle")
+            .arg("create")
+            .arg("-q")
+            .arg(&bundle)
+            .arg("refs/heads/hostile")
+            .output()
+            .expect("git bundle runs");
+        assert!(bundled.status.success(), "the hostile bundle is buildable");
+
+        let target = scratch.path_of("target.git");
+        git.init_bare(&target)
+            .expect("a bare repository is creatable");
+        let unbundled = git.unbundle(&target, &bundle);
+
+        match git.fsck_reaches_a_bundle() {
+            Some(true) => assert!(
+                unbundled.is_err(),
+                "this git checks a bundle, so a `.git` tree entry must not reach storage"
+            ),
+            Some(false) => assert!(
+                unbundled.is_ok(),
+                "this git does not check a bundle, so the refusal came from somewhere else \
+                 and the warning the restore prints is describing the wrong thing"
+            ),
+            None => panic!("the version of the git running this test could not be read"),
+        }
     }
 
     /// One revision resolved in an existing repository, for a test that needs an oid the

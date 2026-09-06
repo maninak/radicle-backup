@@ -577,6 +577,26 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
         });
     }
 
+    // Said once, before the first bundle is opened. `unbundle` asks git to check the objects
+    // it is about to write, and a git older than the one that started honouring that on a
+    // bundle accepts the setting and never looks at it: the objects land unchecked and the
+    // run would otherwise report the same success as one that had checked them.
+    match git.fsck_reaches_a_bundle() {
+        Some(true) => {}
+        Some(false) => {
+            ctx.term.warn(
+                "this git does not check the objects inside a bundle it fetches from, so the \
+                 repositories below were written without that check",
+            );
+            ctx.term
+                .detail("git 2.46 or newer runs it; until then, trust the archive's source");
+        }
+        None => ctx.term.warn(
+            "the version of git could not be read, so it is not known whether the \
+                   objects inside each bundle were checked",
+        ),
+    }
+
     let storage = ctx.home.storage();
     std::fs::create_dir_all(&storage).map_err(|e| Error::io(&storage, e))?;
     ctx.term.step(&format!(

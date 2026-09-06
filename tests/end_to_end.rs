@@ -342,6 +342,62 @@ fn assert_success(ran: &Output, what: &str) {
     );
 }
 
+/// Every shell on the machine the shipped script has to decide the same way under.
+///
+/// Not just `/bin/sh`: its patterns lean on bracket expressions and character classes, and
+/// this is the archive's reader of last resort, so it has to agree wherever somebody runs it.
+/// Spawning is the test for whether one is installed, because `--version` is not portable
+/// across them (dash has none) and a missing shell fails to spawn at all.
+///
+/// A shell that is not installed drops out of the list, and a check that quietly covers less
+/// than it claims is the thing these tests exist to prevent. So the list is printed, and on
+/// Linux CI, whose workflow installs all four, a short one is a failure rather than a fact
+/// about the machine.
+// Unix only, like both callers: they run a POSIX script Windows has no shell for.
+#[cfg(unix)]
+fn probe_shells() -> Vec<&'static str> {
+    const WANTED: [&str; 4] = ["sh", "dash", "bash", "busybox"];
+
+    let shells: Vec<&str> = WANTED
+        .into_iter()
+        .filter(|shell| Command::new(shell).arg("--version").output().is_ok())
+        .collect();
+    assert!(
+        shells.contains(&"sh"),
+        "no POSIX shell to run the archive's own reader with"
+    );
+    eprintln!(
+        "the shipped script was checked under: {}",
+        shells.join(", ")
+    );
+    if std::env::var_os("CI").is_some() && cfg!(target_os = "linux") {
+        for wanted in WANTED {
+            assert!(
+                shells.contains(&wanted),
+                "CI is meant to run this under {wanted}, which is not installed"
+            );
+        }
+    }
+    shells
+}
+
+/// One shell running a fragment lifted out of the shipped script, with `variables` exported.
+// Unix only, like both callers.
+#[cfg(unix)]
+fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(shell);
+    if shell == "busybox" {
+        command.arg("ash");
+    }
+    command.arg("-c").arg(fragment);
+    for (name, value) in variables {
+        command.env(name, value);
+    }
+    command
+        .output()
+        .unwrap_or_else(|e| panic!("{shell} runs: {e}"))
+}
+
 /// Whether this machine has `jq`, refusing on the CI leg whose workflow installs it.
 ///
 /// The shipped script reads `head` out of the manifest with `jq`, so a machine without one
@@ -1793,47 +1849,10 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
         "refs/heads/caf\u{e9}",
     ];
 
-    // Every shell on the machine, not just `/bin/sh`: the patterns lean on bracket
-    // expressions and character classes, and this is the archive's reader of last resort, so
-    // it has to decide the same way wherever somebody runs it. Spawning is the check for
-    // whether one is installed, because `--version` is not portable across them (dash has
-    // none) and a missing shell fails to spawn at all.
-    let shells: Vec<&str> = ["sh", "dash", "bash", "busybox"]
-        .into_iter()
-        .filter(|shell| Command::new(shell).arg("--version").output().is_ok())
-        .collect();
-    assert!(
-        shells.contains(&"sh"),
-        "no POSIX shell to run the archive's own reader with"
-    );
-    // A shell that is not installed drops out of the list, and a check that quietly covers
-    // less than it claims is the thing this test exists to prevent. Say what was covered,
-    // and on CI, where the workflow installs all four, a short list is a failure rather
-    // than a fact about the machine.
-    eprintln!(
-        "the shipped script was checked under: {}",
-        shells.join(", ")
-    );
-    if std::env::var_os("CI").is_some() && cfg!(target_os = "linux") {
-        for wanted in ["sh", "dash", "bash", "busybox"] {
-            assert!(
-                shells.contains(&wanted),
-                "CI is meant to run this under {wanted}, which is not installed"
-            );
-        }
-    }
+    let shells = probe_shells();
 
     let verdict = |shell: &str, head: &str| -> String {
-        let mut command = Command::new(shell);
-        if shell == "busybox" {
-            command.arg("ash");
-        }
-        let ran = command
-            .arg("-c")
-            .arg(&harness)
-            .env("head", head)
-            .output()
-            .unwrap_or_else(|e| panic!("{shell} runs: {e}"));
+        let ran = under_shell(shell, &harness, &[("head", head)]);
         String::from_utf8_lossy(&ran.stdout).trim().to_string()
     };
     for shell in &shells {
@@ -1851,6 +1870,70 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
                 "under {shell}, the shipped script refuses a head this tool accepts: {head:?}"
             );
         }
+    }
+}
+
+/// The shipped script must say what this tool says about a git that checks nothing.
+///
+/// `fetch.fsckObjects` reaches a bundle only from git 2.46, and both readers pass it. A reader
+/// that stayed quiet on an older git would hand back a home that looks exactly like one whose
+/// objects were checked, so both say so, and this pins the version boundary the script draws.
+///
+/// The real block is lifted out of `assets/restore.sh` rather than restated, for the same
+/// reason the `HEAD` case above is: a change made to one reader and not the other fails here.
+// Unix only: it runs the shipped script's own shell.
+#[cfg(unix)]
+#[test]
+fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
+    let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/restore.sh"))
+        .expect("the shipped script is readable");
+    let start = script
+        .find("git_version=\"\"")
+        .expect("the shipped script still reads the version of git");
+    let tail = &script[start..];
+    let end = start
+        + tail
+            .find("\nesac\n")
+            .expect("the version case is still closed")
+        + "\nesac".len();
+    // The version comes from the environment rather than from the git that is installed, so
+    // the table below can ask about versions this machine does not have.
+    let harness = script[start..end].replace("$(git --version 2>/dev/null)", "$SAID");
+    assert!(
+        harness.contains("$SAID") && harness.contains("2.46"),
+        "the block no longer has what this substitutes, so it is not being tested: {harness}"
+    );
+
+    // A version and whether the script must warn about it. The tails are the ones
+    // distributions actually ship, and the last row is what an unreadable answer must do.
+    let table = [
+        ("git version 1.9.1", true),
+        ("git version 2.9.5", true),
+        ("git version 2.34.1", true),
+        ("git version 2.39.5 (Apple Git-154)", true),
+        ("git version 2.45.2", true),
+        ("git version 2.46.0", false),
+        ("git version 2.51.0.windows.1", false),
+        ("git version 3.0.0", false),
+    ];
+    for shell in probe_shells() {
+        for (said, warns) in table {
+            let ran = under_shell(shell, &harness, &[("SAID", said)]);
+            let printed = stderr(&ran);
+            assert_eq!(
+                printed.contains("does not check the objects inside a bundle"),
+                warns,
+                "under {shell}, {said:?} was answered with {printed:?}"
+            );
+        }
+        // Nothing that reads as a version at all: neither claim can be made, and saying
+        // nothing would be the claim that it checked.
+        let ran = under_shell(shell, &harness, &[("SAID", "git version next")]);
+        assert!(
+            stderr(&ran).contains("could not be read"),
+            "under {shell}: {}",
+            stderr(&ran)
+        );
     }
 }
 
