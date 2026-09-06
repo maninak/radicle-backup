@@ -199,7 +199,11 @@ impl Home {
         if !self.is_absent(&self.config()) {
             found.push("config.json");
         }
-        if !self.is_absent(&crate::cmd::migrate::retired_path(&self.keys_dir())) {
+        // The name a first retirement takes, not the name the next one would: `retired_path`
+        // answers with a free name by construction, so asking it this could only be answered
+        // "nothing here", and a home holding somebody's displaced key read as empty. Any
+        // later retirement took a numbered name, so the first is there whenever any is.
+        if !self.is_absent(&crate::cmd::migrate::first_retired_path(&self.keys_dir())) {
             found.push("a retired key");
         }
         found
@@ -432,6 +436,49 @@ mod tests {
                 "{state:?}"
             );
         }
+    }
+
+    /// A home holding somebody's displaced key is occupied, and a restore has to say so.
+    ///
+    /// The arm asked `retired_path`, which answers with the first name that is FREE, so it
+    /// was answered "nothing there" whatever the home held: the one thing this list exists to
+    /// notice about a migrated home was unreachable. Both names are checked, because a second
+    /// retirement takes a numbered one and only the first proves any is there.
+    #[test]
+    fn a_home_holding_a_key_a_migration_displaced_is_not_an_empty_one() {
+        let scratch = crate::key::tests::TestScratch::create("home-retired-key");
+        let home = Home::at(scratch.path_of("home"));
+        let keys = home.keys_dir();
+        std::fs::create_dir_all(&keys).expect("the keys directory is creatable");
+        assert!(
+            home.what_a_restore_would_overwrite().is_empty(),
+            "an empty home has nothing to write over"
+        );
+
+        std::fs::write(
+            crate::cmd::migrate::first_retired_path(&keys),
+            b"a displaced key",
+        )
+        .expect("the retired key is writable");
+        assert!(
+            home.what_a_restore_would_overwrite()
+                .contains(&"a retired key"),
+            "{:?}",
+            home.what_a_restore_would_overwrite()
+        );
+
+        // A second retirement, which takes a numbered name and leaves the first where it is.
+        std::fs::write(
+            crate::cmd::migrate::retired_path(&keys),
+            b"another displaced key",
+        )
+        .expect("the second retired key is writable");
+        assert!(
+            home.what_a_restore_would_overwrite()
+                .contains(&"a retired key"),
+            "{:?}",
+            home.what_a_restore_would_overwrite()
+        );
     }
 
     /// What the probe answers once no file descriptor for the socket is left open anywhere.

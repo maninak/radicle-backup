@@ -186,8 +186,18 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
 /// prevent. The `unwrap_or` below cannot be reached, because the range it searches has no end;
 /// it is there because the type says the search may fail and returning the occupied path is
 /// the answer a caller can at least see going wrong.
+/// Where a first retirement puts the key it displaced.
+///
+/// Separate from `retired_path` below, which answers "where would the NEXT one go" and so
+/// returns a name nothing is at. Asking that one whether a home holds a retired key can only
+/// ever be answered no: the arm in `what_a_restore_would_overwrite` that did was unreachable.
+pub(crate) fn first_retired_path(keys_dir: &Path) -> PathBuf {
+    keys_dir.join(RETIRED_KEY)
+}
+
+/// Where the next retirement should put the key it displaces: the first name free.
 pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
-    let first = keys_dir.join(RETIRED_KEY);
+    let first = first_retired_path(keys_dir);
     if !first.exists() {
         return first;
     }
