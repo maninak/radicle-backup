@@ -196,7 +196,7 @@ rad backup verify --identity ~/.ssh/id_ed25519 \
     --identity-passphrase-file ~/.secret <archive>                              # for cron
 ```
 
-Prefer the file to `RAD_BACKUP_IDENTITY_PASSPHRASE`, which the variable exists for and which anything that can see the process can read. One passphrase covers every `--identity` given, and age stops at the first key it cannot unlock, so an unattended run should be handed the one key the archive was encrypted to rather than a directory of them.
+Prefer the file to `RAD_BACKUP_IDENTITY_PASSPHRASE`, which the variable exists for and which anything that can see the process can read; `RAD_BACKUP_IDENTITY_PASSPHRASE_FILE` names the same file as the flag. One passphrase covers every `--identity` given, and age stops at the first key it cannot unlock, so an unattended run should be handed the one key the archive was encrypted to rather than a directory of them.
 
 `--plaintext` writes an unencrypted archive. It says so loudly, `doctor` fails a check while one is the newest archive, and it exists for the case where the archive is going straight into a store that encrypts it for you (restic, borg, an encrypted disk).
 

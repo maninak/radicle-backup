@@ -70,6 +70,20 @@ pub struct Restored {
     pub source_node_state_was_guessed: bool,
 }
 
+/// The path as the next reader will have to resolve it, which is from wherever they are.
+///
+/// `rad backup --output backups/nightly.tar.zst` is written down as given, and the record is
+/// read back by a `doctor` or an `ls` run from somebody's home directory or by a timer with no
+/// working directory to speak of: they went looking in the wrong place and reported the archive
+/// missing. Falls back to the path as given when the current directory cannot be read, because
+/// a relative path is still better than no record at all.
+fn absolute_as_far_as_it_goes(path: &Path) -> String {
+    std::path::absolute(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 impl Record {
     /// The record a finished archive leaves behind. Everything here is already public: what
     /// went in, when, and where it went. Nothing that would help anyone read it.
@@ -81,7 +95,7 @@ impl Record {
     ) -> Self {
         Self {
             did: manifest.identity.did.clone(),
-            archive: archive.map(|path| path.display().to_string()),
+            archive: archive.map(absolute_as_far_as_it_goes),
             created: manifest.created.clone(),
             tier: manifest.tier.as_str().to_string(),
             repo_selection: manifest.repo_selection.as_str().to_string(),
@@ -229,6 +243,70 @@ pub fn write(record: &Record) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one field of a manifest these tests need, spelled out because a `Manifest` has no
+    /// `Default` and the rest of it says nothing about where the archive landed.
+    fn manifest() -> crate::manifest::Manifest {
+        crate::manifest::Manifest {
+            format: crate::manifest::FORMAT_VERSION,
+            tool: crate::manifest::ToolInfo::default(),
+            created: "2026-08-14T00:00:00Z".to_string(),
+            tier: crate::manifest::Tier::Identity,
+            repo_selection: crate::manifest::RepoSelection::None,
+            identity: crate::manifest::IdentityInfo {
+                did: "did:key:z6MkTest".to_string(),
+                node_id: "z6MkTest".to_string(),
+                alias: None,
+                public_key: "ssh-ed25519 AAAA".to_string(),
+                fingerprint: "SHA256:test".to_string(),
+                key_is_encrypted: true,
+            },
+            source: crate::manifest::SourceInfo {
+                host: None,
+                rad_home: "/home/tester/.radicle".to_string(),
+                rad_version: None,
+                git_version: None,
+                os: "linux".to_string(),
+                retires_key: None,
+            },
+            node: crate::manifest::NodeInfo::default(),
+            entries: Vec::new(),
+            repos: Vec::new(),
+            policies: crate::manifest::PolicySummary::default(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The bug: `--output backups/nightly.tar.zst` was written into the record exactly as
+    /// typed, and `doctor` reading it back from another directory reported the archive gone.
+    /// Asserted through `from_manifest` rather than on the helper, so that a call site that
+    /// stops using the helper fails here rather than passing on the helper's own behaviour.
+    #[test]
+    fn a_relative_archive_path_is_recorded_the_way_the_next_reader_will_resolve_it() {
+        let record = Record::from_manifest(
+            &manifest(),
+            Some(Path::new("backups/nightly.tar.zst")),
+            "z6MkTest",
+            true,
+        );
+
+        let written = record
+            .archive
+            .expect("an archive that went to a path is recorded");
+        assert!(
+            Path::new(&written).is_absolute(),
+            "a record read from another directory has to be able to find this: {written}"
+        );
+        assert!(written.ends_with("backups/nightly.tar.zst"), "{written}");
+    }
+
+    #[test]
+    fn an_archive_path_that_is_already_absolute_is_recorded_unchanged() {
+        let given = "/backups/nightly.tar.zst";
+        let record = Record::from_manifest(&manifest(), Some(Path::new(given)), "z6MkTest", true);
+
+        assert_eq!(record.archive.as_deref(), Some(given));
+    }
 
     fn record() -> Record {
         Record {

@@ -158,10 +158,13 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
 
     let encryption = encryption.expect("a run that is not a dry run has returned by now");
     let now = jiff::Timestamp::now();
+    // Read once. Read twice, the archive's file name and the alias inside its manifest came
+    // from two reads of a `config.json` somebody can edit between them, and the two disagreed.
+    let alias = home.read_alias()?;
     let destination = prepare(
         args,
         &identity,
-        home.read_alias()?.as_deref(),
+        alias.as_deref(),
         &now,
         &encryption,
         std::io::stdout().is_terminal(),
@@ -184,7 +187,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         identity: IdentityInfo {
             did: identity.did(),
             node_id: node_id.clone(),
-            alias: home.read_alias()?,
+            alias,
             public_key: identity.to_openssh()?,
             fingerprint: identity.fingerprint(),
             key_is_encrypted: secret.protection().is_encrypted(),

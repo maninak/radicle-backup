@@ -1260,10 +1260,11 @@ mod tests {
         assert!(check.remedy.is_some());
     }
 
-    /// A same-disk archive may still be replicated: `/mnt/bueno/MEGA/bak` shares a filesystem
-    /// with nothing that syncs it locally, but MEGA carries it off the machine. Only the
-    /// person running this knows, so the check reports the fact and leaves the verdict short
-    /// of a failure. Exiting 3 at somebody who is covered would train them to ignore the 3.
+    /// A same-disk archive may still be replicated. A directory a cloud client watches shares
+    /// a filesystem with nothing that copies it locally, and is carried off the machine all the
+    /// same. Only the person running this knows, so the check reports the fact and leaves the
+    /// verdict short of a failure. Exiting 3 at somebody who is covered trains them to ignore
+    /// the 3.
     #[test]
     fn an_archive_on_the_same_filesystem_warns_rather_than_fails_because_it_may_still_be_synced() {
         let dir = std::env::temp_dir().join(format!("rad-backup-locality-{}", std::process::id()));

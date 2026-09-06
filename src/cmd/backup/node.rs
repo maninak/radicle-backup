@@ -46,13 +46,16 @@ impl NodeGuard<'_> {
             return;
         }
         self.was_stopped_by_backup = false;
-        self.ctx.term.step("starting the node again");
+        // Announced only once there is something to announce. Said first, the run printed
+        // "starting the node again" and then, on the next line, that it had not: the step and
+        // the warning contradict each other and the reader has to work out which one won.
         let Some(rad) = self.rad else {
             self.ctx
                 .term
                 .warn("rad is no longer on PATH, so the node this run stopped is still stopped");
             return;
         };
+        self.ctx.term.step("starting the node again");
         if !matches!(rad.start_node(), Ok(true)) {
             self.ctx
                 .term
