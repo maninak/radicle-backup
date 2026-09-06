@@ -12,16 +12,23 @@
 # a char literal or a raw string needs a Rust parser, and a gate that guesses would fire on
 # the templates this tool ships. Revisit if that shape ever occurs.
 #
-# The pattern deliberately wants a word character on both sides of the run, so the indentation
-# inside the multi-line templates this tool ships (`RESTORE.md`, `restore.sh`, the systemd
-# units, the recovery sheet) is not a hit.
+# The pattern deliberately wants a character on both sides of the run that ends or begins a
+# word, so the indentation inside the multi-line templates this tool ships (`RESTORE.md`,
+# `restore.sh`, the systemd units, the recovery sheet) is not a hit. `!`, `?`, `%`, `'`, `-`
+# and a nested `\"` are in the left-hand set beside the letters: this tool's copy ends a
+# clause with every one of them, and a hole after a question mark is the same defect as a
+# hole after a full stop.
+#
+# Three spaces and not two, because one fake `rad` output in the integration suite lines its
+# columns up with two and a gate that fires on a deliberate one gets skipped rather than read.
+# Revisit if a two-space join ever reaches a user.
 
 set -eu
 
 # shellcheck source=ci/lib.sh
 . "$(dirname "$0")/lib.sh"
 
-gap='"[^"]*[[:alnum:],.:;)]   +[[:alnum:]]'
+gap='"[^"]*[[:alnum:],.:;)!?%'"'"'"-]   +[[:alnum:]]'
 # The pattern is tried against a line known to be bad first. A gate nobody has watched
 # fail reports a safety it may not be providing, and this one is a single regex.
 if ! printf '%s\n' 'x("a node running: the run                      that took it")' \
@@ -32,7 +39,10 @@ fi
 # The files are listed rather than described to `grep`, because a `--include` that stops
 # matching (`*.rust`, a directory renamed) reads nothing and reports a clean tree.
 sources=$(rust_sources "no message was checked")
-gaps=$(grep -En "$gap" $sources || true)
+# `|| [ $? -eq 1 ]` and not `|| true`: grep exits 1 for "no match" and 2 for "could not read
+# that file", and `true` maps both to a clean tree. A file in the index but not in the working
+# tree, which is any half-applied patch, is enough to make this gate read nothing and pass.
+gaps=$(grep -En "$gap" $sources || [ $? -eq 1 ])
 if [ -n "$gaps" ]; then
 	echo "$gaps" | sed 's/$/: a run of spaces in a message, so a line continuation was dropped/' | complain
 	exit 1

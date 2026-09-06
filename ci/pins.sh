@@ -87,9 +87,48 @@ if [ "$defined" != "$pinned" ] || [ "$defined" != "$asked" ]; then
 	wrong=1
 fi
 
+# What `just check` runs, which the README and CONTRIBUTING each describe in the same sentence
+# beside the same command. A gate added to the recipe and to one of them leaves the other
+# telling a contributor the run covers less than it does, which is the half nobody re-reads.
+pins=$((pins + 1))
+recipe=$(found 'just check +# [^|]*' README.md)
+if [ -z "$recipe" ]; then
+	echo "README.md no longer shows the 'just check' line this gate reads" | complain
+	exit 1
+fi
+if [ "$(found "$(printf '%s' "$recipe" | sed 's/[.[\*^$]/\\&/g')" CONTRIBUTING.md)" != "$recipe" ]; then
+	echo "README.md and CONTRIBUTING.md describe 'just check' differently, so one of them is" \
+		"telling a contributor the run covers something other than what it covers" | complain
+	wrong=1
+fi
+
+# The gates themselves, in the order the justfile's `check` recipe runs them and the order the
+# workflow's test job does. Moving them into `ci/` stopped the two spelling a gate's RULES
+# differently; which gates each side runs is still written twice, and it drifted twice in one
+# session before the move. A gate only one side runs is one that lands broken on whichever
+# side nobody ran.
+pins=$((pins + 1))
+recipe_gates=$(grep -m1 '^check:' justfile | tr ' ' '\n' | sed 's/:$//' |
+	while read -r name; do
+		if [ -f "ci/$name.sh" ]; then echo "$name"; fi
+	done)
+workflow_gates=$(found '^ *run: ci/[a-z-]+\.sh$' .github/workflows/ci.yml |
+	sed 's|.*run: ci/||; s|\.sh$||')
+if [ -z "$recipe_gates" ] || [ -z "$workflow_gates" ]; then
+	echo "neither the justfile nor the workflow names a gate this can read, so which gates" \
+		"each side runs went unchecked" | complain
+	exit 1
+fi
+if [ "$recipe_gates" != "$workflow_gates" ]; then
+	echo "'just check' runs [$(echo "$recipe_gates" | tr '\n' ' ')] and the workflow runs" \
+		"[$(echo "$workflow_gates" | tr '\n' ' ')]. A gate only one side runs lands broken" \
+		"on whichever side nobody ran." | complain
+	wrong=1
+fi
+
 # A pin that stopped running is a pin that stopped holding, and it would do it quietly.
-if [ "$pins" -ne 3 ]; then
-	echo "$pins pins ran, not the 3 this gate has. One was lost rather than deleted." | complain
+if [ "$pins" -ne 5 ]; then
+	echo "$pins pins ran, not the 5 this gate has. One was lost rather than deleted." | complain
 	wrong=1
 fi
 exit "$wrong"
