@@ -357,6 +357,52 @@ fn only_archive(directory: &Path) -> PathBuf {
     archives.remove(0)
 }
 
+/// Exit 4 is documented as "everything is intact and nothing was written", and
+/// `--replay-policies` broke it. The flag asked for `rad` from inside the replay, which runs
+/// after the identity, the databases and every repository are already on disk, so the refusal
+/// arrived over a home the run had just rewritten, and it skipped the state record on the way
+/// out.
+#[test]
+fn a_restore_refused_for_want_of_rad_leaves_the_home_untouched() {
+    let fixture = Fixture::create("restore-replay-without-rad");
+    let backups = fixture.path("backups");
+
+    let out = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&out, "taking a full backup");
+    let archive = only_archive(&backups);
+
+    let restored = fixture.path("restored");
+    let out = fixture.run(
+        &[
+            "restore",
+            "--replay-policies",
+            "--yes",
+            &archive.to_string_lossy(),
+        ],
+        &restored,
+    );
+    let said = stderr(&out);
+
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a flag that cannot be honoured is a refusal: {said}"
+    );
+    assert!(
+        !restored.join("keys/radicle").exists(),
+        "exit 4 promises an untouched home: {said}"
+    );
+}
+
 #[test]
 fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_success() {
     let fixture = Fixture::create("restore-without-git");

@@ -75,6 +75,19 @@ impl Policies {
     pub fn blocked_peers(&self) -> impl Iterator<Item = &FollowingPolicy> {
         self.following.iter().filter(|p| p.policy == "block")
     }
+
+    /// Every row's identifier, for a caller reporting that none of them were put back. Sorted
+    /// and deduplicated, because a repository can be named by a seeding row and a blocking one
+    /// and a reader counting the list would then see it twice.
+    pub fn identifiers(&self) -> Vec<String> {
+        self.seeding
+            .iter()
+            .map(|policy| policy.rid.clone())
+            .chain(self.following.iter().map(|policy| policy.nid.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
 }
 
 /// Copy a live database consistently, using SQLite's online backup API.
@@ -166,9 +179,9 @@ pub fn read_routing_counts(node_db: &Path, own_node_id: &str) -> Result<BTreeMap
 /// else is work that has left this machine; one whose head appears against nobody is work that
 /// exists on this disk and nowhere in the world.
 ///
-/// Heads only, and no timestamp beside them. A restored home's copy of this table is the
-/// archive's own, so the obvious use for the column is to tell a row a peer wrote since the
-/// restore from a row the archive carried. It cannot: heartwood stamps each row with the
+/// Heads only, and no timestamp beside them. The obvious use for the column would be to tell
+/// a row a peer wrote since a restore from one that was already there. It cannot: heartwood
+/// stamps each row with the
 /// ANNOUNCING node's clock, and replays historical gossip with its original timestamp, so the
 /// column orders nothing this reader's caller could act on. Which node said it is nobody's
 /// question here either, so two nodes on one head collapse to one entry.

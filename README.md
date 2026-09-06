@@ -214,7 +214,9 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ✓ installed the identity into ~/.radicle
 · restoring 2 repositories
 · comparing 2 repositories with the network
-· waiting for other nodes to say what they hold of these refs
+· starting the node, to compare what was restored with the network
+· waiting twenty seconds for other nodes to say what they hold of these refs
+· stopping the node again
 
 ✓ restored alice into ~/.radicle
   2 repositories, 16 seeding and 3 following policies
@@ -224,7 +226,9 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
   start the node with `rad node start`
 ```
 
-Everything is unpacked into a staging directory first and every digest is checked before a single byte lands in the home, so a truncated or tampered archive cannot leave you with half an identity. Restoring into a home that already holds one is refused (exit `4`) unless you pass `--force`.
+Everything is unpacked into a staging directory first and every digest is checked before a single byte lands in the home, so a truncated or tampered archive cannot leave you with half an identity.
+
+A restore refuses outright while a node is running against the home it is restoring into, because installing over a live home corrupts both. It also refuses (exit `4`) a home that already holds something: an identity, stored repositories, a node database, a `config.json`, or a key `move` retired. `--force` overrides the second refusal and names what it is about to write over. The comparison at the end needs a node, so the run starts one itself when the home's own is down, and stops it again.
 
 ### The fork hazard, and what this does about it
 
@@ -235,11 +239,11 @@ So after restoring, and before handing control back, every restored repository i
 | Standing | What it means | What happens |
 |---|---|---|
 | no other node has reported holding anything else | Nothing on record contradicts this copy | Nothing to do, and read the next two paragraphs for what that is worth |
-| holds work the network has not seen | A node said during this restore that it is behind this copy | Kept; push when ready |
+| holds work no node that answered has | A node said during this restore that it is behind this copy | Kept; push when ready |
 | holds work no node had when the archive was taken | The same, from a record written before the backup, which has had every day since to go stale | Named; fetch and look before you announce |
-| another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here | **Named, and the restore exits `3`** |
+| another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here, including the case where the archive holds none of yours for it at all | **Named, and the restore exits `3`** |
 | could not be compared | The fetch failed, `git` could not answer, the recorded head was not an oid, or the node's own record could not be read | Each one named; leave the node running and look again |
-| nothing to compare it with | Delegated to you alone and announced to nobody, or the archive holds no signed refs of yours for it, so no node will ever hold anything to compare | Nothing to do |
+| nothing to compare it with | Announced to nobody, delegated to you alone and allowed to nobody, so no node can hold anything to compare | Nothing to do |
 
 A refs announcement is a separate message from a fetch, so after the fetches the run waits twenty seconds for other nodes to say what they hold. It is a flat wait with nothing to poll for: heartwood rewrites a peer's row only when that peer announces a *different* head, so a node that holds exactly what you hold writes nothing, and no observable state ever says the answers are in.
 
@@ -271,17 +275,17 @@ sh restore.sh ~/.radicle                             # or just run it
 recovery posture of /home/alice/.radicle
 
 ✓ key passphrase: the key is encrypted with aes256-ctr (bcrypt)
-✗ backup: no archive has ever been taken for this identity
-  --> rad backup
+✗ backup: no archive of this identity in /home/alice/backups, and this tool has no record of one anywhere
+  --> rad backup --output /home/alice/backups
 ? archive encryption: there is no archive to judge
-? archive location: no archive path was recorded, so this could not be judged
-! private repositories: 3 of 3 are in no archive, though every one of those is allowed to a peer that could hold a copy
+? archive location: there is no archive to locate
+! private repositories: 3 of 3 are in no archive, though somebody else holds every one of those: a delegate, an allowed peer, or a node announcing it
   --> rad backup --repos private
 ! delegate quorum: 6 repositories have you as their only delegate: example-app, example-tool, example-config, example-docs, example-site, example-lib
   --> a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
 ✓ other seeds: every public repository is announced by at least one other node
 ✓ key copies: this home was not restored from an archive, so nothing here suggests a second copy
-! signed refs propagation: the newest signed refs of 1 repository are on this disk and no other: example-app
+! signed refs propagation: the newest signed refs of 1 repository is on this disk and no other: example-app
   --> `rad sync --announce` them, and keep an archive covering them until they have propagated
 
 3 pass, 3 worth improving, 1 failing, 2 could not be checked
@@ -294,7 +298,7 @@ Nine checks. The left of each line names what was looked at and the right says w
 
 `key copies` is the one check about a machine that is not this one. Restoring a backup puts the key here while the machine it came from keeps its copy, and two nodes signing under one peer id is the thing never to do; `rad backup move` is the path that closes it, because it retires the source key as part of the run. Said as a possibility and never as a finding, because this tool cannot see the other machine.
 
-The line between a `!` and a `✗` is whether anything else holds a copy: a private repository in no archive fails when no other node has it and warns when its identity allows a peer that could, and an archive older than 30 days warns rather than fails.
+The line between a `!` and a `✗` is whether anything else holds a copy: a private repository in no archive fails when nobody else can hold it and warns when a second delegate, an allowed peer or a node announcing it could, and an archive older than 30 days warns rather than fails.
 
 `doctor --json` prints the same as structured data. It exits `3` when any check fails, which makes it a monitoring probe.
 
@@ -416,7 +420,7 @@ Unattended-Upgrade::Allowed-Origins {
 ## Development
 
 ```sh
-just check    # cargo fmt --check, the SECURITY.md audit map, then the lints, then the tests: what CI runs, in that order
+just check    # cargo fmt --check, the SECURITY.md audit map, the naming and message gates, clippy, a non-unix build, then the tests: what CI runs, in that order
 ```
 
 The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, takes real archives of it, restores them into a second home and compares the two byte for byte. It needs `git` and nothing else, so it runs anywhere the tool does.
