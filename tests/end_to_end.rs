@@ -342,6 +342,65 @@ fn assert_success(ran: &Output, what: &str) {
     );
 }
 
+/// A run that did what it was asked and could not finish a check, which is exit `3`.
+///
+/// Every restore in this suite is one: the fixtures carry no `rad`, so the comparison with
+/// the network never happens, and a restore that could not look at the fork hazard does not
+/// get to report success. Named rather than spelled inline three times, so the reason is
+/// written down once.
+fn assert_checks_failed(ran: &Output, what: &str) {
+    assert_eq!(
+        ran.status.code(),
+        Some(3),
+        "{what} should have reported an unfinished check: {}",
+        stderr(ran)
+    );
+}
+
+/// The comparison that did not happen is worth exactly what it is: `--no-reconcile` is a
+/// restore with the fork check declined, and it exits `0`; the same restore without the flag
+/// could not reach a `rad` and exits `3`. Told apart by what was asked for and not by the
+/// standings, which read the same either way, so this pins the pair rather than one side.
+#[test]
+fn a_comparison_that_was_declined_is_not_a_comparison_that_failed() {
+    let fixture = Fixture::create("declined-comparison");
+    let backups = fixture.path("backups");
+
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking a full backup");
+    let archive = only_archive(&backups);
+
+    let asked = fixture.path("asked");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &asked);
+    assert_checks_failed(&ran, "a restore whose comparison could not run");
+
+    let declined = fixture.path("declined");
+    let ran = fixture.run(
+        &[
+            "restore",
+            "--yes",
+            "--no-reconcile",
+            &archive.to_string_lossy(),
+        ],
+        &declined,
+    );
+    assert_success(&ran, "a restore whose comparison was declined");
+    assert!(
+        declined.join("keys/radicle").is_file(),
+        "the identity came back whichever way the comparison went: {}",
+        stderr(&ran)
+    );
+}
+
 /// Every shell on the machine the shipped script has to decide the same way under.
 ///
 /// Not just `/bin/sh`: its patterns lean on bracket expressions and character classes, and
@@ -583,7 +642,7 @@ fn a_full_archive_restores_an_identity_its_policies_and_its_repositories_byte_fo
 
     let restored = fixture.path("restored");
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
-    assert_success(&ran, "restoring the archive");
+    assert_checks_failed(&ran, "restoring the archive");
 
     let before = std::fs::read(fixture.home().join("keys/radicle")).expect("the key is readable");
     let after = std::fs::read(restored.join("keys/radicle")).expect("the restored key is readable");
@@ -1297,7 +1356,7 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
 
     let by_tool = fixture.path("by-tool");
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &by_tool);
-    assert_success(&ran, "restoring with this tool");
+    assert_checks_failed(&ran, "restoring with this tool");
 
     let extracted = fixture.path("extracted");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
@@ -1813,7 +1872,7 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
 
     let restored = fixture.path("restored");
     let ran = fixture.run(&["restore", "--yes", &hostile.to_string_lossy()], &restored);
-    assert_success(&ran, "restoring an archive whose manifest names a bad head");
+    assert_checks_failed(&ran, "restoring an archive whose manifest names a bad head");
     assert!(
         stderr(&ran).contains("does not name a ref"),
         "{}",

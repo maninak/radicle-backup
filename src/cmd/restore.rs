@@ -262,7 +262,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // leave a home that has been fully restored and believes it has never seen an archive.
     let comparison = if args.no_reconcile {
         term.warn("--no-reconcile: nothing was compared with the network");
-        Ok(nothing_compared(&restored.repos))
+        Ok(nothing_compared(&restored.repos, NetworkCheck::Declined))
     } else {
         reconcile(ctx, &manifest, &restored.repos)
     };
@@ -576,6 +576,13 @@ fn bundle_check_notice(reaches: Option<bool>) -> Option<(String, Option<String>)
     }
 }
 
+/// Rebuild each archived repository from its bundle.
+///
+/// One repository that will not open does not end the restore. `backup` already carries on
+/// past a repository it cannot bundle, and the asymmetry was worse here: a bundle that fails
+/// `fetch.fsckObjects` (old history with a malformed object bundles fine and refuses to
+/// unbundle) abandoned every repository after it, and took the state record and the report
+/// with it.
 fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<Restored> {
     let carried: Vec<&RepoRecord> = manifest
         .repos
@@ -708,6 +715,22 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
 struct Reconciled {
     standings: BTreeMap<String, Standing>,
     ahead_of_someone: BTreeSet<String>,
+    wanted: NetworkCheck,
+}
+
+/// Whether this run meant to ask the network anything.
+///
+/// A repository nothing came back for is a check that did not run, not a check that passed,
+/// and it costs the exit code for that reason. `--no-reconcile` is the one case where an
+/// unasked question is what was asked for, so it is carried here rather than guessed at from
+/// standings that look the same either way.
+#[derive(Default, Debug, PartialEq, Eq)]
+enum NetworkCheck {
+    /// The run put the repositories to the network, or tried to.
+    #[default]
+    Wanted,
+    /// `--no-reconcile`: nothing was compared and nothing was meant to be.
+    Declined,
 }
 
 /// Compare each restored repository with what other nodes hold of its signed refs.
@@ -732,7 +755,7 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
             .warn("rad is not on PATH, so nothing was compared with the network");
         ctx.term
             .detail("run `rad sync <rid> --fetch` for each repository before you write to it");
-        return Ok(nothing_compared(restored));
+        return Ok(nothing_compared(restored, NetworkCheck::Wanted));
     }
     let mut standings = Reconciled::default();
 
@@ -791,7 +814,7 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
                 .warn("the node would not start, so nothing was compared with the network");
             ctx.term
                 .detail("run `rad node start`, then `rad sync <rid> --fetch` before you write");
-            return Ok(nothing_compared(restored));
+            return Ok(nothing_compared(restored, NetworkCheck::Wanted));
         }
         true
     };
@@ -1149,8 +1172,9 @@ fn resolve_git_failure(
 /// `--json` rendered as empty `atRisk`, `ahead` and `notChecked` arrays: a run that never
 /// asked the network anything was indistinguishable, to a script, from one that asked and
 /// found nothing wrong.
-fn nothing_compared(restored: &[RepoRecord]) -> Reconciled {
+fn nothing_compared(restored: &[RepoRecord], wanted: NetworkCheck) -> Reconciled {
     Reconciled {
+        wanted,
         standings: restored
             .iter()
             .map(|repo| {
@@ -1683,12 +1707,20 @@ fn report(
         term.detail("start the node with `rad node start`");
     }
 
+    // A repository this run meant to compare and could not is a failed check too. The fork
+    // hazard is the reason this tool exists rather than a tarball, and a run that never got
+    // to look at it has not established the thing its exit code would be claiming: `rad` off
+    // PATH, a node that would not start and a fetch that failed all end here, and a scheduled
+    // restore that exited 0 over any of them is the last anyone hears. Under `--no-reconcile`
+    // the same standings mean the user asked for exactly this, which is why the two are told
+    // apart rather than read off the standings.
+    let unchecked = reconciled.wanted == NetworkCheck::Wanted && !not_checked.is_empty();
     // A repository the archive carried and the home did not get is a failed check, the same
     // as a fork hazard: the run did not deliver what it was asked for, and a scheduled restore
     // that exited 0 over it would be the last anyone heard about it. A seeding or following
     // decision that did not go back counts for the same reason.
     Ok(
-        if at_risk.is_empty() && dropped.is_empty() && policies_missed.is_empty() {
+        if at_risk.is_empty() && dropped.is_empty() && policies_missed.is_empty() && !unchecked {
             std::process::ExitCode::SUCCESS
         } else {
             std::process::ExitCode::from(EXIT_CHECKS_FAILED)
@@ -2216,7 +2248,7 @@ mod tests {
             repo("rad:zPub", "public", &[(OWN_NODE, &oid('a'))]),
         ];
 
-        let given_up = nothing_compared(&restored);
+        let given_up = nothing_compared(&restored, NetworkCheck::Wanted);
 
         assert_eq!(
             given_up.standings.get("rad:zPriv"),
@@ -2256,7 +2288,7 @@ mod tests {
         let theirs = repo("rad:zTheirs", "public", &[("z6MkOther", &oid('a'))]);
         assert!(!no_node_can_hold(&theirs), "written off before the fetch");
 
-        let given_up = nothing_compared(&[theirs]);
+        let given_up = nothing_compared(&[theirs], NetworkCheck::Wanted);
 
         assert_eq!(
             given_up.standings.get("rad:zTheirs"),
@@ -2330,6 +2362,7 @@ mod tests {
                 .iter()
                 .map(|rid| (*rid).to_string())
                 .collect(),
+            wanted: NetworkCheck::Wanted,
         }
     }
 

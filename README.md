@@ -242,7 +242,7 @@ So after restoring, and before handing control back, every restored repository i
 | holds work no node that answered has | A node said during this restore that it is behind this copy | Kept; push when ready |
 | holds work no node had when the archive was taken | The same, from a record written before the backup, which has had every day since to go stale | Named; fetch and look before you announce |
 | another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here, including the case where the archive holds none of yours for it at all | **Named, and the restore exits `3`** |
-| could not be compared | The fetch failed, `git` could not answer, the recorded head was not an oid, or the node's own record could not be read | Each one named; leave the node running and look again |
+| could not be compared | The fetch failed, `git` could not answer, the recorded head was not an oid, or the node's own record could not be read | **Each one named, and the restore exits `3`**; leave the node running and look again |
 | nothing to compare it with | Announced to nobody, delegated to you alone and allowed to nobody, so no node can hold anything to compare | Nothing to do |
 
 A refs announcement is a separate message from a fetch, so after the fetches the run waits twenty seconds for other nodes to say what they hold. It is a flat wait with nothing to poll for: heartwood rewrites a peer's row only when that peer announces a *different* head, so a node that holds exactly what you hold writes nothing, and no observable state ever says the answers are in.
@@ -251,7 +251,7 @@ That same rule is why there is no "in step with the network" row: this tool cann
 
 The two readings of a row are not treated alike, because only one of them keeps. A node holding refs signed with your key that you do not have still holds them however old the row is, so that reading is taken from any row. "That node is behind you" is only true of the moment it was written, and a node that was behind in January has had since January to catch up and pass you: so `holds work the network has not seen`, and the `rad sync --announce` beside it, is only ever claimed on a row that arrived during this run. A row already there is still reported, as `holds work no node had when the archive was taken`, which says the true half without the instruction. Which rows were already there is read out of the home's own node database before the node is started, so no clock is consulted.
 
-`--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push.
+`--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push. It is the one way a restore that compared nothing still exits `0`: a check that was declined is not a check that failed, and every other route to an uncompared repository (no `rad` on `PATH`, a node that would not start, a fetch that did not work) is a question this run meant to ask and could not.
 
 `--replay-policies` re-applies the seeding and following policies through `rad` instead of copying the policy database, for restoring into a Radicle whose schema has moved past the archived one.
 

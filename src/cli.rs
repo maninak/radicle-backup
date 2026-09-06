@@ -170,9 +170,10 @@ pub struct Global {
     /// staging copy a restore is checked in.
     ///
     /// The default is beside whatever the command is producing, which is a filesystem the
-    /// user already chose and which has room for the result. Point this elsewhere when that
-    /// filesystem is small, read-only, or somewhere a private repository should not appear
-    /// even briefly.
+    /// user already chose and which has room for the result. `backup --stdout` produces no
+    /// file to sit beside, so that one run falls back to the system temporary directory.
+    /// Point this elsewhere when the default filesystem is small, read-only, or somewhere a
+    /// private repository should not appear even briefly.
     #[arg(
         long,
         global = true,
@@ -410,6 +411,9 @@ pub struct Restore {
     ///
     /// Building on a restored repository whose signed refs are behind what the network holds
     /// forks your own history. Only skip this offline, and fetch before you push.
+    ///
+    /// This is also the one way a restore that compared nothing still exits 0. Without it a
+    /// comparison that could not run costs exit 3, because the hazard was never looked at.
     #[arg(long)]
     pub no_reconcile: bool,
 
