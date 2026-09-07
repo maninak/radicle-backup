@@ -81,11 +81,16 @@ for bundle in repos/*.bundle; do
     fetch --quiet --force "$PWD/$bundle" 'refs/*:refs/*'
   cp "repos/$rid.config" "$RAD_HOME/storage/$rid/config" 2>/dev/null || true
   head=$(jq -r --arg rid "rad:$rid" '.repos[] | select(.rid==$rid) | .head // empty' manifest.json)
+  # Two values out of the manifest reach a command line here, `$rid` and `$head`, and these
+  # lines check neither. `symbolic-ref` takes no `--` and stores what it is handed, so a
+  # manifest saying `-d` reaches git as a flag and one saying `refs/../../evil` writes outside
+  # the repository. That is fine for an archive you took yourself and not for one somebody
+  # handed you: for that, run `restore.sh` beside this file, which refuses both.
   [ -n "$head" ] && git --git-dir "$RAD_HOME/storage/$rid" symbolic-ref HEAD "$head"
 done
 ```
 
-`restore.sh`, next to this file, is the same procedure with error handling, and it additionally refuses a bundle whose name is not a repository id and a `HEAD` that does not name a ref. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
+`restore.sh`, next to this file, is the same procedure with error handling, and it additionally refuses a bundle whose name is not a repository id, a `HEAD` that does not name a ref, and a home with a symlink where the identity or a database goes. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
 
 ## 4. Before you write anything to a restored repository
 
