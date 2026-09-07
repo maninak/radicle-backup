@@ -26,6 +26,33 @@ const ARCHIVE_PASSPHRASE: &str = "the archive passphrase";
 
 const RID: &str = "z3gqcJUoA1n9HaHKufZs5FCSGazv5";
 
+/// A fixture root short enough that a control socket still fits under it.
+///
+/// A restore asks whether a node is listening before it writes anything, and asking means a
+/// path to `<home>/node/control.sock` that fits in `sun_path`: 104 bytes on macOS, 108 on
+/// Linux. `std::env::temp_dir()` on macOS is `/var/folders/<x>/<y>/T/`, which has spent half
+/// of that before the fixture has named anything, so `/tmp` takes over when the name would
+/// not fit. A test whose node check could not run is not a test that checked.
+#[cfg(unix)]
+fn scratch_root(name: &str) -> PathBuf {
+    // The deepest path any test builds under the root, so the fit is decided once here rather
+    // than test by test: the longest home a fixture names, plus the socket under it.
+    const DEEPEST: usize = "/identity-passphrase/node/control.sock".len();
+    const SUN_LEN: usize = 104;
+
+    let under_temp = std::env::temp_dir().join(name);
+    match under_temp.as_os_str().len() + DEEPEST < SUN_LEN {
+        true => under_temp,
+        false => PathBuf::from("/tmp").join(name),
+    }
+}
+
+/// Nothing off unix binds a socket, so the system temp directory is the only answer there.
+#[cfg(not(unix))]
+fn scratch_root(name: &str) -> PathBuf {
+    std::env::temp_dir().join(name)
+}
+
 struct Fixture {
     root: PathBuf,
 }
@@ -33,8 +60,7 @@ struct Fixture {
 impl Fixture {
     /// A Radicle home with an identity, policies and one repository, built from nothing.
     fn create(name: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("rad-backup-it-{name}-{}", std::process::id()));
+        let root = scratch_root(&format!("rad-backup-it-{name}-{}", std::process::id()));
         // Owner-only, and never a directory that was already there, because the root holds a
         // real Radicle home with a real secret key under a name guessable from the pid. A
         // `create_dir_all` over a root somebody else planted first would have built that home
@@ -2246,6 +2272,7 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
 ///
 /// The whole shipped script, run as somebody in trouble would run it, stopped at its guard
 /// before it writes anything, so the fixture is a `manifest.json` and the home to refuse.
+#[cfg(unix)]
 #[test]
 fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
     let fixture = Fixture::create("script-symlinks");

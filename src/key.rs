@@ -308,11 +308,34 @@ pub(crate) mod tests {
             }
         }
 
+        /// A scratch short enough to bind a unix socket under.
+        ///
+        /// `sun_path` holds 104 bytes on macOS and 108 on Linux, and the ordinary scratch
+        /// spends most of that before the test has named anything: a temporary directory that
+        /// is itself 48 characters on macOS, a parent named after the test, and the `Scratch`
+        /// inside it. `node/control.sock` under all that is past the limit, so `connect`
+        /// refuses the path without looking at it and every probe answers the same doubt,
+        /// whatever is or is not listening. The parent is the scratch here, with no `Scratch`
+        /// inside it, and `name` is expected to be a word rather than a sentence.
+        /// Unix only, like the socket it exists for and like its one caller.
+        #[cfg(unix)]
+        pub(crate) fn create_short(name: &str) -> Self {
+            let parent = std::env::temp_dir().join(format!("rb-{name}-{}", std::process::id()));
+            crate::perms::create_private_dir(&parent)
+                .expect("the test's own scratch parent is creatable and was not already there");
+            Self {
+                parent,
+                scratch: None,
+            }
+        }
+
+        /// Under the `Scratch` when there is one, and under the parent itself when the path
+        /// has to stay short enough to bind a socket under.
         pub(crate) fn path_of(&self, name: &str) -> std::path::PathBuf {
-            self.scratch
-                .as_ref()
-                .expect("the scratch is only taken by Drop")
-                .path_of(name)
+            let Some(scratch) = self.scratch.as_ref() else {
+                return self.parent.join(name);
+            };
+            scratch.path_of(name)
         }
     }
 

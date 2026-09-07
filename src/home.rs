@@ -382,7 +382,9 @@ mod tests {
     fn a_socket_that_could_not_be_asked_is_not_reported_as_a_stopped_node() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let scratch = crate::key::tests::TestScratch::create("home-socket");
+        // Short on purpose: a unix socket path has a hard length limit, and the ordinary
+        // scratch spends more than macOS allows before this test has named anything.
+        let scratch = crate::key::tests::TestScratch::create_short("sock");
         let home = Home::at(scratch.path_of("home"));
         std::fs::create_dir_all(home.node_dir()).expect("scratch home is creatable");
 
