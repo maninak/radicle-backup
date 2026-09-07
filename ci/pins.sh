@@ -175,13 +175,21 @@ if [ -n "$bare" ]; then
 	wrong=1
 fi
 
-# The three moments a restore asks whether the home's own directories still point into it. The
-# first refuses; the other two exist because unpacking a large archive takes minutes, and a
-# link planted during them is followed by the `create_dir_all` that comes next. No test can
-# watch a link appear mid-run, so what holds the second and third asks is this: each is a call
-# inside a named function, and losing one is losing the part of the check that is about time.
+# The three moments a restore looks at whether the home's own directories point into it. `run`
+# settles it with the person there; the other two refuse outright, which is why each site is
+# pinned to its OWN function rather than to either: turning a later look into a second ask
+# would let a link planted mid-restore be consented to, which is the whole thing this stops.
+# They exist because
+# unpacking a large archive takes minutes and a link planted during them is followed by the
+# `create_dir_all` that comes next. No test can plant a link mid-run, so what holds the second
+# and third looks is this: each is a call inside a named function, and losing one is losing
+# the part of the check that is about time rather than about layout.
 pins=$((pins + 1))
-for asked_in in run install restore_repositories; do
+for pair in "run settle_directories_that_point_elsewhere" \
+	"install refuse_a_link_that_appeared_mid_restore" \
+	"restore_repositories refuse_a_link_that_appeared_mid_restore"; do
+	asked_in=${pair% *}
+	asks=${pair#* }
 	# The function body, from its signature to the next line starting at column zero, which is
 	# how every item in this file ends.
 	body=$(awk -v want="fn $asked_in(" '
@@ -194,11 +202,11 @@ for asked_in in run install restore_repositories; do
 			"went unchecked" | complain
 		exit 1
 	fi
-	if ! echo "$body" | grep -q 'refuse_a_home_that_points_elsewhere('; then
-		echo "src/cmd/restore.rs::$asked_in no longer asks whether a directory of the home" \
-			"points out of it. A link planted while a big archive unpacks is followed by" \
-			"whatever writes next, and the key or the repositories land outside the home." |
-			complain
+	if ! echo "$body" | grep -q "$asks("; then
+		echo "src/cmd/restore.rs::$asked_in no longer calls $asks. A link planted while a big" \
+			"archive unpacks is followed by whatever writes next, and the key or the" \
+			"repositories land outside the home. The two later looks must REFUSE and not ask:" \
+			"nobody can consent to a link that appeared under a running restore." | complain
 		wrong=1
 	fi
 done

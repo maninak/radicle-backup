@@ -230,8 +230,10 @@ impl Home {
     /// `create_dir_all` walks through one, and the copies and `git init` that follow land on
     /// the far side of it. So a home seeded with one sends an archive's contents out of
     /// itself, and `keys` pointing at a directory somebody else owns puts the private key in
-    /// it. Refused rather than followed: a directory this tool did not make is not one it may
-    /// quietly replace, which is what it does to a link standing at a file it writes.
+    /// it. This only answers the question; what the caller does about it differs by caller.
+    /// `restore` names where each one leads and asks, because pointing `storage` at a bigger
+    /// disk is an ordinary thing to have done, and refuses any link that changed after that
+    /// was settled. The shipped `restore.sh` refuses outright, having nobody to ask.
     ///
     /// Separate from `what_a_restore_would_overwrite` because `--force` answers that one and
     /// must not answer this: force is permission to overwrite what is here, never permission

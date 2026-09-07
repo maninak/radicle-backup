@@ -973,105 +973,111 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     assert_eq!(before, after, "a refused restore still touched the key");
 }
 
-/// A link at a directory takes the whole restore out of the home, and `--force` may not lift
-/// it.
+/// A link at one of the home's own directories is asked about, not walked through.
 ///
 /// Occupancy is asked about the names a restore writes, and every one of them sits inside
 /// `keys`, `node` or `storage`. A link at one of those three is followed by everything that
-/// writes: an empty directory somebody else owns, pointed at from `keys`, took the private
-/// key, and the checks upstream of it saw an empty home and said so. `--force` answers a
-/// different question, which is whether this restore may overwrite what is in the home.
+/// writes, so an empty directory somebody else owns, pointed at from `keys`, took the private
+/// key while the checks upstream saw an empty home and said so. Pointing `storage` at a bigger
+/// disk is also an ordinary thing to have done, so the answer is a question rather than a
+/// refusal: `--yes` goes through, and a run with nobody to ask does not.
 // Unix only: it is about following a symlink, which is what `symlink` here needs to make.
 #[cfg(unix)]
 #[test]
-fn a_home_whose_directories_point_elsewhere_is_refused_even_under_force() {
+fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
     let fixture = Fixture::create("linked-dirs");
     let backups = fixture.path("backups");
 
+    // The full tier, so that an accepted restore has a repository to put through the link and
+    // the last assertion is about something rather than about an empty directory either way.
     let ran = fixture.run(
-        &["--output", &backups.to_string_lossy(), "--yes"],
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
         &fixture.home(),
     );
     assert_success(&ran, "taking a backup");
     let archive = only_archive(&backups);
-
-    let home = fixture.path("linked");
-    let elsewhere = fixture.path("somewhere-else");
-    std::fs::create_dir_all(&home).expect("the home is creatable");
-    std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is creatable");
-    // All three, because each is checked separately and a list of one says nothing about the
-    // other two, and because the sentence has to agree with its own count.
-    for name in ["keys", "node", "storage"] {
-        std::os::unix::fs::symlink(&elsewhere, home.join(name)).expect("a symlink is creatable");
-    }
-
     let named = archive.to_string_lossy().to_string();
-    // One link, so the sentence has to agree with a count of one. Restoring twice into the
-    // same home is safe here because both runs refuse before anything is written.
+
+    // One link at a time, so the sentence has to agree with a count of one and so that a
+    // check firing for `keys` says nothing about the other two.
     for name in ["keys", "node", "storage"] {
-        let only = fixture.path(&format!("one-{name}"));
-        std::fs::create_dir_all(&only).expect("the home is creatable");
-        std::os::unix::fs::symlink(&elsewhere, only.join(name)).expect("a symlink is creatable");
-        let ran = fixture.run(&["restore", "--yes", &named], &only);
+        let home = fixture.path(&format!("one-{name}"));
+        let elsewhere = fixture.path(&format!("one-elsewhere-{name}"));
+        std::fs::create_dir_all(&home).expect("the home is creatable");
+        std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is creatable");
+        std::os::unix::fs::symlink(&elsewhere, home.join(name)).expect("a symlink is creatable");
+
+        // No `--yes`, and the suite's runs are not interactive, so there is nobody to ask.
+        let ran = fixture.run(&["restore", &named], &home);
         let said = stderr(&ran);
         assert_eq!(ran.status.code(), Some(4), "{said}");
         assert!(said.contains(&format!("{name} is a symlink")), "{said}");
-    }
-
-    for force in [&[][..], &["--force"][..]] {
-        let mut args = vec!["restore", "--yes"];
-        args.extend_from_slice(force);
-        args.push(&named);
-        let ran = fixture.run(&args, &home);
-        let said = stderr(&ran);
-        assert_eq!(ran.status.code(), Some(4), "with {force:?}: {said}");
         assert!(
-            said.contains("keys, node, storage are a symlink"),
-            "with {force:?}: {said}"
+            said.contains(&elsewhere.display().to_string()),
+            "the question has to name where the link leads: {said}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&elsewhere)
+                .expect("the directory pointed at is listable")
+                .count(),
+            0,
+            "a restore nobody consented to wrote through the link: {said}"
         );
     }
 
-    // `--words` writes a key into `keys` without reading an archive at all, so it reaches the
-    // same directory by a path that skips everything the archive-shaped restore checks.
-    let ran = fixture.run_with_stdin(&["restore", "--words", "--yes"], &home, WORDS);
+    // `--force` is a different question: it says this restore may overwrite what is in the
+    // home, never that it may write outside it, so it does not answer this one.
+    let home = fixture.path("forced");
+    let elsewhere = fixture.path("forced-elsewhere");
+    std::fs::create_dir_all(&home).expect("the home is creatable");
+    std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is creatable");
+    std::os::unix::fs::symlink(&elsewhere, home.join("storage")).expect("a symlink is creatable");
+    let ran = fixture.run(&["restore", "--force", &named], &home);
+    assert_eq!(ran.status.code(), Some(4), "{}", stderr(&ran));
+
+    // And `--yes` is how somebody who put that link there on purpose gets their home back.
+    // `assert_checks_failed`, not `assert_success`: the suite has no `rad`, so every restore
+    // that gets as far as the network comparison exits 3 for that reason alone. What this is
+    // about is that it got that far at all.
+    let ran = fixture.run(&["restore", "--yes", &named], &home);
+    assert_checks_failed(&ran, "restoring through a link the run was told to accept");
+    assert!(
+        std::fs::read_dir(&elsewhere)
+            .expect("the directory pointed at is listable")
+            .count()
+            > 0,
+        "an accepted restore should have written through the link"
+    );
+}
+
+/// `--words` writes a key into `keys` without reading an archive at all, so it reaches the
+/// same directory by a path that skips everything the archive-shaped restore checks.
+// Unix only: it is about following a symlink, which is what `symlink` here needs to make.
+#[cfg(unix)]
+#[test]
+fn rebuilding_from_words_asks_about_a_linked_keys_directory_before_writing_a_key() {
+    let fixture = Fixture::create("words-linked-dir");
+    let home = fixture.path("linked");
+    let elsewhere = fixture.path("keys-elsewhere");
+    std::fs::create_dir_all(&home).expect("the home is creatable");
+    std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is creatable");
+    std::os::unix::fs::symlink(&elsewhere, home.join("keys")).expect("a symlink is creatable");
+
+    let ran = fixture.run_with_stdin(&["restore", "--words"], &home, WORDS);
     let said = stderr(&ran);
     assert_eq!(ran.status.code(), Some(4), "{said}");
-    assert!(said.contains("symlink"), "{said}");
-
     assert_eq!(
         std::fs::read_dir(&elsewhere)
             .expect("the directory pointed at is listable")
             .count(),
         0,
-        "a refused restore wrote through the link"
-    );
-}
-
-/// A link at a name a `--words` restore writes, rather than at a directory it writes into.
-///
-/// The public key was the one write in the crate that went out through `fs::write`, which
-/// creates and truncates through a symlink standing at the name. Nothing about it is secret,
-/// and the file it destroyed on the far side of the link did not have to be ours.
-// Unix only: it is about following a symlink, which is what `symlink` here needs to make.
-#[cfg(unix)]
-#[test]
-fn rebuilding_an_identity_from_words_replaces_a_link_at_the_public_key_rather_than_writing_through_it()
- {
-    let fixture = Fixture::create("words-linked-pub");
-    let home = fixture.path("rebuilt");
-    let elsewhere = fixture.path("not-ours");
-    std::fs::create_dir_all(home.join("keys")).expect("the keys directory is creatable");
-    std::fs::write(&elsewhere, b"somebody else's file").expect("the file is writable");
-    std::os::unix::fs::symlink(&elsewhere, home.join("keys/radicle.pub"))
-        .expect("a symlink is creatable");
-
-    let ran = fixture.run_with_stdin(&["restore", "--words", "--yes"], &home, WORDS);
-    assert_success(&ran, "rebuilding an identity from words");
-    assert_eq!(
-        std::fs::read(&elsewhere).expect("the file the link points at is readable"),
-        b"somebody else's file",
-        "the restore truncated a file outside the home: {}",
-        stderr(&ran)
+        "a key was written through the link: {said}"
     );
 }
 

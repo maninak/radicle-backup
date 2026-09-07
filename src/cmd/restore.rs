@@ -130,39 +130,125 @@ impl Standing {
     }
 }
 
-/// Refuse a home whose own directories send this restore out of it.
+/// Settle what a link at one of the home's own directories means before anything is written.
 ///
 /// Every writer follows a link at a directory: `create_dir_all` walks through one, and the
 /// copies and `git init` that follow land on the far side. So `keys` pointing at a directory
 /// somebody else owns takes the private key, and `storage` pointing at one takes every
 /// repository, private ones included.
 ///
-/// Asked three times, and before anything else each time. Ahead of `--words`, which writes a
-/// key into `keys` without reading an archive at all, and ahead of the occupancy checks, so
-/// that the sentence names the link rather than whatever the link happens to lead to. Again
-/// in `install`, and again before the repositories go in, because unpacking a large archive
-/// is long enough for a link to appear in between and everything up to each ask is still a
-/// read. `ci/pins.sh` holds the three, since no test can watch a link appear mid-run.
-fn refuse_a_home_that_points_elsewhere(home: &Home) -> Result<()> {
-    let elsewhere = home.directories_that_point_elsewhere();
+/// Asked rather than refused outright, because pointing `storage` at a bigger disk is an
+/// ordinary thing to have done on purpose, and a tool for recovery that cannot recover into
+/// the layout somebody actually has is worse than the hazard: planting a link inside a home
+/// needs write access to that home, which is already enough to read the key. The prompt names
+/// where each one leads, `--yes` answers it the way an unattended restore needs, and a run
+/// with nobody to ask refuses, so silence is never taken for consent.
+///
+/// Separate from `--force`, which says this restore may overwrite what is in the home and
+/// never that it may write outside it. `--yes` does answer it, because that is the flag an
+/// unattended restore into a second-disk layout has to be able to pass; `SECURITY.md` says so
+/// rather than claiming a refusal this does not make.
+///
+/// What comes back is each name WITH the place it led to when the question was answered.
+/// Consent is about the place: a `storage` re-aimed from the big disk to somebody's `.ssh`
+/// during the minutes an archive takes to unpack is a different question, and one nobody has
+/// been asked.
+fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
+    let elsewhere = ctx.home.directories_that_point_elsewhere();
+    if elsewhere.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut settled = Vec::with_capacity(elsewhere.len());
+    for name in &elsewhere {
+        let here = ctx.home.path().join(name);
+        // The target, so the question is about a place rather than about a word. A link this
+        // process cannot resolve is one it cannot describe, and saying so is the answer.
+        let there = std::fs::read_link(&here);
+        let where_to = match &there {
+            Ok(there) => there.display().to_string(),
+            Err(e) => format!("somewhere this run could not read: {e}"),
+        };
+        ctx.term
+            .warn(&format!("{} is a symlink to {where_to}", here.display()));
+        settled.push(Settled {
+            name,
+            leads_to: there.ok(),
+        });
+    }
+    ctx.term
+        .detail("everything restored into it lands there, not in this home");
+    if ctx.term.confirm("restore through them anyway?")? {
+        return Ok(settled);
+    }
+    // Two different noes. Somebody who read the prompt and typed `n` is not a run with nobody
+    // to ask, and telling them to pass --yes is advice for the opposite of what they answered.
+    let (why, remedy) = match ctx.term.is_interactive() {
+        true => (
+            "and restoring through them was declined",
+            "move them aside, or restore into a different --home",
+        ),
+        false => (
+            "and this run has nobody to ask about it",
+            "pass --yes if restoring through them is what you want, or move them aside",
+        ),
+    };
+    Err(Error::refused(
+        format!(
+            "in {}, {} {} a symlink {why}",
+            ctx.home.path().display(),
+            term::shortlist(&elsewhere),
+            term::is_or_are(elsewhere.len())
+        ),
+        remedy,
+    ))
+}
+
+/// One of the home's own directories that leads elsewhere, and where it led when that was
+/// settled. `leads_to` is `None` for a link this run could not resolve, which never matches a
+/// later reading and so is refused rather than waved through.
+struct Settled {
+    name: &'static str,
+    leads_to: Option<std::path::PathBuf>,
+}
+
+/// Refuse a link at one of those directories that is not the one the question was settled on.
+///
+/// The same three names, asked again after the archive is unpacked and again before the
+/// repositories go in, because unpacking a large one takes minutes. Compared against where
+/// each link led when it was consented to, not merely against the name: a link swapped to a
+/// new target mid-run is a question nobody answered, so the layout somebody actually agreed to
+/// passes and everything else is refused. Refused rather than asked about, and `--yes` does
+/// not answer it, because a link that changed under a running restore is nobody's layout.
+/// `ci/pins.sh` holds both calls, since no test can plant a link mid-run.
+fn refuse_a_link_that_appeared_mid_restore(home: &Home, settled: &[Settled]) -> Result<()> {
+    let elsewhere: Vec<&'static str> = home
+        .directories_that_point_elsewhere()
+        .into_iter()
+        .filter(|name| {
+            let leads_to = std::fs::read_link(home.path().join(name)).ok();
+            !settled
+                .iter()
+                .any(|was| was.name == *name && was.leads_to.is_some() && was.leads_to == leads_to)
+        })
+        .collect();
     if elsewhere.is_empty() {
         return Ok(());
     }
     Err(Error::refused(
         format!(
-            "in {}, {} {} a symlink, so a restore would write the archive's contents outside \
-             this home",
+            "in {}, {} {} a symlink that is not the one this restore began with",
             home.path().display(),
             term::shortlist(&elsewhere),
             term::is_or_are(elsewhere.len())
         ),
-        "move it aside, or restore into a different --home",
+        "nothing else should be writing to a home mid-restore: find out what did, then \
+         restore again",
     ))
 }
 
 pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // Before the `--words` branch below, which writes a key into `keys` of its own.
-    refuse_a_home_that_points_elsewhere(&ctx.home)?;
+    let settled = settle_directories_that_point_elsewhere(ctx)?;
     if args.words {
         return crate::cmd::words::restore(ctx).map(|()| std::process::ExitCode::SUCCESS);
     }
@@ -280,8 +366,8 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         ));
     }
 
-    install(ctx, &staging)?;
-    let restored = restore_repositories(ctx, &staging, &manifest)?;
+    install(ctx, &staging, &settled)?;
+    let restored = restore_repositories(ctx, &staging, &manifest, &settled)?;
 
     let policies_missed = if args.replay_policies {
         replay_policies(ctx, &staging)?
@@ -530,14 +616,14 @@ fn appended(existing: &str, note: &str) -> String {
 }
 
 /// Move the identity, the config and the databases into place.
-fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
+fn install(ctx: &Ctx, staging: &Path, settled: &[Settled]) -> Result<()> {
     let home = &ctx.home;
     // Asked again here, not only at the top of `run`. Unpacking and verifying a multi-gigabyte
     // archive takes long enough for a login, a `rad node start` or a socket activation to land
     // in between, and a node writing to the home while this copies its databases over corrupts
     // both. The check up front is the courtesy that fails before the work; this is the one
     // that matters.
-    refuse_a_home_that_points_elsewhere(home)?;
+    refuse_a_link_that_appeared_mid_restore(home, settled)?;
     let state = home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
@@ -721,7 +807,12 @@ fn bundle_check_notice(reaches: Option<bool>) -> Option<(String, Option<String>)
 /// `fetch.fsckObjects` (old history with a malformed object bundles fine and refuses to
 /// unbundle) abandoned every repository after it, and took the state record and the report
 /// with it.
-fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Result<Restored> {
+fn restore_repositories(
+    ctx: &Ctx,
+    staging: &Path,
+    manifest: &Manifest,
+    settled: &[Settled],
+) -> Result<Restored> {
     let carried: Vec<&RepoRecord> = manifest
         .repos
         .iter()
@@ -766,7 +857,7 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
     // The third ask, and the last one before a repository is written. `install` asked before
     // the identity went in, and a link planted at `storage` after that answer is one this
     // `create_dir_all` would walk straight through.
-    refuse_a_home_that_points_elsewhere(&ctx.home)?;
+    refuse_a_link_that_appeared_mid_restore(&ctx.home, settled)?;
     let storage = ctx.home.storage();
     std::fs::create_dir_all(&storage).map_err(|e| Error::io(&storage, e))?;
     ctx.term.step(&format!(
