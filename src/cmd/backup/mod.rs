@@ -715,16 +715,17 @@ fn prune(ctx: &Ctx, current: &Path, manifest: &Manifest, keep: usize) -> Result<
             continue;
         }
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
-        // Through `prune`'s own reader, because the note left standing over a deleted archive
-        // is the same misleading directory whichever command did the deleting, and this side
-        // used to drop the error on the floor while `prune` said it out loud.
+        ctx.term
+            .step(&format!("removed the older archive {}", archive.name()));
+        // After the line naming the archive, so the warning reads as being about it. Through
+        // `prune`'s own reader, because the note left standing over a deleted archive is the
+        // same misleading directory whichever command did the deleting, and this side used to
+        // drop the error on the floor while `prune` said it out loud.
         let sidecar = sidecar_path(&archive.path);
         if let Some(e) = crate::cmd::prune::unremoved_sidecar(&sidecar) {
             ctx.term
                 .warn(&format!("{} could not be removed: {e}", sidecar.display()));
         }
-        ctx.term
-            .step(&format!("removed the older archive {}", archive.name()));
     }
     Ok(())
 }
