@@ -1557,6 +1557,48 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
     );
 }
 
+/// A home restored from an archive that carried no policies is not a home that lost some.
+///
+/// Every tier carries the manifest's summary of the seeding and following policies, and only
+/// the tiers above `identity` carry the database holding them. The state record took its
+/// counts from the summary, so an identity-tier restore wrote down policies the home does not
+/// hold and the next `diff` reported the gap as drift, on a machine where nothing had drifted.
+#[test]
+fn a_home_restored_without_policies_reports_no_drift_over_the_ones_it_never_got() {
+    let fixture = Fixture::create("identity-tier-drift");
+    let backups = fixture.path("backups");
+
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "identity",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking an identity-tier backup");
+    let archive = only_archive(&backups);
+
+    // The fixture seeds and follows, so the manifest's summary is not zero and the record
+    // taking it would be a difference this can see.
+    let restored = fixture.path("restored");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
+    assert_success(&ran, "restoring an identity-tier archive");
+
+    let ran = fixture.run(&["diff"], &restored);
+    let said = stderr(&ran);
+    assert_success(
+        &ran,
+        "diffing a home restored from an identity-tier archive",
+    );
+    assert!(
+        said.contains("nothing has changed"),
+        "an identity-tier archive carries no policies, so there is no drift to report: {said}"
+    );
+}
+
 #[test]
 fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
     let fixture = Fixture::create("restored-state");

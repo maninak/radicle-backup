@@ -416,6 +416,18 @@ fn remember(
     record.sigrefs.retain(|rid, _| present.contains(rid));
     record.carried.clone_from(&present);
     record.described = present;
+    // The counts the home actually holds, not the ones the archive described. Every tier
+    // carries the manifest's policy summary and only the tiers above `identity` carry
+    // `policies.db`, so an identity-tier restore recorded "45 seeding" over a home that seeds
+    // nothing and the next `diff` reported that gap as drift, on a machine nothing had
+    // drifted on. Read rather than assumed zero, because `--replay-policies` puts them back
+    // through `rad` and a tier that carried the database has them either way. A database that
+    // will not open leaves the manifest's numbers, which is the same guess this always made
+    // and is not worth failing a finished restore over.
+    if let Ok(installed) = crate::db::read_policies(&ctx.home.policies_db()) {
+        record.seeded = installed.seeded().count();
+        record.followed = installed.followed().count();
+    }
     // What `doctor` needs to answer "may another machine still be running this identity". Only
     // a restore can record it: by the time doctor runs, the archive is gone and the machine it
     // came from is somewhere else.
