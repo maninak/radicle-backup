@@ -204,8 +204,19 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let git = Git::new();
     let rad = Rad::new(home.path());
     let rad = rad.is_available().then_some(rad);
-    let policies = db::read_policies(&home.policies_db())?;
-    let routing = db::read_routing_counts(&home.node_db(), &node_id)?;
+    // `doctor` is what somebody runs when something is already wrong, so a database it cannot
+    // open has to cost the checks that read it and none of the others. Read with `?`, one
+    // unreadable file ended the report with an sqlite error before a single check had printed.
+    let (policies, _) = tolerate(
+        ctx,
+        "the seeding policies",
+        db::read_policies(&home.policies_db()),
+    );
+    let (routing, routing_unreadable) = tolerate(
+        ctx,
+        "the node database",
+        db::read_routing_counts(&home.node_db(), &node_id),
+    );
     let inventory = inventory::collect(
         home,
         &git,
@@ -249,27 +260,44 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     )?);
     checks.push(check_archive_location(home.path(), newest.as_ref(), record));
     checks.push(
-        check_private_coverage(&inventory, record, newest.as_ref()).qualified_by_unread(unread),
+        check_private_coverage(
+            &inventory,
+            record,
+            newest.as_ref(),
+            routing_unreadable.is_some(),
+        )
+        .qualified_by_unread(unread),
     );
     checks.push(check_sole_delegate(&inventory).qualified_by_unread(unread));
     checks.push(
         check_replication(
             &inventory,
             &routing,
-            db::saw_schema_drift_in(&home.node_db(), "routing table"),
+            &NothingCameBack::of(
+                routing_unreadable,
+                db::saw_schema_drift_in(&home.node_db(), "routing table"),
+            ),
         )
         .qualified_by_unread(unread),
     );
     checks.push(check_second_key_copy(&stored));
+    let (synced_heads, synced_unreadable) = tolerate(
+        ctx,
+        "the node database",
+        db::read_synced_heads(&home.node_db(), &node_id),
+    );
     checks.push(
         check_sigrefs_propagation(
             &inventory,
-            &db::read_synced_heads(&home.node_db(), &node_id)?,
+            &synced_heads,
             &node_id,
-            // Per read, not per process. `doctor` reads `policies.db` and the routing
-            // table before this, and drift in either used to make this check answer "not
-            // known" about a table it had read perfectly.
-            db::saw_schema_drift_in(&home.node_db(), "sync status table"),
+            &NothingCameBack::of(
+                synced_unreadable,
+                // Per read, not per process. `doctor` reads `policies.db` and the routing
+                // table before this, and drift in either used to make this check answer "not
+                // known" about a table it had read perfectly.
+                db::saw_schema_drift_in(&home.node_db(), "sync status table"),
+            ),
         )
         .qualified_by_unread(unread),
     );
@@ -671,6 +699,7 @@ fn check_private_coverage(
     inventory: &Inventory,
     record: Option<&state::Record>,
     newest: Option<&crate::archives::Archive>,
+    routing_is_unreadable: bool,
 ) -> Check {
     const TOPIC: &str = "private repositories";
     let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
@@ -714,6 +743,23 @@ fn check_private_coverage(
                  --repos private`",
             ),
         };
+    }
+    // The routing table is half of what `has_another_holder` answers with, so a table that
+    // could not be read makes "on no other node" a claim about a file nobody opened. Said as
+    // an unknown instead: the strongest thing this check says is a Fail, and earning one off a
+    // failed read is how a report gets somebody to stop believing it.
+    if routing_is_unreadable {
+        let (count, verb) = (missing.len(), term::is_or_are(missing.len()));
+        return Check::new(
+            TOPIC,
+            Verdict::Unknown,
+            format!(
+                "{count} of {} {verb} in no archive, and whether any other node holds them \
+                 could not be told: the node database would not open",
+                private.len()
+            ),
+        )
+        .with_remedy("rad backup --repos private");
     }
     let alone = missing
         .iter()
@@ -797,18 +843,66 @@ fn check_sole_delegate(inventory: &Inventory) -> Check {
 /// perfectly against a schema this build cannot read, and the two arrive as the same empty
 /// map. The warning naming the file and the sqlite reason is printed by the command layer
 /// either way; this is only about not sending a reader to start a node that is already up.
-fn empty_because(schema_has_moved_on: bool, then: &str) -> String {
-    if schema_has_moved_on {
-        "this build cannot read part of the node's schema; see the warnings below".to_string()
-    } else {
-        format!("start the node with `rad node start` and {then}")
+/// A database read that must not end the report, warned about when it fails.
+///
+/// Returns the empty answer and the sentence explaining it, which the check that reads it
+/// prints as its remedy so that the line and the reason for it are never separated.
+fn tolerate<T: Default>(ctx: &Ctx, what: &str, read: Result<T>) -> (T, Option<String>) {
+    match read {
+        Ok(value) => (value, None),
+        Err(e) => {
+            let why = format!("{what} could not be read: {e}");
+            ctx.term.warn(&why);
+            (T::default(), Some(why))
+        }
+    }
+}
+
+/// Why a reader of the node's databases handed nothing back, which is the whole of what
+/// separates "no node has run here yet" from "this build cannot read the schema" from "the
+/// file will not open". All three arrive at a check as an empty map, and telling somebody to
+/// start a node that is already running is what reading them as one answer costs.
+enum NothingCameBack {
+    /// It opened and answered, so empty means a node that has not gossiped or synced yet.
+    NodeHasNotRun,
+    /// This build cannot read part of heartwood's schema, which is heartwood moving on.
+    SchemaHasMovedOn,
+    /// It could not be read at all, so nothing was ever asked of it.
+    Unreadable(String),
+}
+
+impl NothingCameBack {
+    /// Unreadable first: a file that never opened cannot have told anybody its schema moved.
+    fn of(unreadable: Option<String>, schema_has_moved_on: bool) -> Self {
+        match (unreadable, schema_has_moved_on) {
+            (Some(why), _) => Self::Unreadable(why),
+            (None, true) => Self::SchemaHasMovedOn,
+            (None, false) => Self::NodeHasNotRun,
+        }
+    }
+
+    /// Whether the emptiness is the database's silence rather than an answer it gave.
+    fn is_unreadable(&self) -> bool {
+        matches!(self, Self::Unreadable(_))
+    }
+}
+
+fn empty_because(nothing_came_back: &NothingCameBack, then: &str) -> String {
+    match nothing_came_back {
+        NothingCameBack::Unreadable(why) => why.clone(),
+        NothingCameBack::SchemaHasMovedOn => {
+            "this build cannot read part of the node's schema; see the warnings below".to_string()
+        }
+        NothingCameBack::NodeHasNotRun => {
+            format!("start the node with `rad node start` and {then}")
+        }
     }
 }
 
 fn check_replication(
     inventory: &Inventory,
     routing: &BTreeMap<String, u64>,
-    schema_has_moved_on: bool,
+    nothing_came_back: &NothingCameBack,
 ) -> Check {
     // `is_public`, not `!is_private`: a record whose identity document was never read has no
     // visibility, and passing it here put a repository that may well be private into a list
@@ -824,12 +918,14 @@ fn check_replication(
 
     const TOPIC: &str = "other seeds";
     if routing.is_empty() {
-        return Check::new(
-            TOPIC,
-            Verdict::Unknown,
-            "the routing table is empty, so no other node is known to hold anything",
-        )
-        .with_remedy(empty_because(schema_has_moved_on, "let it gossip"));
+        let found = match nothing_came_back.is_unreadable() {
+            true => {
+                "the routing table could not be read, so no other node is known to hold anything"
+            }
+            false => "the routing table is empty, so no other node is known to hold anything",
+        };
+        return Check::new(TOPIC, Verdict::Unknown, found)
+            .with_remedy(empty_because(nothing_came_back, "let it gossip"));
     }
     if alone.is_empty() {
         return Check::new(
@@ -867,17 +963,18 @@ fn check_sigrefs_propagation(
     inventory: &Inventory,
     synced_heads: &BTreeMap<String, BTreeSet<String>>,
     node_id: &str,
-    schema_has_moved_on: bool,
+    nothing_came_back: &NothingCameBack,
 ) -> Check {
     const TOPIC: &str = "signed refs propagation";
     if synced_heads.is_empty() {
-        return Check::new(
-            TOPIC,
-            Verdict::Unknown,
-            "the node has no record of what any other node holds, so nothing can be compared",
-        )
-        .with_remedy(empty_because(
-            schema_has_moved_on,
+        let found = match nothing_came_back.is_unreadable() {
+            true => "what other nodes hold could not be read, so nothing can be compared",
+            false => {
+                "the node has no record of what any other node holds, so nothing can be compared"
+            }
+        };
+        return Check::new(TOPIC, Verdict::Unknown, found).with_remedy(empty_because(
+            nothing_came_back,
             "run this again once it has synced",
         ));
     }
@@ -1188,11 +1285,16 @@ mod tests {
             check_archive_encryption(&Default::default(), None, None)
                 .expect("no archive is not an error"),
             check_archive_location(std::path::Path::new("/nowhere"), None, None),
-            check_private_coverage(&empty, None, None),
+            check_private_coverage(&empty, None, None, false),
             check_sole_delegate(&empty),
-            check_replication(&empty, &BTreeMap::new(), false),
+            check_replication(&empty, &BTreeMap::new(), &NothingCameBack::NodeHasNotRun),
             check_second_key_copy(&state::Stored::Absent),
-            check_sigrefs_propagation(&empty, &BTreeMap::new(), "z6MkAAA", false),
+            check_sigrefs_propagation(
+                &empty,
+                &BTreeMap::new(),
+                "z6MkAAA",
+                &NothingCameBack::NodeHasNotRun,
+            ),
         ]
         .into_iter()
         .map(|check| check.topic)
@@ -1604,7 +1706,8 @@ mod tests {
             ),
         ]);
 
-        let check = check_sigrefs_propagation(&inventory, &synced, ME, false);
+        let check =
+            check_sigrefs_propagation(&inventory, &synced, ME, &NothingCameBack::NodeHasNotRun);
         assert_eq!(check.verdict, Verdict::Warn);
         assert!(check.detail.contains("rad:zBBB"), "{}", check.detail);
         assert!(!check.detail.contains("rad:zAAA"), "{}", check.detail);
@@ -1622,7 +1725,8 @@ mod tests {
             BTreeSet::from(["ABCDEF01".to_string()]),
         )]);
 
-        let check = check_sigrefs_propagation(&inventory, &synced, ME, false);
+        let check =
+            check_sigrefs_propagation(&inventory, &synced, ME, &NothingCameBack::NodeHasNotRun);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
     }
 
@@ -1635,14 +1739,24 @@ mod tests {
         let synced =
             BTreeMap::from([("rad:zOther".to_string(), BTreeSet::from(["x".to_string()]))]);
 
-        let check = check_sigrefs_propagation(&holding(vec![private]), &synced, ME, false);
+        let check = check_sigrefs_propagation(
+            &holding(vec![private]),
+            &synced,
+            ME,
+            &NothingCameBack::NodeHasNotRun,
+        );
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
     }
 
     #[test]
     fn a_node_that_has_never_run_is_unknown_rather_than_everything_being_stranded() {
         let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);
-        let check = check_sigrefs_propagation(&inventory, &BTreeMap::new(), ME, false);
+        let check = check_sigrefs_propagation(
+            &inventory,
+            &BTreeMap::new(),
+            ME,
+            &NothingCameBack::NodeHasNotRun,
+        );
         assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
         let remedy = check.remedy.expect("an unknown says what would answer it");
         assert!(remedy.contains("rad node start"), "{remedy}");
@@ -1655,13 +1769,22 @@ mod tests {
     #[test]
     fn a_table_this_build_cannot_read_is_not_answered_by_starting_the_node() {
         let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);
-        let check = check_sigrefs_propagation(&inventory, &BTreeMap::new(), ME, true);
+        let check = check_sigrefs_propagation(
+            &inventory,
+            &BTreeMap::new(),
+            ME,
+            &NothingCameBack::SchemaHasMovedOn,
+        );
         assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
         let remedy = check.remedy.expect("an unknown says what would answer it");
         assert!(!remedy.contains("rad node start"), "{remedy}");
         assert!(remedy.contains("schema"), "{remedy}");
 
-        let check = check_replication(&inventory, &BTreeMap::new(), true);
+        let check = check_replication(
+            &inventory,
+            &BTreeMap::new(),
+            &NothingCameBack::SchemaHasMovedOn,
+        );
         let remedy = check.remedy.expect("an unknown says what would answer it");
         assert!(!remedy.contains("rad node start"), "{remedy}");
     }
@@ -1777,7 +1900,7 @@ mod tests {
             taken: None,
             encrypted: Some(true),
         };
-        let check = check_private_coverage(&inventory, Some(&record), Some(&found));
+        let check = check_private_coverage(&inventory, Some(&record), Some(&found), false);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
 
         // The same record beside a different archive, and beside none at all.
@@ -1786,10 +1909,35 @@ mod tests {
             ..found
         };
         for newest in [Some(&other), None] {
-            let check = check_private_coverage(&inventory, Some(&record), newest);
+            let check = check_private_coverage(&inventory, Some(&record), newest, false);
             assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
             assert!(check.detail.contains("recorded"), "{}", check.detail);
         }
+    }
+
+    /// "On no other node" is half an answer from the routing table, so a routing table that
+    /// would not open must not earn a Fail. `doctor` reads that file tolerantly now, and an
+    /// empty map from a file nobody opened looks exactly like a repository nothing announces:
+    /// the strongest finding this report makes, off a read that never happened.
+    #[test]
+    fn a_routing_table_that_would_not_open_is_not_evidence_that_nobody_else_holds_it() {
+        let mut private = public_repo_signed_at("rad:zAAA", "aaa");
+        private.visibility = Some("private".to_string());
+        private.other_seeds = None;
+        let inventory = holding(vec![private]);
+
+        // Not in any archive, and nothing to say who else has it.
+        let check = check_private_coverage(&inventory, None, None, true);
+        assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
+        assert!(
+            check.detail.contains("could not be told"),
+            "{}",
+            check.detail
+        );
+
+        // The same inventory with the table read and genuinely empty is still a finding.
+        let check = check_private_coverage(&inventory, None, None, false);
+        assert_eq!(check.verdict, Verdict::Fail, "{}", check.detail);
     }
 
     fn record() -> state::Record {

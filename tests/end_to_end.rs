@@ -3055,6 +3055,54 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     );
 }
 
+/// `doctor` is what somebody runs when something is already wrong, so a database it cannot
+/// open must cost the checks that read it and nothing else.
+///
+/// Both node-database reads used to end the report with an sqlite error before a single check
+/// had printed, which is the report going silent at exactly the moment it is worth having.
+#[test]
+fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_report() {
+    let fixture = Fixture::create("unreadable-node-db");
+    let home = fixture.home();
+
+    // Not sqlite at all, and not empty: an absent file is a node that has never run, which is
+    // a different answer with a different remedy.
+    std::fs::write(home.join("node/node.db"), b"this is not a database")
+        .expect("the fixture home is writable");
+
+    let ran = fixture.run(&["doctor", "--json"], &home);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
+    // A report at all is the first half of the point: this used to be an sqlite error and no
+    // json. The second half is that a check reading nothing from that file still answered.
+    assert_eq!(verdict_of(&ran, "key passphrase"), "pass", "{report}");
+
+    for topic in ["other seeds", "signed refs propagation"] {
+        assert_eq!(verdict_of(&ran, topic), "unknown", "{report}");
+        let check = report["checks"]
+            .as_array()
+            .expect("the report lists checks")
+            .iter()
+            .find(|check| check["topic"] == topic)
+            .expect("the check is in the report");
+        let remedy = check["remedy"].as_str().unwrap_or_default();
+        assert!(
+            remedy.contains("could not be read"),
+            "{topic} blamed something other than the file it could not open: {check}"
+        );
+        assert!(
+            !remedy.contains("rad node start"),
+            "{topic} sent the reader to start a node over a database that will not open: {check}"
+        );
+    }
+
+    // The third reader is `private repositories`, whose wrong answer needs a routing table
+    // that would have said something, which this fixture has no way to build: the unit test
+    // `a_routing_table_that_would_not_open_is_not_evidence_that_nobody_else_holds_it` holds
+    // that half. What this asserts is only that it still answered at all.
+    assert_ne!(verdict_of(&ran, "private repositories"), "", "{report}");
+}
+
 /// The verdict of one doctor check, by topic, out of a `--json` run.
 fn verdict_of(ran: &Output, topic: &str) -> String {
     let report: serde_json::Value =
