@@ -143,7 +143,7 @@ jobs:
       # run and re-uploads them to the GitHub Release, which outlives any retention setting.
       # Fourteen days so a re-run of the apt publish a week or two later still finds its input,
       # and so master pushes stop filling the artifact list for a quarter each.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
@@ -192,7 +192,7 @@ jobs:
       - name: Lint
         run: just lint-deb-at target/${{ matrix.target }}/debian
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deb-${{ matrix.arch }}
           path: target/${{ matrix.target }}/debian/*.deb
