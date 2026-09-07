@@ -554,6 +554,84 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The settings a restore takes out of an archive, and the reason there are only two.
+///
+/// A `config` in `storage/<rid>/` is where git looks for `core.fsmonitor`, `core.pager`,
+/// `remote.<name>.url = ext::sh -c ...` and every other setting whose value git RUNS. An
+/// archive is a file somebody handed you, so restoring one verbatim hands whoever wrote it a
+/// command on the next git operation in that repository.
+///
+/// Everything else a real Radicle storage config holds is in `CONFIG_FROM_INIT` below, which
+/// leaves the node's own name and DID: the two things nothing on this machine can supply.
+const CONFIG_ALLOWED: &[&str] = &["user.email", "user.name"];
+
+/// The settings `git init` works out for itself, which a restore therefore drops in silence.
+///
+/// Each of these describes the filesystem the repository is on NOW: the format version,
+/// `filemode`, `ignorecase`, `precomposeunicode`, `symlinks`. The restoring machine's answer
+/// is the true one and a year-old answer out of an archive can only be wrong, or aimed:
+/// `bare = false` on a storage repository is one git will not use as storage, and
+/// `repositoryformatversion = 99` is one every later git command refuses to open.
+///
+/// Kept apart from the rest so the warning stays worth reading. An honest archive carries
+/// exactly these three under `[core]`, so warning about them would mean four lines per
+/// repository on every recovery, which is how a reader learns to skip the line that says
+/// `core.pager`.
+///
+/// `extensions.objectformat` is here rather than on the allowlist, and could not help there:
+/// the bundle is unpacked into the repository `git init` just made, so a sha256 repository
+/// fails at the unbundle, before any config is written. Revisit if Radicle storage ever moves
+/// off sha1, which would mean choosing the format at `init` rather than restoring it after.
+const CONFIG_FROM_INIT: &[&str] = &[
+    "core.bare",
+    "core.filemode",
+    "core.ignorecase",
+    "core.logallrefupdates",
+    "core.precomposeunicode",
+    "core.repositoryformatversion",
+    "core.symlinks",
+    "extensions.compatobjectformat",
+    "extensions.objectformat",
+];
+
+/// What a restore is willing to take out of a repository config, and what it left behind.
+struct AllowedConfig {
+    kept: Vec<(String, String)>,
+    /// Named, not counted: whoever reads the warning is deciding whether the setting mattered.
+    /// What `git init` writes for itself is not in here, so an honest archive names nothing.
+    dropped: Vec<String>,
+}
+
+/// Keep the allowlisted settings out of a config an archive carried, and name the rest.
+///
+/// Reads what `git config --list -z` printed rather than the config text itself: a parser of
+/// ours would have to model quoting, an inline `#`, `[core] key = value` on one line, a value
+/// continued with a backslash, and the case folding git applies to a section and a key, and
+/// every shape it modelled differently from git is either a setting git reads and this does
+/// not, or one dropped without being named. The shipped script asks git the same question, so
+/// both readers of an archive agree by construction rather than by two parsers matching.
+///
+/// The listing is `name\nvalue\0` per setting. A setting with no value at all prints its name
+/// alone, and is dropped rather than read as an empty one.
+fn allowed_config(listed: &str) -> AllowedConfig {
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for entry in listed.split('\0').filter(|entry| !entry.is_empty()) {
+        match entry.split_once('\n') {
+            Some((name, value)) if CONFIG_ALLOWED.contains(&name) => {
+                kept.push((name.to_string(), value.to_string()));
+            }
+            Some((name, _)) if CONFIG_FROM_INIT.contains(&name) => {}
+            Some((name, _)) => dropped.push(name.to_string()),
+            None if CONFIG_FROM_INIT.contains(&entry) => {}
+            None => dropped.push(entry.to_string()),
+        }
+    }
+    dropped.sort();
+    dropped.dedup();
+    AllowedConfig { kept, dropped }
+}
+
 /// What came back out of the bundles, and what did not.
 struct Restored {
     repos: Vec<RepoRecord>,
@@ -707,7 +785,43 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
         }
         let config = staging.join(git::config_entry(&repo.rid));
         if config.is_file() {
-            copy_doc(&config, &target.join("config"))?;
+            match git.config_listing(&config)? {
+                Some(listed) => {
+                    let allowed = allowed_config(&listed);
+                    if !allowed.dropped.is_empty() {
+                        let dropped: Vec<&str> =
+                            allowed.dropped.iter().map(String::as_str).collect();
+                        ctx.term.warn(&format!(
+                            "{}: {} left out of the restored config",
+                            repo.display_name(),
+                            term::shortlist(&dropped)
+                        ));
+                        ctx.term.detail(
+                            "git runs commands out of a repository config, and an archive is",
+                        );
+                        ctx.term.detail(
+                            "not vouched for by anybody: everything else here is what `git`",
+                        );
+                        ctx.term.detail("itself wrote when it made the repository");
+                    }
+                    for (name, value) in &allowed.kept {
+                        if let Some(why) = git.set_config(&target, name, value)? {
+                            ctx.term.warn(&format!(
+                                "{}: `{name}` did not come back out of the archive's config: \
+                                 {why}",
+                                repo.display_name()
+                            ));
+                        }
+                    }
+                }
+                // The repository keeps the config `git init` gave it, which is a working one:
+                // a config the archive mangled is a line lost, not a repository lost.
+                None => ctx.term.warn(&format!(
+                    "{}: the config in the archive could not be read, so its name and DID \
+                     did not come back",
+                    repo.display_name()
+                )),
+            }
         }
         Ok(())
     };
@@ -2376,6 +2490,86 @@ mod tests {
         let _reading_drift = crate::db::while_reading_drift();
         let _ = crate::db::drain_schema_drift();
         assert!(read_what_others_hold(&term, &node_db, OWN_NODE).is_none());
+    }
+
+    /// What `git config --list -z` prints for these settings, which is what the reader reads.
+    fn listing(settings: &[(&str, &str)]) -> String {
+        settings
+            .iter()
+            .map(|(name, value)| format!("{name}\n{value}\0"))
+            .collect()
+    }
+
+    #[test]
+    fn a_repository_config_out_of_an_archive_gives_up_everything_git_decides_here() {
+        // The five settings `rad` leaves in `storage/<rid>/config`. The three under `[core]`
+        // are what `git init` works out about this disk, so the restoring machine's answer is
+        // the one that is true now and the archive's is dropped without a word about it.
+        let real = listing(&[
+            ("core.repositoryformatversion", "0"),
+            ("core.filemode", "true"),
+            ("core.bare", "true"),
+            ("user.name", "maninak"),
+            ("user.email", "maninak@z6MkvAFB"),
+        ]);
+        let allowed = allowed_config(&real);
+        assert_eq!(
+            allowed.kept,
+            vec![
+                ("user.name".to_string(), "maninak".to_string()),
+                ("user.email".to_string(), "maninak@z6MkvAFB".to_string()),
+            ]
+        );
+        // Nothing named: an honest archive carries exactly these, and a warning that fires on
+        // every repository of every recovery is one nobody reads by the fifth.
+        assert!(allowed.dropped.is_empty(), "{:?}", allowed.dropped);
+    }
+
+    #[test]
+    fn a_repository_config_cannot_carry_a_setting_git_would_run() {
+        // Every one of these makes git run a command on an ordinary operation in the
+        // repository, and all of them arrive in a file somebody else wrote. Spelled as git
+        // reports them, which is how the reader sees them: lowercased, subsection and all.
+        let hostile = listing(&[
+            ("core.fsmonitor", "/tmp/pwn"),
+            ("core.pager", "/tmp/pwn"),
+            ("core.sshcommand", "/tmp/pwn"),
+            ("remote.rad.url", "ext::sh -c /tmp/pwn"),
+            ("alias.st", "!/tmp/pwn"),
+            ("include.path", "/tmp/pwn.config"),
+            ("user.name", "kept"),
+        ]);
+        let allowed = allowed_config(&hostile);
+        assert_eq!(
+            allowed.kept,
+            vec![("user.name".to_string(), "kept".to_string())]
+        );
+        // Named, so the warning can say what was left out rather than that something was.
+        assert_eq!(
+            allowed.dropped,
+            vec![
+                "alias.st",
+                "core.fsmonitor",
+                "core.pager",
+                "core.sshcommand",
+                "include.path",
+                "remote.rad.url",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_setting_with_no_value_is_left_out_rather_than_read_as_an_empty_one() {
+        // `[user] name` with nothing after it. Git prints the name alone and reads it as a
+        // true boolean; written back as an empty string it would be a repository whose owner
+        // has no name, and `git config --bool` would answer false to a caller asking.
+        let odd = "user.name\0user.email\nkept\0";
+        let allowed = allowed_config(odd);
+        assert_eq!(
+            allowed.kept,
+            vec![("user.email".to_string(), "kept".to_string())]
+        );
+        assert_eq!(allowed.dropped, vec!["user.name"]);
     }
 
     #[test]

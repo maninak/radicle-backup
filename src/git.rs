@@ -168,6 +168,44 @@ impl Git {
         Ok(())
     }
 
+    /// Everything a config file says, through git's own parser: `name\nvalue\0` per setting.
+    ///
+    /// `None` for a file git will not read at all, which is any malformed one, and the caller
+    /// is expected to carry on: the config an archive carried is not the repository.
+    ///
+    /// `--no-includes` is passed rather than relied on. It is already git's default for a
+    /// `--file` read, and an `include.path` followed out of a file nobody vouched for would be
+    /// a second config, from a path the archive chose, read as if this one had said it. Saying
+    /// it costs a word and does not depend on a default staying where it is.
+    pub fn config_listing(&self, file: &Path) -> Result<Option<String>> {
+        self.tool.answer(&[
+            "config".as_ref(),
+            "--no-includes".as_ref(),
+            "--file".as_ref(),
+            file.as_os_str(),
+            "--list".as_ref(),
+            "-z".as_ref(),
+        ])
+    }
+
+    /// Write one setting into a repository's own config, and say whether git took it.
+    ///
+    /// Through git rather than by writing the line, so the value is quoted and escaped the way
+    /// git's own reader expects. A value written by hand that git then cannot parse is not one
+    /// bad setting: it is a config file every later git command in that repository refuses.
+    /// What git said when it would not, rather than a bare no: the caller is about to tell
+    /// somebody mid-recovery that a setting did not come back, and git's own sentence is the
+    /// difference between that being actionable and being a shrug.
+    pub fn set_config(&self, git_dir: &Path, name: &str, value: &str) -> Result<Option<String>> {
+        self.tool.refused(&[
+            "--git-dir".as_ref(),
+            git_dir.as_os_str(),
+            "config".as_ref(),
+            name.as_ref(),
+            value.as_ref(),
+        ])
+    }
+
     /// Pull every ref out of a bundle and into a repository, keeping ref names as they were.
     ///
     /// With `fetch.fsckObjects`, because the bundle is the one part of an archive nothing else

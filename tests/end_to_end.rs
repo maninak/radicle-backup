@@ -125,6 +125,24 @@ impl Fixture {
             &["init", "--quiet", "--bare", &storage.to_string_lossy()],
             &work,
         );
+        // What `rad` puts in a storage config beyond what `git init` writes: the node's alias
+        // and its DID. They are the only settings a restore carries over from an archive, so
+        // a fixture without them makes every test about that carrying nothing at all.
+        for (name, value) in [
+            ("user.name", "fixture".to_string()),
+            ("user.email", format!("fixture@{DID}")),
+        ] {
+            git(
+                &[
+                    "--git-dir",
+                    &storage.to_string_lossy(),
+                    "config",
+                    name,
+                    &value,
+                ],
+                &work,
+            );
+        }
         self.publish(&work);
     }
 
@@ -1004,6 +1022,246 @@ fn a_directory_this_tool_makes_is_owner_only_and_not_only_the_files_in_it() {
     );
 }
 
+/// What each reader of an archive left in `storage/<rid>/config`, and what it said doing it.
+///
+/// Both are run over the same planted archive, because the whole point of the shipped script
+/// is that somebody with no `rad-backup` gets the same home out of the same file. The manifest
+/// is rewritten to match what was planted: a hostile archive is one somebody BUILT, the size
+/// and digest this tool checks are theirs to write, and an archive that failed that check
+/// would prove nothing about what happens when it passes.
+#[cfg(unix)]
+struct BothWays {
+    by_tool: PathBuf,
+    tool_said: String,
+    by_script: PathBuf,
+    script_said: String,
+}
+
+#[cfg(unix)]
+impl BothWays {
+    /// What git makes of the config each side left, rather than what the file looks like: the
+    /// failures being guarded against include a file git refuses to read at all, which a text
+    /// assertion passes straight over.
+    fn settings(&self, home: &Path) -> String {
+        let repo = home.join(format!("storage/{RID}"));
+        // `--local`, or the answer carries whatever is in the config of whoever is running
+        // the suite, and a developer with a `core.pager` of their own fails a test about an
+        // archive.
+        let ran = Command::new("git")
+            .args([
+                "--git-dir",
+                &repo.to_string_lossy(),
+                "config",
+                "--local",
+                "--list",
+            ])
+            .output()
+            .expect("git runs");
+        assert_success(&ran, "reading the restored repository's config");
+        stdout(&ran)
+    }
+
+    fn is_bare(&self, home: &Path) -> bool {
+        let repo = home.join(format!("storage/{RID}"));
+        let ran = Command::new("git")
+            .args([
+                "--git-dir",
+                &repo.to_string_lossy(),
+                "rev-parse",
+                "--is-bare-repository",
+            ])
+            .output()
+            .expect("git runs");
+        assert_success(&ran, "opening the restored repository");
+        stdout(&ran).trim() == "true"
+    }
+}
+
+#[cfg(unix)]
+fn restore_with_planted_config(fixture: &Fixture, planted: &str) -> BothWays {
+    let backups = fixture.path("backups");
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--plaintext",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking a full archive");
+
+    let archive = repack_with(fixture, &only_archive(&backups), |extracted| {
+        let entry = format!("repos/{RID}.config");
+        std::fs::write(extracted.join(&entry), planted).expect("the planted config is writable");
+        rewrite_manifest_entry(extracted, &entry, planted.as_bytes());
+    });
+
+    let by_tool = fixture.path("by-tool");
+    let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &by_tool);
+    let tool_said = stderr(&ran);
+
+    let extracted = fixture.path("by-hand");
+    std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
+    let bytes = std::fs::read(&archive).expect("the archive is readable");
+    let mut tarball = Vec::new();
+    zstd::stream::copy_decode(bytes.as_slice(), &mut tarball).expect("the archive decompresses");
+    std::fs::write(extracted.join("archive.tar"), &tarball).expect("the tarball is writable");
+    let ran = Command::new("tar")
+        .args(["-xf", "archive.tar"])
+        .current_dir(&extracted)
+        .output()
+        .expect("tar runs");
+    assert_success(&ran, "extracting the archive");
+
+    let by_script = fixture.path("by-script");
+    let ran = Command::new("sh")
+        .args(["restore.sh", &by_script.to_string_lossy()])
+        .current_dir(&extracted)
+        .env("HOME", fixture.path("fake-home"))
+        .output()
+        .expect("the restore script runs");
+    assert_success(&ran, "restoring with the shipped script");
+    let script_said = stderr(&ran);
+
+    BothWays {
+        by_tool,
+        tool_said,
+        by_script,
+        script_said,
+    }
+}
+
+/// A repository config out of an archive cannot make git run anything.
+///
+/// `storage/<rid>/config` is where git looks for `core.pager`, `core.fsmonitor` and
+/// `remote.<name>.url = ext::sh -c ...`, and it runs the value of each on an ordinary
+/// operation in that repository. An archive is a file somebody handed you, so the copy that
+/// went in verbatim handed whoever wrote it a command. Both readers are held to it: this tool
+/// and the script that rides inside the archive.
+#[cfg(unix)]
+#[test]
+fn a_repository_config_from_an_archive_cannot_carry_a_command_into_storage() {
+    let fixture = Fixture::create("hostile-config");
+    // `[user] name` is on the allowlist, and it is the only planted setting whose arrival
+    // proves anything: `git init` writes `bare` and the format version by itself, so without a
+    // setting only the archive could have supplied, every assertion below would pass just as
+    // happily over a reader that skipped the config entirely.
+    let both = restore_with_planted_config(
+        &fixture,
+        "[core]\n\tbare = true\n\tpager = /tmp/rad-backup-pwn\n\
+         \tfsmonitor = /tmp/rad-backup-pwn\n\
+         [remote \"rad\"]\n\turl = ext::sh -c /tmp/rad-backup-pwn\n\
+         [user]\n\tname = carried-from-the-archive\n",
+    );
+
+    for home in [&both.by_tool, &both.by_script] {
+        let settings = both.settings(home);
+        for gone in ["pager", "fsmonitor", "ext::", "rad-backup-pwn"] {
+            assert!(
+                !settings.contains(gone),
+                "{gone} reached {}: {settings}",
+                home.display()
+            );
+        }
+        assert!(
+            settings.contains("carried-from-the-archive"),
+            "nothing was carried out of the config, so this proves nothing: {settings}"
+        );
+        assert!(both.is_bare(home), "{} is not bare", home.display());
+    }
+    // Named rather than counted, and by both readers: a restore that silently drops what
+    // somebody put in the file is one nobody can check.
+    for said in [&both.tool_said, &both.script_said] {
+        assert!(said.contains("core.pager"), "{said}");
+        assert!(said.contains("remote.rad.url"), "{said}");
+    }
+}
+
+/// The settings `git init` works out for itself are dropped without a word about them.
+///
+/// Every honest archive carries them, so warning about `core.bare` on each of forty
+/// repositories is how a reader learns to skip past the line that says `core.pager`.
+#[cfg(unix)]
+#[test]
+fn what_git_decides_for_itself_is_left_out_of_an_archive_without_a_warning() {
+    let fixture = Fixture::create("quiet-config");
+    let both = restore_with_planted_config(
+        &fixture,
+        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n\
+         [user]\n\tname = carried-from-the-archive\n",
+    );
+    for said in [&both.tool_said, &both.script_said] {
+        assert!(
+            !said.contains("left out"),
+            "an ordinary archive warned about the settings every archive carries: {said}"
+        );
+    }
+    assert!(
+        both.settings(&both.by_tool)
+            .contains("carried-from-the-archive"),
+        "the quiet path did not carry the name either, so this proves nothing"
+    );
+}
+
+/// A repository config an archive mangled costs a line, never the repository.
+///
+/// One unbalanced quote is enough to make git refuse a whole config file, and a reader that
+/// writes such a file into `storage/<rid>/` leaves a repository where EVERY later git command
+/// answers `fatal: bad config line`. Both readers ask git to parse the archive's copy and
+/// carry settings onto the config `git init` wrote, so an unparseable one is a name that did
+/// not come back rather than a repository that will not open.
+#[cfg(unix)]
+#[test]
+fn a_repository_config_the_archive_mangled_still_leaves_a_repository_that_opens() {
+    let fixture = Fixture::create("mangled-config");
+    let both =
+        restore_with_planted_config(&fixture, "[core]\n\tbare = true\n[user]\n\tname = \"oops\n");
+    for said in [&both.tool_said, &both.script_said] {
+        assert!(
+            said.contains("could not be read"),
+            "a config git would not parse has to be said out loud: {said}"
+        );
+    }
+    for home in [&both.by_tool, &both.by_script] {
+        assert!(
+            both.is_bare(home),
+            "{} did not come back as a bare repository",
+            home.display()
+        );
+    }
+}
+
+/// A value aimed at git, and a key with no value at all, land the same way in both readers.
+///
+/// `--unset` reaching `git config` as a flag would take a setting away rather than write one,
+/// and a key with no value is one git reads as true and prints nothing for: written back it
+/// becomes a name set to the empty string, which is worse than the name that did not come
+/// back, and it is the one shape the two readers used to disagree about.
+#[cfg(unix)]
+#[test]
+fn a_config_value_that_reads_as_a_flag_is_a_value_and_a_valueless_key_is_neither() {
+    let fixture = Fixture::create("aimed-config");
+    let both = restore_with_planted_config(
+        &fixture,
+        "[core]\n\tbare = true\n[user]\n\temail = --unset\n\tname\n",
+    );
+    for home in [&both.by_tool, &both.by_script] {
+        let settings = both.settings(home);
+        assert!(
+            settings.contains("user.email=--unset"),
+            "a value that reads as a flag was not taken as a value: {settings}"
+        );
+        assert!(
+            !settings.contains("user.name="),
+            "a key with no value came back as a name set to nothing: {settings}"
+        );
+        assert!(both.is_bare(home), "{} is not bare", home.display());
+    }
+}
+
 /// A `move` whose note will not go still retires the key and still says where it went.
 ///
 /// The rename happens before the note, so a failure reading or writing it left a machine whose
@@ -1512,6 +1770,27 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
             &by_script
         ),
         "the two restores left HEAD pointing at different places"
+    );
+
+    // Through `git config --list`, not the file: the two readers reach the same settings by
+    // different routes, and the question is what git sees afterwards rather than which line
+    // came first. This is also the one comparison that would catch either side taking a
+    // setting out of an archived config that the other leaves behind.
+    let settings = |home: &Path| -> Vec<String> {
+        let mut lines: Vec<String> = git(
+            &["--git-dir", &storage(home), "config", "--local", "--list"],
+            home,
+        )
+        .lines()
+        .map(str::to_string)
+        .collect();
+        lines.sort();
+        lines
+    };
+    assert_eq!(
+        settings(&by_tool),
+        settings(&by_script),
+        "the two restores left different settings in the repository config"
     );
 
     let seeded = |home: &Path| -> i64 {
@@ -2214,6 +2493,62 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
 // Unix only: its one caller is, and it reaches `collect_files`, which is too.
 #[cfg(unix)]
 fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
+    repack_with(fixture, archive, |extracted| {
+        let manifest_path = extracted.join("manifest.json");
+        let text = std::fs::read_to_string(&manifest_path).expect("the manifest is readable");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&text).expect("the manifest parses");
+        let repos = manifest["repos"]
+            .as_array_mut()
+            .expect("the manifest names repositories");
+        assert!(
+            !repos.is_empty(),
+            "this check needs a repository to plant on"
+        );
+        for repo in repos.iter_mut() {
+            repo["head"] = serde_json::Value::String("-d".to_string());
+        }
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_string(&manifest).expect("the manifest serialises"),
+        )
+        .expect("the manifest is writable");
+    })
+}
+
+/// Make the manifest agree with a file that was replaced after the archive was written.
+///
+/// The size and sha256 in a manifest catch an archive that was damaged or edited afterwards.
+/// They catch nothing about one built to be hostile, whose author writes both halves, so a
+/// test about a hostile archive has to write both halves too.
+#[cfg(unix)]
+fn rewrite_manifest_entry(extracted: &Path, entry: &str, bytes: &[u8]) {
+    use sha2::Digest as _;
+
+    let digest = hex::encode(sha2::Sha256::digest(bytes));
+    let path = extracted.join("manifest.json");
+    let text = std::fs::read_to_string(&path).expect("the manifest is readable");
+    let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the manifest parses");
+    let entries = manifest["entries"]
+        .as_array_mut()
+        .expect("the manifest lists its entries");
+    let listed = entries
+        .iter_mut()
+        .find(|listed| listed["path"] == entry)
+        .unwrap_or_else(|| panic!("the manifest lists {entry}"));
+    listed["bytes"] = serde_json::Value::from(bytes.len() as u64);
+    listed["sha256"] = serde_json::Value::String(digest);
+    std::fs::write(
+        &path,
+        serde_json::to_string(&manifest).expect("the manifest serialises"),
+    )
+    .expect("the manifest is writable");
+}
+
+/// Extract an archive, let `plant` rewrite what it holds, and pack it up again under the same
+/// name. What somebody handing you an archive can do, done from a test.
+#[cfg(unix)]
+fn repack_with(fixture: &Fixture, archive: &Path, plant: impl FnOnce(&Path)) -> PathBuf {
     let extracted = fixture.path("planted-extract");
     std::fs::create_dir_all(&extracted).expect("the extraction directory is creatable");
     let bytes = std::fs::read(archive).expect("the archive is readable");
@@ -2228,24 +2563,7 @@ fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
         .expect("tar runs");
     assert_success(&ran, "extracting the archive");
 
-    let manifest_path = extracted.join("manifest.json");
-    let text = std::fs::read_to_string(&manifest_path).expect("the manifest is readable");
-    let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the manifest parses");
-    let repos = manifest["repos"]
-        .as_array_mut()
-        .expect("the manifest names repositories");
-    assert!(
-        !repos.is_empty(),
-        "this check needs a repository to plant on"
-    );
-    for repo in repos.iter_mut() {
-        repo["head"] = serde_json::Value::String("-d".to_string());
-    }
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_string(&manifest).expect("the manifest serialises"),
-    )
-    .expect("the manifest is writable");
+    plant(&extracted);
 
     let mut entries = Vec::new();
     collect_files(&extracted, &extracted, &mut entries);

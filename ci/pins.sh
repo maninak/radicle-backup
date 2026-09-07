@@ -69,6 +69,31 @@ if [ -z "$(found 'fsck_reaches_a_bundle' src/cmd/restore.rs)" ]; then
 	wrong=1
 fi
 
+# The settings a restore takes out of an archive, which three readers each spell for
+# themselves: `src/cmd/restore.rs`, the `restore.sh` that rides inside every archive, and the
+# commands `RESTORE.md` gives somebody to paste. All three say they apply the same allowlist,
+# and a key added to one of them is a setting one reader of an archive puts back and another
+# does not, which is the drift these gates exist to end. A repository config is where git
+# looks for the settings whose values it RUNS, so the list is also the security boundary.
+pins=$((pins + 1))
+allowed=$(found 'CONFIG_ALLOWED: &\[&str\] = &\[[^]]*\]' src/cmd/restore.rs |
+	grep -oE '"[a-z.]+"' | tr -d '"' | sort | tr '\n' ' ')
+if [ -z "$allowed" ]; then
+	echo "src/cmd/restore.rs no longer spells CONFIG_ALLOWED the way this gate reads it" |
+		complain
+	exit 1
+fi
+for reader in assets/restore.sh assets/RESTORE.md; do
+	spelled=$(found 'for key in [a-z. ]+; do' "$reader" |
+		sed 's/^for key in //; s/; do$//' | tr ' ' '\n' | sort | tr '\n' ' ')
+	if [ "$spelled" != "$allowed" ]; then
+		echo "$reader takes [$spelled] out of an archived repository config and" \
+			"src/cmd/restore.rs takes [$allowed]. Both are readers of the same archive," \
+			"and a config is where git looks for the settings it runs." | complain
+		wrong=1
+	fi
+done
+
 # How many checks `doctor` runs, which three places state and none derives.
 pins=$((pins + 1))
 defined=$(found '^fn check_[a-z_]+' src/cmd/doctor.rs | grep -c '' || [ $? -eq 1 ])
@@ -127,8 +152,8 @@ if [ "$recipe_gates" != "$workflow_gates" ]; then
 fi
 
 # A pin that stopped running is a pin that stopped holding, and it would do it quietly.
-if [ "$pins" -ne 5 ]; then
-	echo "$pins pins ran, not the 5 this gate has. One was lost rather than deleted." | complain
+if [ "$pins" -ne 6 ]; then
+	echo "$pins pins ran, not the 6 this gate has. One was lost rather than deleted." | complain
 	wrong=1
 fi
 exit "$wrong"

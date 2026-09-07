@@ -142,7 +142,50 @@ for bundle in repos/*.bundle; do
 	# an archive nothing else validates, and one can carry a tree entry named `.git`.
 	git --git-dir "$target" -c fetch.fsckObjects=true \
 		fetch --quiet --force "$(pwd)/$bundle" 'refs/*:refs/*'
-	[ -f "repos/$rid.config" ] && cp "repos/$rid.config" "$target/config"
+	# The two settings a restore takes out of an archive, which is the same allowlist
+	# `rad-backup restore` applies. A repository config is where git looks for `core.pager`,
+	# `core.fsmonitor` and `remote.<name>.url = ext::sh -c ...`, every one of which it RUNS on
+	# an ordinary operation, and an archive is a file somebody handed you. Everything else a
+	# storage config holds is what `git init` above worked out about this disk, and that answer
+	# is truer than the archive's, so only the node's own name and DID are carried over. Asked
+	# key by key through `git config`, which is the same reader `rad-backup` uses, so no
+	# spelling reaches one of them and not the other, and `--no-includes` so an `include.path`
+	# in the file cannot pull in a second config from a path the archive chose. A setting that
+	# will not go is a line lost and not a repository lost: the bare repository above already
+	# carries a working config. Anything else the file held is named, because a restore that
+	# silently drops what somebody put there is one nobody can check.
+	if [ -f "repos/$rid.config" ]; then
+		if git config --no-includes --file "repos/$rid.config" --list >/dev/null 2>&1; then
+			for key in user.email user.name; do
+				value=$(git config --no-includes --file "repos/$rid.config" \
+					--get "$key" 2>/dev/null) || continue
+				# A key with no value at all: git reads that as true and prints nothing,
+				# and written back it is a name set to the empty string, which is worse
+				# than the name the archive did not carry.
+				[ -n "$value" ] || continue
+				git --git-dir "$target" config "$key" "$value" 2>/dev/null ||
+					echo "skipping $key for $rid: git would not take that value" >&2
+			done
+			# What the config held besides those two and the ones `git init` writes for
+			# itself, which are the ones this leaves to git deliberately: they describe the
+			# disk the repository is on now. `--name-only` is git 2.19 and newer; on an older
+			# one this says nothing rather than crying wolf.
+			init_writes='core\.(bare|filemode|ignorecase|logallrefupdates'
+			init_writes="$init_writes|precomposeunicode|repositoryformatversion|symlinks)"
+			left_out=$(git config --no-includes --file "repos/$rid.config" \
+				--list --name-only 2>/dev/null |
+				grep -vxE "user\.(name|email)|$init_writes|extensions\.(compat)?objectformat" ||
+				[ $? -eq 1 ])
+			if [ -n "$left_out" ]; then
+				echo "$rid: git runs what a repository config tells it to, and this" \
+					"archive is vouched for by nobody, so these were left out:" >&2
+				echo "$left_out" | sed 's/^/  /' >&2
+			fi
+		else
+			echo "the config in the archive for $rid could not be read, so it came back" \
+				"without its name and DID" >&2
+		fi
+	fi
 
 	if ! command -v jq >/dev/null 2>&1; then
 		echo "jq is not installed, so $rid came back without its HEAD" >&2

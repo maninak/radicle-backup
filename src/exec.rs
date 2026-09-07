@@ -143,6 +143,27 @@ impl Tool {
         })
     }
 
+    /// Run a command whose failure is not the run's failure, and keep what it said about it.
+    ///
+    /// `None` when it worked. Otherwise whatever it wrote to stderr, because the caller is
+    /// about to tell somebody mid-recovery that one thing did not go, and the program's own
+    /// sentence is the difference between that being actionable and being a shrug. A program
+    /// that failed silently gets its exit code said for it, so the report is never empty.
+    pub fn refused<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
+        let finished = self.raw(args)?;
+        if finished.status.success() {
+            return Ok(None);
+        }
+        let said = String::from_utf8_lossy(&finished.stderr).trim().to_string();
+        if !said.is_empty() {
+            return Ok(Some(said));
+        }
+        Ok(Some(match finished.status.code() {
+            Some(code) => format!("{} exited {code} without saying why", self.program),
+            None => format!("{} was killed before it could say why", self.program),
+        }))
+    }
+
     /// Run a probe whose non-zero exit is an answer, and keep "it could not answer" apart
     /// from "no".
     ///

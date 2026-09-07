@@ -79,7 +79,16 @@ for bundle in repos/*.bundle; do
   # unchecked, so check where the archive came from before trusting what it carries.
   git --git-dir "$RAD_HOME/storage/$rid" -c fetch.fsckObjects=true \
     fetch --quiet --force "$PWD/$bundle" 'refs/*:refs/*'
-  cp "repos/$rid.config" "$RAD_HOME/storage/$rid/config" 2>/dev/null || true
+  # Only the name and DID, and asked for by name: this file is where git looks for
+  # `core.pager` and `remote.<name>.url = ext::sh -c ...`, whose values it RUNS, and an
+  # archive is a file somebody handed you. `git init` above wrote everything else itself.
+  # `--no-includes` so an `include.path` in it cannot pull in a config from a path the
+  # archive chose; the empty check because git reads a bare key as true and prints nothing,
+  # and a name set to the empty string is worse than the name that did not come back.
+  for key in user.email user.name; do
+    value=$(git config --no-includes --file "repos/$rid.config" --get "$key" 2>/dev/null) || continue
+    [ -n "$value" ] && git --git-dir "$RAD_HOME/storage/$rid" config "$key" "$value"
+  done
   head=$(jq -r --arg rid "rad:$rid" '.repos[] | select(.rid==$rid) | .head // empty' manifest.json)
   # Two values out of the manifest reach a command line here, `$rid` and `$head`, and these
   # lines check neither. `symbolic-ref` takes no `--` and stores what it is handed, so a
