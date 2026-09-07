@@ -47,6 +47,8 @@ major=${boundary%,*}
 minor=${boundary##*, }
 for claim in \
 	"assets/restore.sh:\[ \"\\\$git_minor\" -lt $minor \]" \
+	"assets/restore.sh:\[ \"\\\$git_major\" -lt $major \]" \
+	"assets/restore.sh:\[ \"\\\$git_major\" -eq $major \]" \
 	"assets/restore.sh:git $major\.$minor or newer" \
 	"assets/RESTORE.md:$major\.$minor" \
 	"tests/end_to_end.rs:git version $major\.$minor\.0"; do
@@ -121,7 +123,10 @@ if [ -z "$recipe" ]; then
 	echo "README.md no longer shows the 'just check' line this gate reads" | complain
 	exit 1
 fi
-if [ "$(found "$(printf '%s' "$recipe" | sed 's/[.[\*^$]/\\&/g')" CONTRIBUTING.md)" != "$recipe" ]; then
+# Read out of both files the same way, rather than looking the README's sentence up inside
+# CONTRIBUTING.md: a match found there is only ever as long as what was searched for, so a
+# clause added to the end of one of the two sentences would be found in the other and pass.
+if [ "$(found 'just check +# [^|]*' CONTRIBUTING.md)" != "$recipe" ]; then
 	echo "README.md and CONTRIBUTING.md describe 'just check' differently, so one of them is" \
 		"telling a contributor the run covers something other than what it covers" | complain
 	wrong=1
