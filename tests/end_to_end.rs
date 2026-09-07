@@ -967,6 +967,43 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     );
 }
 
+/// Every directory this tool creates is owner-only, not just the files in it.
+///
+/// `create_dir_all` takes the umask, so `keys/` in a home rebuilt from a recovery sheet and the
+/// state directory the record is kept in both came out world-listable on a default umask. The
+/// files inside were owner-only, which is what made it easy to miss: the names are the leak,
+/// every DID this machine keeps a record for and every file a Radicle key directory holds.
+#[cfg(unix)]
+#[test]
+fn a_directory_this_tool_makes_is_owner_only_and_not_only_the_files_in_it() {
+    let fixture = Fixture::create("owner-only-dirs");
+    assert_eq!(mode(&fixture.home()) & 0o777, 0o700, "the home itself");
+    assert_eq!(
+        mode(&fixture.home().join("keys")) & 0o777,
+        0o700,
+        "the keys directory a recovery sheet rebuilt"
+    );
+
+    let backups = fixture.path("backups");
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "identity",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking an archive, which writes the state record");
+    assert_eq!(
+        mode(&fixture.path("state/rad-backup")) & 0o777,
+        0o700,
+        "the state directory: {}",
+        stderr(&ran)
+    );
+}
+
 /// A `move` whose note will not go still retires the key and still says where it went.
 ///
 /// The rename happens before the note, so a failure reading or writing it left a machine whose

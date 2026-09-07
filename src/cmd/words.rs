@@ -84,6 +84,10 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
 
     std::fs::create_dir_all(home.keys_dir()).map_err(|e| Error::io(home.keys_dir(), e))?;
     set_dir_owner_only(home.path())?;
+    // The keys directory too, and before the key is written into it. `create_dir_all` takes
+    // the umask, so `keys/` came out world-listable on a default one while the key inside it
+    // was owner-only: a home this tool rebuilt was subtly less private than one `rad` made.
+    set_dir_owner_only(&home.keys_dir())?;
     write_owner_only(&home.secret_key(), openssh.as_bytes())?;
     std::fs::write(home.public_key(), identity.to_openssh()?)
         .map_err(|e| Error::io(home.public_key(), e))?;

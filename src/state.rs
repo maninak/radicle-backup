@@ -233,6 +233,10 @@ pub fn write(record: &Record) -> Result<PathBuf> {
     let path = path_from_env(&record.did)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        // The directory as well as the file below. `create_dir_all` takes the umask, so on a
+        // default one this came out world-listable, and its file names are the DIDs of every
+        // identity this machine keeps a record for.
+        crate::perms::set_dir_owner_only(parent)?;
     }
     let json = serde_json::to_vec_pretty(record)?;
     // Owner-only: no key material in here, but it does name every repository this identity
