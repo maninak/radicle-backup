@@ -28,7 +28,7 @@ Nothing in the format depends on a `rad` version. An archive written next to Rad
 | `node/notifications.db` | `0600` | Tier `state` or `full`, and the file exists. |
 | `node/node.db` | `0600` | `--with-node-db`. The routing table and address book, which a node otherwise rebuilds from gossip. |
 | `repos/<rid>.bundle` | `0600` | The repository was selected. A `git bundle` of every ref, including `refs/namespaces/*`, and HEAD. |
-| `repos/<rid>.config` | `0644` | That repository had a git config. |
+| `repos/<rid>.config` | `0644` | That repository had a git config. A reader must not install it verbatim; see what a reader must not trust. |
 | `RESTORE.md` | `0644` | Always. |
 | `restore.sh` | `0755` | Always. |
 | `manifest.json` | `0644` | Always, and always **last**. |
@@ -118,16 +118,29 @@ git --git-dir ~/.radicle/storage/$rid -c fetch.fsckObjects=true fetch --force re
 git --git-dir ~/.radicle/storage/$rid symbolic-ref HEAD "$(jq -r '.repos[]|select(.rid|endswith("'$rid'")).head' manifest.json)"
 ```
 
-`fetch.fsckObjects` because a bundle is the one part of an archive that nothing else validates, and one can carry a tree entry named `.git` or `..`. `restore.sh` inside the archive runs this loop for every repository. It does not check digests: compare `sha256sum` output against the manifest by hand, or use `rad-backup verify`. Drop `age -d` for a plaintext archive.
+`fetch.fsckObjects` because a bundle is the one part of an archive that nothing else validates, and one can carry a tree entry named `.git` or `..`. Git consults that setting on a bundle only from 2.46; an older one accepts it and checks nothing, so a run that says nothing looks exactly like one that checked.
+
+The loop leaves `repos/<rid>.config` alone on purpose; see what a reader must not trust, below. It does not check digests either: compare `sha256sum` output against the manifest by hand, or use `rad-backup verify`. Drop `age -d` for a plaintext archive. `restore.sh` inside the archive is this loop, for every repository.
 
 ## Compatibility rules
 
-- **`format` is a single integer.** A reader must refuse an archive whose `format` is greater than the one it knows, and say so in those words, because a newer format may change what an entry means, and a half-understood restore is worse than a refused one.
-- **New manifest keys may be added** in a future version 1 archive, and a reader must ignore the ones it does not know. `source.retiresKey` is the first: it is `true` only in an archive written by `rad backup move`, which retires the key on the machine it came from, and absent in any archive written before the key existed. A reader must treat absent as "not known" rather than as `false`, because the difference is whether another machine may still be running the identity.
-- **New entries may be added** in a future version 1 archive. A reader must ignore an entry it does not recognise rather than treating it as corruption; the manifest is what decides whether the archive is complete.
-- **A reader trusts nothing in the manifest.** `rid` and `head` reach `git` and `rad` as command-line arguments, and neither takes a `--` that fences a value off from its own flags, so a `head` of `-d` is read as a flag. `git symbolic-ref` also stores whatever it is handed without checking it, so a `head` of `refs/../../evil` writes a file outside the repository the next time anything updates that ref. A reader must check that a repository id is base58 and that a `head` names a ref (a `refs/` prefix, no empty or dot-leading component, none of the characters git forbids in a refname) before either reaches a command line, and must skip the offending value rather than the repository it belongs to.
+How a version 1 archive may change, and what that asks of a reader.
+
+- **`format` is a single integer.** Refuse an archive whose `format` is greater than the one you know, and say so in those words: a newer format may change what an entry means, and a half-understood restore is worse than a refused one.
+- **New manifest keys may be added,** and a reader must ignore the ones it does not know. Some narrow what a neighbouring key claims rather than standing alone, so ignoring one errs towards caution: `node.whyRunningIsUnknown` qualifies `node.wasRunning`, and reporting the second without the first calls "nothing could look" a sighting.
+- **An absent key means "not known", never `false`.** `source.retiresKey` is `true` only in an archive written by `rad backup move`, which retires the key on the machine it came from, and absent in every archive written before the key existed. The difference is whether another machine may still be running the identity.
+- **New entries may be added.** Ignore an entry you do not recognise rather than treating it as corruption; the manifest is what decides whether the archive is complete.
 - **Entry paths never change meaning.** If what belongs at `node/policies.db` ever stops being a policy database, it gets a new path and the format version goes up.
 - **The plaintext recovery path never goes away.** Any change that would make an archive unreadable without this tool is out of scope.
+
+## What a reader must not trust
+
+Nobody vouches for an archive: it arrives from wherever it was kept. Three of its parts reach a program that acts on them, and each is a way for whoever wrote it to reach the machine restoring it.
+
+- **The manifest's values reach command lines.** `rid`, `head` and every object id in `repos[].sigrefs` are passed to `git` and `rad`, neither of which takes a `--` that fences a value off from its own flags, so a `head` of `-d` is read as a flag. `git symbolic-ref` also stores whatever it is handed, so a `head` of `refs/../../evil` writes a file outside the repository the next time anything updates that ref. Check that a repository id is base58 and that a `head` names a ref (a `refs/` prefix, no empty or dot-leading component, none of the characters git forbids in a refname), and skip the offending value rather than the repository it belongs to.
+- **The node id must be the key.** Refuse an archive whose `identity.nodeId` is not the public key it carries. Every check that compares a peer's own refs is asked under that id, and one that names nobody answers "nothing to compare" about everything.
+- **A repository config is a list of commands git runs.** `core.pager`, `core.fsmonitor`, `core.sshCommand` and `remote.<name>.url = ext::sh -c ...` are each executed by git during ordinary operations on that repository, so installing `repos/<rid>.config` verbatim hands the archive's author a shell. Copy an allowlist out of it and drop the rest: `user.name` and `user.email` are the whole of what a restore needs, because they are the only two settings in a Radicle storage config a machine cannot work out for itself. Read it with `git config --file <it> --no-includes`, since an `include.path` otherwise pulls in a second config from a path the archive chose, and write each setting through `git config` rather than by copying bytes.
+- **A bundle is the one part nothing else validates,** which is what `fetch.fsckObjects` above is for.
 
 ## Version history
 

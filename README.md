@@ -228,7 +228,7 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 
 Everything is unpacked into a staging directory first and every digest is checked before a single byte lands in the home, so a truncated or tampered archive cannot leave you with half an identity.
 
-A restore refuses outright while a node is running against the home it is restoring into, because installing over a live home corrupts both. It also refuses (exit `4`) a home that already holds something: an identity, stored repositories, a node database, a `config.json`, or a key `move` retired. `--force` overrides the second refusal and names what it is about to write over. The comparison at the end needs a node, so the run starts one itself when the home's own is down, and stops it again.
+A restore refuses outright while a node is running against the home it is restoring into, because installing over a live home corrupts both. It also refuses (exit `4`) a home that already holds something: an identity, stored repositories, a node database, a `config.json`, or a key `move` retired. `--force` overrides the second refusal and names what it is about to write over. It never lets a restore write *outside* the home: that is a separate question, asked when `keys`, `node` or `storage` is a symlink, and answered yes by `--yes`, so an unattended restore into a home somebody else can write to is a restore that follows whatever link they left. A link that changes after the question is answered is refused whatever the flags say. The comparison at the end needs a node, so the run starts one itself when the home's own is down, and stops it again.
 
 ### The fork hazard, and what this does about it
 
@@ -247,9 +247,9 @@ So after restoring, and before handing control back, every restored repository i
 
 A refs announcement is a separate message from a fetch, so after the fetches the run waits twenty seconds for other nodes to say what they hold. It is a flat wait with nothing to poll for: heartwood rewrites a peer's row only when that peer announces a *different* head, so a node that holds exactly what you hold writes nothing, and no observable state ever says the answers are in.
 
-That same rule is why there is no "in step with the network" row: this tool cannot establish it. A record with nothing in it against this copy is worth the first row's sentence and no more. What the check does catch is the case that matters, a node holding a head that is not yours, whether it recorded that before the backup or in the twenty seconds after the fetch. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
+That same rule is why there is no "in step with the network" row: this tool cannot establish it, only the absence of anything against you. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
 
-The two readings of a row are not treated alike, because only one of them keeps. A node holding refs signed with your key that you do not have still holds them however old the row is, so that reading is taken from any row. "That node is behind you" is only true of the moment it was written, and a node that was behind in January has had since January to catch up and pass you: so `holds work the network has not seen`, and the `rad sync --announce` beside it, is only ever claimed on a row that arrived during this run. A row already there is still reported, as `holds work no node had when the archive was taken`, which says the true half without the instruction. Which rows were already there is read out of the home's own node database before the node is started, so no clock is consulted.
+A row saying another node holds refs you do not is true however old it is. "That node is behind you" is only true of the moment it was written, so a row that was already there when the run started earns `holds work no node had when the archive was taken`, which is the true half without the `rad sync --announce` that would publish a fork.
 
 `--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push. It is the one way a restore that compared nothing still exits `0`: a check that was declined is not a check that failed, and every other route to an uncompared repository (no `rad` on `PATH`, a node that would not start, a fetch that did not work) is a question this run meant to ask and could not.
 
@@ -294,11 +294,7 @@ recovery posture of /home/alice/.radicle
 
 Nine checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line says what fixes the one above it, usually as a command to run.
 
-`other seeds` and `signed refs propagation` ask different questions. The first asks whether a repository exists anywhere but here; the second asks whether the newest work in it does. A repository forty seeds carry can still have this morning's commits on one disk, and that is the loss a file copy of the home cannot see.
-
-`key copies` is the one check about a machine that is not this one. Restoring a backup puts the key here while the machine it came from keeps its copy, and two nodes signing under one peer id is the thing never to do; `rad backup move` is the path that closes it, because it retires the source key as part of the run. Said as a possibility and never as a finding, because this tool cannot see the other machine.
-
-The line between a `!` and a `✗` is whether anything else holds a copy: a private repository in no archive fails when nobody else can hold it and warns when a second delegate, an allowed peer or a node announcing it could, and an archive older than 30 days warns rather than fails.
+`key copies` is the only check about a machine that is not this one, and so it reports a possibility rather than a finding: this tool cannot see the other machine. `archive encryption` is the only one that opens anything, and only far enough to prove the `--identity` key on hand still unwraps the archive.
 
 `doctor --json` prints the same as structured data. It exits `3` when any check fails, and also when every check came back "could not be checked", because a probe reading the exit code cannot tell a posture nothing looked at from a clean one. Unknowns beside real answers still exit `0`: a machine with no `rad` on `PATH` cannot answer several of these and may be perfectly covered.
 
@@ -369,9 +365,9 @@ rad backup schedule --off           # stop, leaving the unit files in place
 rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 ```
 
-It refuses to enable a timer that cannot work. An unattended run has nobody to type a passphrase at, so a passphrase-encrypted schedule needs `--passphrase-file`. A passphrase exported in your shell does not count, because it reaches the command you are typing and not the timer, which systemd starts from its own environment; one you have put where systemd itself keeps it, with `systemctl --user set-environment` or a file in `~/.config/environment.d/`, does. `--recipient` and `--plaintext` need no passphrase at all, and go into the unit's command line rather than the environment file: a recipient is not a secret, and "this timer writes your private key in the clear every night" is not a thing to keep out of sight. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
+It refuses to enable a timer that cannot work. An unattended run has nobody to type a passphrase at, so a passphrase-encrypted schedule needs `--passphrase-file`. A passphrase exported in your shell does not count, because the timer is started from systemd's own environment rather than yours; one put where systemd keeps it does. `--recipient` and `--plaintext` need no passphrase at all. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
 
-It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. To keep a hand edit to a unit, delete the two marker lines at the top of it: a unit file without them is never replaced, and the run says so instead. A unit that still carries them is rewritten by the next `rad backup schedule`. The `env` file has no such escape and is rewritten in full by every run, so a lasting settings change belongs on the command line that writes it. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up with `systemctl --user` themselves.
+It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. To keep a hand edit to a unit, delete the two marker lines at the top of it; the `env` file has no such escape and is rewritten in full by every run. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up themselves.
 
 Or with cron, if you prefer:
 
@@ -403,6 +399,9 @@ Unattended-Upgrade::Allowed-Origins {
 | `RAD_BACKUP_PASSPHRASE_FILE` | The same, read from a file, which keeps it out of the process table. |
 | `RAD_BACKUP_TIER` | The default tier: `identity`, `state` or `full`. |
 | `RAD_BACKUP_KEEP` | Keep this many of this identity's archives in the output directory, deleting older ones. |
+| `RAD_BACKUP_IDENTITY_PASSPHRASE_FILE` | The passphrase for the `--identity` key, read from a file. |
+| `RAD_BACKUP_IDENTITY_PASSPHRASE` | The same, in the environment, which anything that can see the process can read. |
+| `RAD_SOCKET` | The control socket to ask about a running node, instead of the home's own. A command that finds a node on it says so by name rather than acting on the home. |
 | `RAD_PASSPHRASE` | The *key's* passphrase. `paper --words` reads it to decrypt the key; `restore --words` reads it as the restored key's new passphrase. |
 | `RAD` | The `rad` binary to call. |
 | `GIT` | The `git` binary to call. |
@@ -423,7 +422,7 @@ Unattended-Upgrade::Allowed-Origins {
 just check    # cargo fmt --check, the SECURITY.md audit map, the naming, message, shellcheck and cross-file pin gates, clippy, a non-unix build, then the tests: what CI runs, in that order
 ```
 
-The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, takes real archives of it, restores them into a second home and compares the two byte for byte. It needs `git` and nothing else, so it runs anywhere the tool does.
+The integration suite in `tests/` builds a Radicle home from a fixed mnemonic, takes real archives of it, restores them into a second home and compares the two byte for byte. It needs `git`, and `jq` for the leg that runs the shipped `restore.sh`, which is skipped with a note on a machine without one.
 
 Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.md` has the details, `ARCHIVE-FORMAT.md` specifies the format if you want to write another reader, and `SECURITY.md` says what to do about a vulnerability.
 
