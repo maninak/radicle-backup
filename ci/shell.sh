@@ -46,6 +46,14 @@ if shellcheck "$control/bad.sh" > /dev/null 2>&1; then
 	exit 1
 fi
 
+# Two findings about reachability are off for the whole directory rather than silenced line by
+# line: SC2317, "command appears to be unreachable", and SC2329, "this function is never
+# invoked". Every rule in `names.sh` is called through a variable holding its name, which is
+# what lets each one be run over the tree and over a line written to be caught, and neither
+# pass can follow a call through a variable: between them they report every rule and the body
+# of every rule. Both are raised only by shellchecks newer than 0.8, which is why they reached
+# CI rather than this machine. Revisit if shellcheck learns to see an indirect call.
+#
 # shellcheck disable=SC2086 # the list is split on purpose; `ls-files` above is read the same
 # way `rust_sources` is, and a path with whitespace in it would fail loudly here.
-shellcheck $scripts
+shellcheck --exclude=SC2317,SC2329 $scripts

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 
-# Six naming rules a reviewer kept having to enforce by hand.
+# Seven rules a reviewer kept having to enforce by hand.
 #
 # None of them is a matter of taste. A local called `out` next to one called `err` reads as a
 # pair when one is a process and the other a file handle; `if record.delegate` cannot be
@@ -237,12 +237,12 @@ rule_duplicate_scratch_name() {
 		for file in $1; do
 			[ "$(binary_of "$file")" = "$group" ] || continue
 			tr '\n' ' ' < "$file" |
-				grep -oE '(TestScratch|Fixture)::create\([[:space:]]*"[^"]+"' || true
+				grep -oE '(TestScratch|Fixture)::create[a-z_]*\([[:space:]]*"[^"]+"' || true
 		done | sed 's/.*"\(.*\)"/\1/' | sort | uniq -d
 	done
 }
 enforce rule_duplicate_scratch_name \
-	'TestScratch::create("twice"); TestScratch::create("twice");' \
+	'TestScratch::create("twice"); TestScratch::create_short("twice");' \
 	'two tests ask for this scratch name, so one of them is refused'
 
 # The same collision one layer out. A test that builds its own directory under the shared
@@ -266,11 +266,41 @@ enforce rule_duplicate_temp_label \
 	'"rad-backup-twice-{}" "rad-backup-twice-{}"' \
 	'two tests name their temporary directory this, so they share one'
 
+# Something only unix has, reached from an item nothing gates to unix.
+#
+# `std::os::unix` resolves on the machine this is written on however it is gated, so the whole
+# class compiles locally and fails on the Windows job, twenty minutes and a push later. The
+# non-unix gate beside this one cannot see it either: it simulates the shape of the `cfg` tree
+# by compiling for linux, where those paths exist. So this reads the gate rather than the
+# compiler: an item carrying `#[cfg(unix)]` covers what is nested inside it, and anything else
+# that says `os::unix` is a Windows build failure with a name and a line number.
+#
+# Indentation is what makes nesting work, because `#[cfg(unix)] mod platform` gates every
+# function inside it and those are items in their own right. A gate ends at the next item no
+# deeper than the one that carried it.
+rule_unix_without_a_gate() {
+	# shellcheck disable=SC2086 # split on purpose; see rule three
+	awk '
+		FNR == 1 { gated = 0; pending = 0; gate_ind = 0 }
+		/^[[:space:]]*#\[cfg\((not\(windows\)|unix|any\(unix)/ { pending = 1; next }
+		/^[[:space:]]*(pub(\([^)]*\))? )?(async )?(unsafe )?(fn|mod|impl|struct|enum|trait) / {
+			match($0, /^[[:space:]]*/); ind = RLENGTH
+			if (pending) { gated = 1; gate_ind = ind; pending = 0 }
+			else if (gated && ind <= gate_ind) gated = 0
+		}
+		/os::unix/ { if (!gated) print FILENAME ":" FNR }
+	' $1
+}
+enforce rule_unix_without_a_gate \
+	'    std::os::unix::fs::symlink(there, here).expect("a symlink is creatable");
+    use std::os::unix::fs::PermissionsExt as _;' \
+	'reaches for something only unix has from an item nothing gates to unix'
+
 # Zero rules run means the recipe stopped doing anything, not that the tree is clean. Each
 # rule above has proved it can still fail before this counts it, so this is the last of the
 # three ways a gate lies: not running at all.
-if [ "$rules" -ne 6 ]; then
-	echo "the name check ran $rules of its 6 rules, so it checked less than it claims" | complain
+if [ "$rules" -ne 7 ]; then
+	echo "the name check ran $rules of its 7 rules, so it checked less than it claims" | complain
 	found=1
 fi
 exit "$found"
