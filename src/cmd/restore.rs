@@ -15,6 +15,7 @@ use crate::db::Policies;
 use crate::error::{EXIT_CHECKS_FAILED, Error, Result};
 use crate::exec::Answer;
 use crate::git::{self, Git};
+use crate::home::{Home, is_a_link};
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
 use crate::perms::{copy_doc, copy_secret, set_dir_owner_only};
@@ -129,7 +130,39 @@ impl Standing {
     }
 }
 
+/// Refuse a home whose own directories send this restore out of it.
+///
+/// Every writer follows a link at a directory: `create_dir_all` walks through one, and the
+/// copies and `git init` that follow land on the far side. So `keys` pointing at a directory
+/// somebody else owns takes the private key, and `storage` pointing at one takes every
+/// repository, private ones included.
+///
+/// Asked three times, and before anything else each time. Ahead of `--words`, which writes a
+/// key into `keys` without reading an archive at all, and ahead of the occupancy checks, so
+/// that the sentence names the link rather than whatever the link happens to lead to. Again
+/// in `install`, and again before the repositories go in, because unpacking a large archive
+/// is long enough for a link to appear in between and everything up to each ask is still a
+/// read. `ci/pins.sh` holds the three, since no test can watch a link appear mid-run.
+fn refuse_a_home_that_points_elsewhere(home: &Home) -> Result<()> {
+    let elsewhere = home.directories_that_point_elsewhere();
+    if elsewhere.is_empty() {
+        return Ok(());
+    }
+    Err(Error::refused(
+        format!(
+            "in {}, {} {} a symlink, so a restore would write the archive's contents outside \
+             this home",
+            home.path().display(),
+            term::shortlist(&elsewhere),
+            term::is_or_are(elsewhere.len())
+        ),
+        "move it aside, or restore into a different --home",
+    ))
+}
+
 pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
+    // Before the `--words` branch below, which writes a key into `keys` of its own.
+    refuse_a_home_that_points_elsewhere(&ctx.home)?;
     if args.words {
         return crate::cmd::words::restore(ctx).map(|()| std::process::ExitCode::SUCCESS);
     }
@@ -504,6 +537,7 @@ fn install(ctx: &Ctx, staging: &Path) -> Result<()> {
     // in between, and a node writing to the home while this copies its databases over corrupts
     // both. The check up front is the courtesy that fails before the work; this is the one
     // that matters.
+    refuse_a_home_that_points_elsewhere(home)?;
     let state = home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
@@ -729,6 +763,10 @@ fn restore_repositories(ctx: &Ctx, staging: &Path, manifest: &Manifest) -> Resul
         }
     }
 
+    // The third ask, and the last one before a repository is written. `install` asked before
+    // the identity went in, and a link planted at `storage` after that answer is one this
+    // `create_dir_all` would walk straight through.
+    refuse_a_home_that_points_elsewhere(&ctx.home)?;
     let storage = ctx.home.storage();
     std::fs::create_dir_all(&storage).map_err(|e| Error::io(&storage, e))?;
     ctx.term.step(&format!(
@@ -762,6 +800,21 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
     // Whether the repository was already there decides what a failure may clean up. Under
     // `--force` the home can hold a copy this run did not create, and deleting that on a
     // failed unbundle would destroy the thing the restore was meant to protect.
+    // Ahead of `existed` and of everything the failure path may sweep, because both of those
+    // resolve the link: `exists` follows it, and `remove_dir_all` over one answers with a
+    // second error about the wrong thing. A link at the repository's own name is inside a
+    // `storage` that is a real directory and so passed the check over the home's three, and
+    // `git init --bare` initialises at whatever it points at. The archive names the
+    // repository, so whoever wrote it knows which name to plant.
+    if is_a_link(&target) {
+        return Err(Error::refused(
+            format!(
+                "{} is a symlink, so this repository would be restored outside the home",
+                target.display()
+            ),
+            "move it aside, or restore into a different --home",
+        ));
+    }
     let existed = target.exists();
 
     let put_back = || -> Result<()> {

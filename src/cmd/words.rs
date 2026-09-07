@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 use crate::cmd::Ctx;
 use crate::crypt;
 use crate::error::{Error, Result};
-use crate::perms::{set_dir_owner_only, write_owner_only};
+use crate::perms::{MODE_DOC, set_dir_owner_only, write_atomically, write_owner_only};
 
 /// Room for the longest 24-word BIP-39 line in English, so the buffer it is read into never
 /// grows: 24 words of 8 letters, 23 spaces, and a line ending.
@@ -89,8 +89,15 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     // was owner-only: a home this tool rebuilt was subtly less private than one `rad` made.
     set_dir_owner_only(&home.keys_dir())?;
     write_owner_only(&home.secret_key(), openssh.as_bytes())?;
-    std::fs::write(home.public_key(), identity.to_openssh()?)
-        .map_err(|e| Error::io(home.public_key(), e))?;
+    // Through the same writer as the key beside it, rather than `fs::write`, which follows a
+    // symlink standing at the name and truncates whatever it points at. `write_atomically`
+    // unlinks first, so a link there is replaced rather than written through, and the file
+    // lands at `0644` instead of at whatever the umask allowed.
+    write_atomically(
+        &home.public_key(),
+        identity.to_openssh()?.as_bytes(),
+        MODE_DOC,
+    )?;
 
     ctx.term
         .ok(&format!("wrote the key into {}", home.keys_dir().display()));

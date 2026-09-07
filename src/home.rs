@@ -7,6 +7,21 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+/// Whether a link stands at `path`, whatever it points at. Asked of a directory a restore
+/// fills and of a repository's own directory inside `storage`, so it lives here rather than
+/// in either caller.
+pub fn is_a_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|entry| entry.is_symlink())
+}
+
+/// What a `sun_path` holds, less the terminator it takes: macOS gives 104 bytes and Linux 108.
+/// Both are named because the message quotes both, and a path is only refused for its length
+/// past the smaller one, which is where the explanation starts being able to be true.
+#[cfg(unix)]
+const SHORTEST_SUN_PATH: usize = 103;
+#[cfg(unix)]
+const LONGEST_SUN_PATH: usize = 107;
+
 /// Whether the node is listening on its control socket right now.
 ///
 /// The socket file survives a stopped node, so its presence proves nothing and connecting is
@@ -208,6 +223,34 @@ impl Home {
         found
     }
 
+    /// Which of the directories a restore fills point somewhere else.
+    ///
+    /// A restore writes the key, the databases and every repository into `keys`, `node` and
+    /// `storage` by name, and a link at a directory is resolved by everything that writes:
+    /// `create_dir_all` walks through one, and the copies and `git init` that follow land on
+    /// the far side of it. So a home seeded with one sends an archive's contents out of
+    /// itself, and `keys` pointing at a directory somebody else owns puts the private key in
+    /// it. Refused rather than followed: a directory this tool did not make is not one it may
+    /// quietly replace, which is what it does to a link standing at a file it writes.
+    ///
+    /// Separate from `what_a_restore_would_overwrite` because `--force` answers that one and
+    /// must not answer this: force is permission to overwrite what is here, never permission
+    /// to write somewhere else. The home's own path is deliberately not checked, because
+    /// pointing `~/.radicle` at another disk is something people do on purpose and it is the
+    /// path the user named. Revisit if a home ever comes from somewhere the user did not
+    /// name, which would make that link somebody else's choice rather than theirs.
+    pub fn directories_that_point_elsewhere(&self) -> Vec<&'static str> {
+        [
+            ("keys", self.keys_dir()),
+            ("node", self.node_dir()),
+            ("storage", self.storage()),
+        ]
+        .into_iter()
+        .filter(|(_, path)| is_a_link(path))
+        .map(|(name, _)| name)
+        .collect()
+    }
+
     /// Whether nothing is at `path`. Anything the filesystem refuses to answer about counts as
     /// something being there, because every caller is deciding whether it is safe to write.
     fn is_absent(&self, path: &Path) -> bool {
@@ -246,6 +289,30 @@ impl Home {
             // denied above all, says only that this process could not ask.
             Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
                 NodeState::Stopped
+            }
+            // A path too long for `sun_path` comes back as `InvalidInput` and the words
+            // "path must be shorter than SUN_LEN", which name neither the path, nor the
+            // limit, nor a way out. The refusal itself stands, because a node reached some
+            // other way is still a node and reading this as "stopped" is what costs the home:
+            // only the sentence changes. The length is checked as well as the kind, because
+            // an interior NUL is `InvalidInput` too, and about a short path this sentence
+            // would be a lie. It is still the wrong sentence about a long path with a NUL in
+            // it, which nothing here can produce: neither an environment variable nor an
+            // argument can carry one.
+            Err(e)
+                if e.kind() == ErrorKind::InvalidInput
+                    && socket.as_os_str().len() > SHORTEST_SUN_PATH =>
+            {
+                NodeState::Unknown {
+                    why: format!(
+                        "{e}, and that path is {} bytes: a control socket path can be at most \
+                         {SHORTEST_SUN_PATH} bytes on macos and {LONGEST_SUN_PATH} on linux. \
+                         Point RAD_SOCKET at a shorter one, or use a home whose own path is \
+                         shorter",
+                        socket.as_os_str().len()
+                    ),
+                    socket,
+                }
             }
             Err(e) => NodeState::Unknown {
                 socket,
@@ -371,6 +438,38 @@ mod tests {
         assert!(with.ends_with("storage/z3gqcJUoA1n9HaHKufZs5FCSGazv5"));
     }
 
+    /// A home too deep for a socket path says which path and what to do about it.
+    ///
+    /// The refusal is right: nothing here can tell whether a node is running, and reading that
+    /// as "stopped" is what costs the home. What was wrong was the sentence. The system says
+    /// "path must be shorter than SUN_LEN" and stops, which names neither the path nor the
+    /// limit nor a way out. A home under `~` is nowhere near the limit; a home under a macOS
+    /// temp directory, which is `/var/folders/<x>/<y>/T/` and half the budget before anything
+    /// is named, is how this gets reached, and it is where the suite kept meeting it.
+    // Unix only, like the socket. The path is refused before the filesystem is touched, so
+    // nothing here has to exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_path_too_long_to_bind_says_which_path_and_how_long_it_may_be() {
+        let home = Home::at(std::env::temp_dir().join("d".repeat(120)));
+
+        let state = home.probe_node_state();
+        let NodeState::Unknown { why, .. } = &state else {
+            panic!("a path nothing can bind is not an answer about a node: {state:?}");
+        };
+        assert!(
+            why.contains(&SHORTEST_SUN_PATH.to_string())
+                && why.contains(&LONGEST_SUN_PATH.to_string()),
+            "{why}"
+        );
+        assert!(why.contains("macos") && why.contains("linux"), "{why}");
+        assert!(why.contains("RAD_SOCKET"), "{why}");
+        assert!(
+            why.contains(&home.control_socket_at().as_os_str().len().to_string()),
+            "the length of the path that was refused is what says how much to cut: {why}"
+        );
+    }
+
     /// The bug this guards: `UnixStream::connect(..).is_ok()` read every error as "the node is
     /// stopped". A control socket is created `srwxrwxr-x` inside a directory, so a home
     /// reached over a mount another user owns answers "stopped" about a node that is up.
@@ -437,6 +536,43 @@ mod tests {
                     .is_some_and(|doubt| doubt.contains("control.sock")),
                 "{state:?}"
             );
+        }
+    }
+
+    /// A link at a directory sends the whole restore out of the home, and an empty one hides
+    /// it: the guard the shipped script had, and this one did not, checked the names files go
+    /// to and never the directories holding them, so `keys` aimed elsewhere passed every check
+    /// and the key went with it. An empty directory at the same name has to stay allowed,
+    /// because `rad auth` leaves exactly that.
+    // Unix only: it is about following a symlink, which is what `symlink` here needs to make.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_a_restore_fills_that_points_out_of_the_home_is_refused() {
+        let scratch = crate::key::tests::TestScratch::create("home-linked-dirs");
+        let home = Home::at(scratch.path_of("home"));
+        let there = scratch.path_of("elsewhere");
+        std::fs::create_dir_all(&there).expect("the directory pointed at is creatable");
+        std::fs::create_dir_all(home.node_dir()).expect("the node directory is creatable");
+        assert!(
+            home.directories_that_point_elsewhere().is_empty(),
+            "a home whose directories are directories points nowhere else"
+        );
+
+        // One at a time, because a list that names two of the three says nothing about
+        // whether the third is asked about at all.
+        for (name, linked) in [
+            ("keys", home.keys_dir()),
+            ("node", home.node_dir()),
+            ("storage", home.storage()),
+        ] {
+            let _ = std::fs::remove_dir(&linked);
+            std::os::unix::fs::symlink(&there, &linked).expect("a symlink is creatable");
+            assert_eq!(
+                home.directories_that_point_elsewhere(),
+                vec![name],
+                "the link at {name} is the only one there"
+            );
+            std::fs::remove_file(&linked).expect("the link is removable");
         }
     }
 

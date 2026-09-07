@@ -30,11 +30,16 @@ if [ -e "$RAD_HOME/keys/radicle" ] || [ -L "$RAD_HOME/keys/radicle" ]; then
 	exit 1
 fi
 
-# The same hazard at every other name this writes. `cp` follows a symlink at its destination,
-# so a home seeded with one is a home that redirects an archive's contents somewhere else, and
-# a `config.json` pointing at a file this user can write is enough. Refused rather than
-# unlinked: this script never destroys anything in a home it did not put there.
-for name in keys/radicle.pub config.json node/policies.db node/notifications.db node/node.db; do
+# The same hazard at every other name this writes, and at the three directories it writes
+# them into. `cp` follows a symlink at its destination and `mkdir -p` walks through one at a
+# directory, so a home seeded with either is a home that redirects an archive's contents
+# somewhere else: `keys` pointing at a directory somebody else owns puts the private key in
+# it, under whatever permissions the file already there had. Refused rather than unlinked:
+# this script never destroys anything in a home it did not put there. `$RAD_HOME` itself is
+# deliberately not on the list: it is the home you asked for, by argument or by environment,
+# and pointing one at another disk is something people do on purpose.
+for name in keys node storage keys/radicle.pub config.json \
+	node/policies.db node/notifications.db node/node.db; do
 	if [ -L "$RAD_HOME/$name" ]; then
 		echo "$RAD_HOME/$name is a symlink, so restoring would write through it;" \
 			"move it aside first" >&2
@@ -136,6 +141,14 @@ for bundle in repos/*.bundle; do
 		;;
 	esac
 	target="$RAD_HOME/storage/$rid"
+	# A link at the repository's own name, inside a `storage` that is a real directory and so
+	# passed the check at the top. `git init` initialises at whatever it points at, and the
+	# archive names the repository, so whoever wrote it knows which name to plant. Skipped
+	# rather than fatal: the repositories before this one are already back.
+	if [ -L "$target" ]; then
+		echo "skipping $rid: $target is a symlink, so it would be restored outside the home" >&2
+		continue
+	fi
 
 	git init --bare --quiet "$target"
 	# fsckObjects, matching what `rad-backup restore` does: a bundle is the one part of
