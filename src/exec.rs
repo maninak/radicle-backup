@@ -107,6 +107,28 @@ impl Tool {
         Ok(Some(String::from_utf8_lossy(&finished.stdout).into_owned()))
     }
 
+    /// Run a program whose OUTPUT is secret, and answer one question about it without handing
+    /// the bytes back.
+    ///
+    /// `systemctl --user show-environment` prints systemd's whole environment, and when the
+    /// archive passphrase is kept there, it prints that too. Every other buffer in this tool
+    /// that touches a passphrase is wiped on the way out, and a `String` returned from here
+    /// would be dropped intact for the next allocation to read. So the caller gets the answer
+    /// and never the text.
+    ///
+    /// What this cannot reach: the pipe buffer `Command::output` reads the child through is
+    /// private to the standard library. What this function owns, it wipes.
+    pub fn confided<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        ask: impl Fn(&str) -> bool,
+    ) -> Result<bool> {
+        let finished = self.raw(args)?;
+        let stdout = zeroize::Zeroizing::new(finished.stdout);
+        let text = zeroize::Zeroizing::new(String::from_utf8_lossy(&stdout).into_owned());
+        Ok(ask(&text))
+    }
+
     /// Run and keep what the program said, whatever it exited with.
     ///
     /// For programs that print their answer and then exit non-zero to express it, such as

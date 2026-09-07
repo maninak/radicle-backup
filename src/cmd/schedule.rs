@@ -136,9 +136,13 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
 /// a file in `~/.config/environment.d/`, does reach the service. What this process inherited
 /// from the shell does not, which is why the shell's own environment is not consulted here.
 fn systemd_holds_passphrase(systemctl: &Tool) -> Result<bool> {
-    let shown = systemctl.spoken(&["--user", "show-environment"])?;
     let prefix = format!("{}=", crate::crypt::ARCHIVE_PASSPHRASE_ENV);
-    Ok(shown.stdout.lines().any(|line| line.starts_with(&prefix)))
+    // `confided` and not `spoken`, because the answer is one bit and the output is systemd's
+    // whole environment: when the passphrase lives there, reading it into an ordinary `String`
+    // leaves a copy in freed heap the moment this function returns.
+    systemctl.confided(&["--user", "show-environment"], |shown| {
+        shown.lines().any(|line| line.starts_with(&prefix))
+    })
 }
 
 /// What to report about the timer, from what `is-enabled` said and, when that said nothing,
@@ -311,26 +315,45 @@ fn home_dir_from_env() -> Result<PathBuf> {
 
 /// What a scheduled run reads its settings from. Kept apart from the writing so the one
 /// promise this file may make can be asserted without a filesystem.
+///
+/// Every value goes in as `NAME=value` on its own line, and systemd reads the file line by
+/// line, so a path holding a newline writes whatever follows it as a SECOND setting. A
+/// directory called `backups\nRAD_BACKUP_PASSPHRASE=hunter2` is a legal directory, and this
+/// file is read by a timer that runs unattended. Refused rather than escaped: systemd's
+/// EnvironmentFile has no escape for a newline, so there is nothing to write that would mean
+/// the path the user asked for.
 fn environment_text(
     home: &Path,
     output: Option<&Path>,
     keep: Option<usize>,
     passphrase_file: Option<&Path>,
-) -> String {
-    let mut lines = vec![
-        MARKER_ENVIRONMENT.to_string(),
-        format!("RAD_HOME={}", home.display()),
-    ];
+) -> Result<String> {
+    let mut lines = vec![MARKER_ENVIRONMENT.to_string(), setting("RAD_HOME", home)?];
     if let Some(output) = output {
-        lines.push(format!("RAD_BACKUP_DIR={}", output.display()));
+        lines.push(setting("RAD_BACKUP_DIR", output)?);
     }
     if let Some(keep) = keep {
         lines.push(format!("RAD_BACKUP_KEEP={keep}"));
     }
     if let Some(file) = passphrase_file {
-        lines.push(format!("RAD_BACKUP_PASSPHRASE_FILE={}", file.display()));
+        lines.push(setting("RAD_BACKUP_PASSPHRASE_FILE", file)?);
     }
-    format!("{}\n", lines.join("\n"))
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+/// One `NAME=path` line, or a refusal if the path cannot be written as one.
+fn setting(name: &str, path: &Path) -> Result<String> {
+    let value = path.display().to_string();
+    if value.contains(['\n', '\r']) {
+        return Err(Error::refused(
+            format!(
+                "{} has a line break in it, so {name} cannot be set from a file systemd reads a line at a time",
+                path.display()
+            ),
+            "move it somewhere without one, or schedule the backup with cron instead",
+        ));
+    }
+    Ok(format!("{name}={value}"))
 }
 
 /// The environment a scheduled run reads. Written owner-only, because the path to a
@@ -349,7 +372,7 @@ fn write_environment(
         args.output.as_deref(),
         args.keep,
         passphrase_file,
-    );
+    )?;
     crate::perms::write_owner_only(path, text.as_bytes())?;
     ctx.term.step(&format!("wrote {}", path.display()));
     Ok(())
@@ -631,8 +654,22 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_a_line_break_is_refused_rather_than_written_as_two_settings() {
+        // A legal directory name, and systemd reads this file a line at a time: written out,
+        // the second half is a setting nobody asked for, in a file an unattended timer reads.
+        let smuggled = Path::new("/home/someone/backups\nRAD_BACKUP_PASSPHRASE=hunter2");
+        assert!(environment_text(smuggled, None, None, None).is_err());
+        assert!(environment_text(Path::new("/home/ok"), Some(smuggled), None, None).is_err());
+        assert!(environment_text(Path::new("/home/ok"), None, None, Some(smuggled)).is_err());
+        // A carriage return alone ends a line for the same readers.
+        let returned = Path::new("/home/someone/backups\rRAD_BACKUP_KEEP=1");
+        assert!(environment_text(returned, None, None, None).is_err());
+    }
+
+    #[test]
     fn the_environment_file_does_not_promise_that_an_edit_will_survive() {
-        let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None);
+        let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None)
+            .expect("an ordinary path is writable as a setting");
 
         // MARKER_UNIT says deleting it keeps the user's edits, which `write_unit` honours and
         // this file cannot: every run rewrites it in full whatever it holds.
