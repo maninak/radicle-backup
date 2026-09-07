@@ -10,10 +10,17 @@ You do not need `rad-backup` to restore it. The archive is a plain tar of plain 
 export RAD_HOME="${RAD_HOME:-$HOME/.radicle}"
 
 # Overwriting a key ends whatever identity it belongs to, so the copy happens only when
-# there is nothing to overwrite. Paste this whole block: a warning on its own would not stop
-# the lines below it from running.
-if [ -e "$RAD_HOME/keys/radicle" ]; then
+# there is nothing to overwrite. `-L` as well as `-e`, because a dangling symlink at the
+# key's name is not a file and `cp` follows it. And the three directories the steps below
+# fill, because `mkdir -p` and `git init` walk through a link at a directory without a word,
+# and the key, the databases and the repositories then land wherever it points, under
+# whatever permissions were already there. Paste this whole block: a warning on its own would
+# not stop the lines below it from running.
+if [ -e "$RAD_HOME/keys/radicle" ] || [ -L "$RAD_HOME/keys/radicle" ]; then
   echo "a key is already there; move it aside, or point RAD_HOME somewhere empty" >&2
+elif [ -L "$RAD_HOME/keys" ] || [ -L "$RAD_HOME/node" ] || [ -L "$RAD_HOME/storage" ]; then
+  echo "a directory this restore fills is a symlink, so the steps below would write" \
+    "outside $RAD_HOME; move it aside first" >&2
 else
   mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node"
 
@@ -53,14 +60,18 @@ ssh-keygen -l -f "$RAD_HOME/keys/radicle.pub"
 If that database refuses to open because Radicle has moved on to a newer schema, use `policies.json` instead, which is the same content as text. Every line of it maps to one command:
 
 ```sh
+# `@sh` on every value, because these lines print commands you are about to run and the
+# values come out of the archive: unquoted, a repository id reading `x; curl ... | sh` is a
+# second command on a line that otherwise looks ordinary. Quoted, the worst an archive can
+# do is hand `rad` a name it rejects.
 # seeded repositories
-jq -r '.seeding[] | select(.policy=="allow") | "rad seed \(.rid) --scope \(.scope)"' policies.json
+jq -r '.seeding[] | select(.policy=="allow") | "rad seed \(.rid|@sh) --scope \(.scope|@sh)"' policies.json
 # blocked repositories
-jq -r '.seeding[] | select(.policy=="block") | "rad block \(.rid)"' policies.json
+jq -r '.seeding[] | select(.policy=="block") | "rad block \(.rid|@sh)"' policies.json
 # followed peers
-jq -r '.following[] | select(.policy=="allow") | "rad follow \(.nid)"' policies.json
+jq -r '.following[] | select(.policy=="allow") | "rad follow \(.nid|@sh)"' policies.json
 # blocked peers
-jq -r '.following[] | select(.policy=="block") | "rad block \(.nid)"' policies.json
+jq -r '.following[] | select(.policy=="block") | "rad block \(.nid|@sh)"' policies.json
 ```
 
 Read that output, then run it.
@@ -72,6 +83,13 @@ Each repository is one git bundle holding every ref, every peer's namespace and 
 ```sh
 for bundle in repos/*.bundle; do
   rid=$(basename "$bundle" .bundle)
+  # `git init` walks through a link at a directory, so a `storage` or a repository name
+  # pointed somewhere else builds the repository there instead. This is a separate paste from
+  # the block in step 1, so it asks again rather than trusting that you ran that one.
+  if [ -L "$RAD_HOME/storage" ] || [ -L "$RAD_HOME/storage/$rid" ]; then
+    echo "skipping $rid: it would be restored outside $RAD_HOME" >&2
+    continue
+  fi
   git init --bare --quiet "$RAD_HOME/storage/$rid"
   # --force because the refs come from the bundle, not from a merge; fsckObjects because
   # nothing else validates a bundle's objects, and one can name a path like `.git` or `..`.
@@ -99,7 +117,7 @@ for bundle in repos/*.bundle; do
 done
 ```
 
-`restore.sh`, next to this file, is the same procedure with error handling, and it additionally refuses a bundle whose name is not a repository id, a `HEAD` that does not name a ref, and a home with a symlink where the identity or a database goes. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
+`restore.sh`, next to this file, is the same procedure with error handling, and it additionally refuses a bundle whose name is not a repository id, a `HEAD` that does not name a ref, and a home with a symlink anywhere it writes: the identity, its public key, `config.json`, a node database, one of the `keys`, `node` and `storage` directories, or a repository's own directory inside `storage`. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
 
 ## 4. Before you write anything to a restored repository
 

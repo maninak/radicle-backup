@@ -156,9 +156,56 @@ if [ "$recipe_gates" != "$workflow_gates" ]; then
 	wrong=1
 fi
 
+# Every value `RESTORE.md` interpolates into a command it prints, quoted. Those `rad seed` and
+# `rad follow` lines are built out of `policies.json`, which is whatever the archive says, and
+# the reader is told to run them: unquoted, an id reading `x; curl ... | sh` is a second
+# command on a line that otherwise looks ordinary. `@sh` on each one is the whole defence, and
+# nothing else in the suite reads a document nobody executes.
+pins=$((pins + 1))
+built=$(found '"rad [^"]*"' assets/RESTORE.md)
+if [ -z "$built" ]; then
+	echo "assets/RESTORE.md no longer builds a rad command the way this gate reads it, so" \
+		"whether those commands quote what the archive put in them went unchecked" | complain
+	exit 1
+fi
+bare=$(echo "$built" | grep -oE '\\\([^)]*\)' | grep -v '|@sh)' || [ $? -eq 1 ])
+if [ -n "$bare" ]; then
+	echo "assets/RESTORE.md builds a command with $(echo "$bare" | tr '\n' ' ')in it, which" \
+		"comes out of the archive unquoted into a line the reader is told to run" | complain
+	wrong=1
+fi
+
+# The three moments a restore asks whether the home's own directories still point into it. The
+# first refuses; the other two exist because unpacking a large archive takes minutes, and a
+# link planted during them is followed by the `create_dir_all` that comes next. No test can
+# watch a link appear mid-run, so what holds the second and third asks is this: each is a call
+# inside a named function, and losing one is losing the part of the check that is about time.
+pins=$((pins + 1))
+for asked_in in run install restore_repositories; do
+	# The function body, from its signature to the next line starting at column zero, which is
+	# how every item in this file ends.
+	body=$(awk -v want="fn $asked_in(" '
+		index($0, want) { inside = 1 }
+		inside { print }
+		inside && /^\}/ { exit }
+	' src/cmd/restore.rs)
+	if [ -z "$body" ]; then
+		echo "src/cmd/restore.rs has no fn $asked_in, so whether it asks about the home going" \
+			"went unchecked" | complain
+		exit 1
+	fi
+	if ! echo "$body" | grep -q 'refuse_a_home_that_points_elsewhere('; then
+		echo "src/cmd/restore.rs::$asked_in no longer asks whether a directory of the home" \
+			"points out of it. A link planted while a big archive unpacks is followed by" \
+			"whatever writes next, and the key or the repositories land outside the home." |
+			complain
+		wrong=1
+	fi
+done
+
 # A pin that stopped running is a pin that stopped holding, and it would do it quietly.
-if [ "$pins" -ne 6 ]; then
-	echo "$pins pins ran, not the 6 this gate has. One was lost rather than deleted." | complain
+if [ "$pins" -ne 8 ]; then
+	echo "$pins pins ran, not the 8 this gate has. One was lost rather than deleted." | complain
 	wrong=1
 fi
 exit "$wrong"
