@@ -302,15 +302,20 @@ mod tests {
             Path::new(&written).is_absolute(),
             "a record read from another directory has to be able to find this: {written}"
         );
-        assert!(written.ends_with("backups/nightly.tar.zst"), "{written}");
+        assert!(
+            Path::new(&written).ends_with("backups/nightly.tar.zst"),
+            "{written}"
+        );
     }
 
     #[test]
     fn an_archive_path_that_is_already_absolute_is_recorded_unchanged() {
-        let given = "/backups/nightly.tar.zst";
-        let record = Record::from_manifest(&manifest(), Some(Path::new(given)), "z6MkTest", true);
+        // Built rather than written down, because what counts as absolute is the platform's
+        // call: `/backups` is a path relative to the current drive on Windows.
+        let given = std::env::temp_dir().join("backups").join("nightly.tar.zst");
+        let record = Record::from_manifest(&manifest(), Some(&given), "z6MkTest", true);
 
-        assert_eq!(record.archive.as_deref(), Some(given));
+        assert_eq!(record.archive, Some(given.display().to_string()));
     }
 
     fn record() -> Record {

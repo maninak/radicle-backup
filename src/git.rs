@@ -595,10 +595,26 @@ pub(crate) mod tests {
             .find(|path| path.extension().is_some_and(|kind| kind == "pack"))
             .expect("repack wrote a pack");
         // `repack` leaves the pack read only, and on Windows that is a file attribute a write
-        // will not clear for itself, so the mode goes back first. Owner-only rather than
-        // `set_readonly(false)`, which on unix hands the file to everybody.
+        // will not clear for itself, so the writability goes back first. Owner-only where the
+        // platform can say that, rather than `set_readonly(false)`, which on unix hands the
+        // file to everybody. Off unix `set_mode` has no bits to set and cannot be the answer.
+        #[cfg(unix)]
         crate::perms::set_mode(&pack, crate::perms::MODE_SECRET)
             .expect("the pack's mode is settable");
+        #[cfg(not(unix))]
+        {
+            let mut permissions = std::fs::metadata(&pack)
+                .expect("the pack is readable")
+                .permissions();
+            // Clippy's objection to this is a unix one, where clearing the flag means `0o777`.
+            // Off unix it is the one attribute bit, and there is no mode to set instead.
+            #[expect(
+                clippy::permissions_set_readonly_false,
+                reason = "off unix this is an attribute, not a mode"
+            )]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(&pack, permissions).expect("the pack's mode is settable");
+        }
         // Truncated to whatever is there when the pack is shorter than the cut, because a
         // slice index that panicked would report a broken test as a broken assertion.
         let whole = std::fs::read(&pack).expect("the pack is readable");
