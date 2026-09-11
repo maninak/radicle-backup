@@ -18,6 +18,9 @@ use crate::manifest::{RepoSelection, Tier};
     version,
     about = "Back up, restore and move a Radicle identity",
     long_about = "Back up, restore and move a Radicle identity, node state and repositories.\n\n\
+                  With no command, `rad-backup` creates an archive, as `create` does, and \
+                  takes the options listed under Options. The global options work with or \
+                  without a command.\n\n\
                   Installed on PATH, this is also `rad backup`.",
     disable_help_subcommand = true
 )]
@@ -29,7 +32,10 @@ pub struct Cli {
     #[command(flatten)]
     pub create: Create,
 
-    #[command(flatten)]
+    /// Under a heading of their own, so that neither `--help` nor the man page mixes them in
+    /// with the options that shape an archive and mean nothing to any other command. Last,
+    /// because clap files every field declared after it under the same heading.
+    #[command(flatten, next_help_heading = "Global options")]
     pub global: Global,
 }
 
@@ -223,10 +229,13 @@ pub struct Global {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Create an archive. The default when no subcommand is given.
+    /// Create an archive. The default when no command is given.
     Create(Create),
 
     /// Restore a Radicle home from an archive.
+    ///
+    /// When a `rad-restore` link to this binary is on PATH, `rad restore <archive>` is the
+    /// same as `rad backup restore <archive>`.
     Restore(Restore),
 
     /// Check that an archive is complete, readable and holds the identity it claims.
@@ -262,7 +271,9 @@ pub enum Command {
     /// Write shell completions to stdout.
     Completions(Completions),
 
-    /// Write the manual page to stdout.
+    /// Print the man page file, for installing where `man rad-backup` finds it.
+    ///
+    /// At a terminal it prints no page, and says how to read the manual instead.
     Man,
 }
 
@@ -482,6 +493,7 @@ pub struct Migrate {
 
 #[derive(Parser, Debug, Clone)]
 pub struct Completions {
+    /// The shell to write completions for.
     #[arg(value_enum)]
     pub shell: clap_complete::Shell,
 }
@@ -558,28 +570,38 @@ mod tests {
     #[test]
     fn every_option_that_reads_an_environment_variable_says_so_in_the_man_page() {
         let command = Cli::command();
-        let mut rendered = Vec::new();
-        clap_mangen::Man::new(command.clone())
-            .render(&mut rendered)
-            .expect("the man page renders");
-        let man = String::from_utf8(rendered).expect("roff is text");
+        let man = String::from_utf8(crate::man::render().expect("the man page renders"))
+            .expect("roff is text");
 
-        let variables: Vec<_> = command
-            .get_arguments()
+        // The page documents the top level's options, then each command's own, except
+        // `create`'s, which are the top level's.
+        let own = |arg: &&clap::Arg| !arg.is_hide_set() && !arg.is_global_set();
+        let documented = command.get_arguments().chain(
+            command
+                .get_subcommands()
+                .filter(|verb| verb.get_name() != "create")
+                .flat_map(|verb| verb.get_arguments().filter(own)),
+        );
+        let mut expected: Vec<String> = documented
             .filter_map(|arg| arg.get_env())
             .map(|var| var.to_string_lossy().into_owned())
             .collect();
+        expected.sort();
         assert!(
-            !variables.is_empty(),
-            "no argument reads an environment variable, so this test guards nothing"
+            expected.len() > 5,
+            "only {} options read an environment variable, so this test guards little",
+            expected.len()
         );
+        let mut variables = expected.clone();
+        variables.dedup();
         for var in &variables {
-            assert!(man.contains(var), "the man page never mentions {var}");
+            let said = format!("\\fB{var}\\fR environment variable");
+            assert_eq!(
+                man.matches(&said).count(),
+                expected.iter().filter(|each| *each == var).count(),
+                "the man page does not say {var} once for each option that reads it"
+            );
         }
-        assert!(
-            man.matches("environment variable").count() >= variables.len(),
-            "the man page names fewer environment variables than the command reads"
-        );
     }
 
     /// A flag whose help names a `RAD_BACKUP_*` variable has to declare one, so that `--help`
@@ -594,9 +616,6 @@ mod tests {
     /// Which variable is not asserted, because a help text may name one it does not read:
     /// `--passphrase-file` describes the whole precedence chain, `RAD_BACKUP_PASSPHRASE`
     /// included, while reading only `RAD_BACKUP_PASSPHRASE_FILE`.
-    ///
-    /// Walks the subcommands too, unlike the man-page test above, which sees only the global
-    /// arguments.
     #[test]
     fn every_flag_that_names_an_environment_variable_declares_one() {
         fn walk(command: &clap::Command, checked: &mut usize) {
@@ -739,6 +758,21 @@ mod tests {
         // Accepted, they interleaved: the JSON report went out after the archive bytes, so
         // `rad-backup --stdout --json > x.age` produced a file age refuses at restore time.
         assert!(Cli::try_parse_from(["rad-backup", "--stdout", "--json"]).is_err());
+    }
+
+    /// clap files every field declared after the `Global` flatten under its heading, so a
+    /// top-level flag added below it would be listed as working with every command.
+    #[test]
+    fn only_a_global_option_is_listed_under_the_global_heading() {
+        let command = Cli::command();
+        let mut checked = 0;
+        for arg in command.get_arguments() {
+            if arg.get_help_heading() == Some("Global options") {
+                assert!(arg.is_global_set(), "--{} is not global", arg.get_id());
+                checked += 1;
+            }
+        }
+        assert!(checked > 5, "only {checked} options are under the heading");
     }
 
     #[test]

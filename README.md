@@ -65,11 +65,23 @@ Any executable called `rad-<name>` on `PATH` becomes `rad <name>`. Installing th
 
 ### Tab completion
 
-The Debian package and the Nix flake install completions for bash, fish and zsh already. Everywhere else, ask the binary for them:
+The Debian package and the Nix flake install completions for bash, fish and zsh already. Everywhere else, run the one line for your shell.
+
+bash:
 
 ```sh
 rad-backup completions bash | sudo tee /etc/bash_completion.d/rad-backup > /dev/null
-rad-backup completions zsh  > ~/.zfunc/_rad-backup        # with ~/.zfunc on $fpath
+```
+
+zsh:
+
+```sh
+echo 'command -v compdef rad-backup >/dev/null && source <(rad-backup completions zsh)' >> ~/.zshrc
+```
+
+fish:
+
+```sh
 rad-backup completions fish > ~/.config/fish/completions/rad-backup.fish
 ```
 

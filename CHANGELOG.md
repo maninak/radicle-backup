@@ -30,6 +30,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore` now compares repositories it used to skip: any repository you first wrote in after the backup was taken, and a private one another delegate or an allowed peer can hold. Only a repository announced to nobody, delegated to you alone and allowed to nobody is left uncompared. The report names up to five of those and `--json` carries them all.
 - `doctor` exits `3` when every check came back "could not be checked", instead of `0`. A run with no `rad`, no readable node database and no archive to open established nothing, and the exit code a monitoring probe reads called that clean. A report mixing "could not be checked" with real answers still exits `0`.
 - `doctor --backup-dir` is now `doctor --dir`, matching `ls` and `prune`, and the checks look in it rather than only naming it in a remedy. `--backup-dir` keeps working and is not going away.
+- `rad backup man` at a terminal now exits `1` with the ways to read the manual, instead of printing the man page file's markup, which is unreadable there. Redirected to a file or a pipe, it still prints the page.
+- `--help` now puts the options that work with every command, such as `--home` and `--json`, under a heading of their own, `Global options`.
 
 ### Fixed
 
@@ -66,6 +68,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `prune` and `rad backup --keep` say when the note beside an archive they deleted would not go. The archive went, the note describing it stayed, and the error saying why was dropped.
 - `ls`, `prune`, `--keep` and the default archive see an archive that is a symlink, and refuse to act on a directory holding an archive of this identity they could not examine, instead of listing it as 0 B or leaving it out.
 - `prune --dir` and `doctor --dir` say in `--help` that they read `RAD_BACKUP_DIR`. They always did, but only `ls --dir` said so.
+- The man page now documents every command and its options, such as `restore --force` and `restore --no-reconcile`, which were in `--help` only. It sent readers to a `rad-backup-<command>(1)` page per command that no package installs.
 - `verify` says "2 problems" rather than "2 problem(s)".
 
 ### Security

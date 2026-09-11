@@ -88,6 +88,21 @@ pub enum Error {
     #[error("{what}\n{remedy}")]
     KeyNotUsable { what: String, remedy: String },
 
+    /// The manual asked for with stdout on a terminal, where roff is noise. A failure rather
+    /// than a note, as `gzip` treats compressed data asked for on a terminal: a capture that
+    /// goes through a pty (`ssh -t`, `docker run -t`) would otherwise install this text as the
+    /// page and report success. Revisit if `man::run` ever shows the page at a terminal.
+    ///
+    /// Names no package that installs the page, because a list here ships inside the binary
+    /// and goes stale as packages come and go.
+    #[error(
+        "this prints the man page file, which is for saving, not for reading here\n\
+         read the manual with `man rad-backup`, or, if that finds no page:\n  \
+         rad-backup man > ~/rad-backup.1 && man ~/rad-backup.1\n\
+         or read `rad-backup --help`, and `--help` after any command"
+    )]
+    ManAtATerminal,
+
     #[error("{0}")]
     Json(#[from] serde_json::Error),
 

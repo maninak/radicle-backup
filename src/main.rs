@@ -15,6 +15,7 @@ mod git;
 mod home;
 mod inventory;
 mod key;
+mod man;
 mod manifest;
 mod perms;
 mod rad;
@@ -66,8 +67,7 @@ fn main() -> ExitCode {
 ///
 /// `| head` closes the pipe on purpose, and a tool that reports that as a failure is a tool
 /// nobody can pipe.
-fn emit(bytes: &[u8]) -> Result<ExitCode> {
-    let mut stdout = std::io::stdout();
+fn emit(stdout: &mut dyn Write, bytes: &[u8]) -> Result<ExitCode> {
     match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
         Ok(()) => Ok(ExitCode::SUCCESS),
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(ExitCode::SUCCESS),
@@ -86,15 +86,9 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
             // writer fails, and `rad-backup completions bash | head` is a writer that fails.
             let mut rendered = Vec::new();
             clap_complete::generate(args.shell, &mut command, name, &mut rendered);
-            return emit(&rendered);
+            return emit(&mut std::io::stdout(), &rendered);
         }
-        Some(Command::Man) => {
-            let mut rendered = Vec::new();
-            clap_mangen::Man::new(Cli::command())
-                .render(&mut rendered)
-                .map_err(error::Error::PathlessIo)?;
-            return emit(&rendered);
-        }
+        Some(Command::Man) => return man::run(man::Stdout::detect(), &mut std::io::stdout()),
         _ => {}
     }
 

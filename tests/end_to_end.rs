@@ -3237,3 +3237,17 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
         assert_success(&ran, &format!("verifying with {variable}"));
     }
 }
+
+/// A package build runs `rad-backup man > rad-backup.1`, so a pipe or a file gets the page
+/// itself, and only a terminal gets told how to read it.
+#[test]
+fn the_man_page_written_to_a_pipe_is_roff_a_package_can_install() {
+    let ran = Command::new(env!("CARGO_BIN_EXE_rad-backup"))
+        .arg("man")
+        .output()
+        .expect("rad-backup runs");
+    assert_success(&ran, "writing the man page");
+    let page = stdout(&ran);
+    assert!(page.contains("\n.TH rad-backup 1 "), "{page}");
+    assert!(page.contains("\n.SH COMMANDS\n"), "{page}");
+}
