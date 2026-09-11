@@ -7,6 +7,7 @@ mod archives;
 mod cli;
 mod cmd;
 mod container;
+mod credits;
 mod crypt;
 mod db;
 mod error;

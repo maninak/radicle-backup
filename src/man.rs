@@ -94,7 +94,43 @@ pub fn render() -> Result<Vec<u8>> {
     for verb in verbs {
         render_verb(&mut page, verb)?;
     }
+    page.extend_from_slice(closing_sections().as_bytes());
     Ok(page)
+}
+
+/// Who makes this, where to report a bug, and the pages that go with it, in the order
+/// man-pages(7) gives. SEE ALSO names `rad`, and the tools that open an archive and put it
+/// back without this one.
+///
+/// `rad clone` rather than `rad seed`: with the node stopped, `rad seed` only records the
+/// policy and says it succeeded, and `rad issue open` then fails on a path in storage, where
+/// `rad clone` says the node has to be running.
+fn closing_sections() -> String {
+    use crate::credits::{AUTHOR, DONATE, RADICLE_TOOLS, RID, SECURITY};
+
+    let rid = roff_text(RID);
+    format!(
+        ".SH AUTHORS\n\
+         A project by {author} for {tools}\n\
+         .PP\n\
+         Donate: {donate}\n\
+         .SH \"REPORTING BUGS\"\n\
+         Issues live on Radicle:\n\
+         .PP\n.RS\n.nf\n\
+         rad clone {rid}\n\
+         rad issue open \\-\\-repo {rid}\n\
+         .fi\n.RE\n\
+         .PP\n\
+         A vulnerability goes to {security} instead, because an issue is public, and a copy \
+         another node has fetched cannot be taken back.\n\
+         .SH \"SEE ALSO\"\n\
+         \\fBage\\fR(1), \\fBgit\\fR(1), \\fBjq\\fR(1), \\fBrad\\fR(1), \\fBtar\\fR(1), \
+         \\fBzstd\\fR(1)\n",
+        author = roff_text(AUTHOR),
+        tools = roff_text(RADICLE_TOOLS),
+        donate = roff_text(DONATE),
+        security = roff_text(SECURITY),
+    )
 }
 
 /// One command's section: its name and aliases, how it is called, what it does, and the
@@ -340,6 +376,26 @@ mod tests {
     }
 
     #[test]
+    fn the_page_ends_with_who_makes_it_where_to_report_a_bug_and_what_to_read_next() {
+        let closing = closing_sections();
+        assert!(page().ends_with(&closing), "the page ends elsewhere");
+        let headings: Vec<&str> = closing
+            .lines()
+            .filter_map(|line| line.strip_prefix(".SH "))
+            .collect();
+        assert_eq!(headings, ["AUTHORS", "\"REPORTING BUGS\"", "\"SEE ALSO\""]);
+        for credit in [
+            crate::credits::RID,
+            crate::credits::AUTHOR,
+            crate::credits::DONATE,
+            crate::credits::RADICLE_TOOLS,
+            crate::credits::SECURITY,
+        ] {
+            assert!(closing.contains(&roff_text(credit)), "{credit}");
+        }
+    }
+
+    #[test]
     fn the_page_turns_hyphenation_off_before_its_first_section() {
         let page = page();
         let before_first_section = page
@@ -386,7 +442,8 @@ mod tests {
         let commands = page
             .split(".SH COMMANDS")
             .nth(1)
-            .expect("the page has a COMMANDS section");
+            .and_then(|rest| rest.strip_suffix(&closing_sections()))
+            .expect("the page has a COMMANDS section, and the closing sections after it");
         assert!(!commands.contains(".SH "), "{commands}");
         assert_eq!(page.matches(".ds Aq").count(), 2, "one `.ie`/`.el` pair");
     }

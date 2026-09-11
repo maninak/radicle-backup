@@ -22,6 +22,7 @@ use crate::manifest::{RepoSelection, Tier};
                   takes the options listed under Options. The global options work with or \
                   without a command.\n\n\
                   Installed on PATH, this is also `rad backup`.",
+    after_long_help = crate::credits::help_footer(),
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -773,6 +774,40 @@ mod tests {
             }
         }
         assert!(checked > 5, "only {checked} options are under the heading");
+    }
+
+    /// `--help` ends with who makes this, where its issues go and how to support it. `-h` is
+    /// for looking up a flag, and so is every command's own help.
+    #[test]
+    fn only_the_top_level_long_help_ends_with_the_credits() {
+        let mut command = Cli::command();
+        let long = command.render_long_help().to_string();
+        assert!(
+            long.trim_end()
+                .ends_with(crate::credits::help_footer().as_str()),
+            "{long}"
+        );
+        assert!(
+            !command
+                .render_help()
+                .to_string()
+                .contains(crate::credits::DONATE)
+        );
+        let mut checked = 0;
+        // Built, so each command carries the global options its own arguments refer to.
+        let mut built = Cli::command();
+        built.build();
+        for verb in built.get_subcommands() {
+            let mut verb = verb.clone();
+            let help = verb.render_long_help().to_string();
+            assert!(
+                !help.contains(crate::credits::DONATE),
+                "`{}`: {help}",
+                verb.get_name()
+            );
+            checked += 1;
+        }
+        assert!(checked > 10, "only {checked} commands were looked at");
     }
 
     #[test]
