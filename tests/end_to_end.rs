@@ -735,10 +735,14 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     assert_success(&ran, "taking a plaintext backup");
     let archive = only_archive(&backups);
 
-    // Plaintext, so the damage is caught by the manifest's digests rather than by age.
+    // Plaintext, so the damage is caught by the manifest's digests rather than by age. A run
+    // of bytes rather than one: about one single-byte flip in five thousand still decodes, to
+    // a tar whose every file is intact, and an archive nothing was lost from verifies clean.
     let mut bytes = std::fs::read(&archive).expect("the archive is readable");
     let middle = bytes.len() / 2;
-    bytes[middle] ^= 0xff;
+    for byte in &mut bytes[middle..middle + 64] {
+        *byte ^= 0xff;
+    }
     std::fs::write(&archive, &bytes).expect("the archive is writable");
 
     let ran = fixture.run(&["verify", &archive.to_string_lossy()], &fixture.home());
