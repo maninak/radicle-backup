@@ -1890,22 +1890,24 @@ fn report(
                 ));
             }
         }
-        if !not_checked.is_empty() {
+        // Under `--no-reconcile` the one line `run` printed is the whole story: the user asked
+        // for no comparison, and a second warning with a remedy reads as a failure.
+        if reconciled.wanted == NetworkCheck::Wanted && !not_checked.is_empty() {
             term.warn(&format!(
-                "{} of {} repositories could not be compared with the network",
+                "{} of {} could not be compared with the network",
                 not_checked.len(),
-                restored.len()
+                term::count(restored.len(), "repository", "repositories")
             ));
-            // Named rather than only counted, and shortlisted rather than listed: under
-            // `--no-reconcile` on a seed this is every repository in the home.
+            // Named rather than only counted, and shortlisted rather than listed: a node that
+            // would not start on a seed makes this every repository in the home.
             term.detail(&term::shortlist(&not_checked));
             // Several causes, and the remedy has to cover them without asserting any. A fetch
-            // that failed is answered by running it again; a run that never asked, a head no
-            // git would take, and a node database this build could not read are not, and
-            // telling somebody to re-run the command that has just run is how the schema check
-            // used to send people to start a node already up.
+            // that failed is answered by running it again; a head no git would take and a node
+            // database this build could not read are not, and telling somebody to re-run the
+            // command that has just run is how the schema check used to send people to start a
+            // node already up.
             term.detail("nothing came back to hold these against. Read any warning above for");
-            term.detail("why, and if this run did ask, `rad sync <rid> --fetch` again with the");
+            term.detail("why, and if a fetch failed, `rad sync <rid> --fetch` again with the");
             term.detail("node running");
         }
         if !nothing_to_compare.is_empty() {
@@ -1998,7 +2000,10 @@ fn report(
                     "the machine this archive came from had a node running when it was taken",
                 ),
             }
-            term.detail("never run two nodes with one key: stop the other one first");
+            // Only a fact about the moment of the backup: nothing here knows whether that
+            // machine still exists, so the advice is conditional on it.
+            term.detail("if that machine still has this key, stop its node before you start");
+            term.detail("this one: two nodes must never run with one key");
         }
         term.detail("start the node with `rad node start`");
     }

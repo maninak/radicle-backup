@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - `doctor` and other commands no longer show a confusing warning about a helper file next to the node's database. SQLite creates that file, it is harmless, and the warning wrongly said the command had just created it, on every run.
+- `restore --no-reconcile` no longer warns that repositories could not be compared. You turned the comparison off, so there is nothing to warn about.
+- `restore` no longer tells you to stop "the other" node as if one were still running. It now says: if the old machine still has your key, stop its node first.
+- `prune` in a script without `--yes` now tells you to add `--yes`. It used to tell you to drop `--dry-run`, which you had not passed.
 
 ## [0.3.0] - 2026-09-11
 

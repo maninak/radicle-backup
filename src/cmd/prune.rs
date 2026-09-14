@@ -72,10 +72,13 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         "Delete them, freeing {}?",
         term::human_bytes(freed)
     ))? {
-        return Err(Error::refused(
-            "nothing was deleted",
-            "run again without --dry-run when you have decided",
-        ));
+        // Two different noes, as in `restore`: somebody who typed `n` has decided, and a run
+        // with nobody to ask needs to be told how to say yes, not to decide.
+        let remedy = match ctx.term.is_interactive() {
+            true => "run again when you want them gone",
+            false => "this run has nobody to ask: pass --yes to delete them",
+        };
+        return Err(Error::refused("nothing was deleted", remedy));
     }
     for archive in &doomed {
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
