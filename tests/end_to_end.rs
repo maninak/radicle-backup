@@ -794,6 +794,33 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
         !said.contains("  not checked"),
         "no run of spaces inside the sentence: {said}"
     );
+
+    // A script reads an unopened repository as a check that is absent, not as one that
+    // failed, which is what a broken archive reports.
+    let ran = fixture
+        .command(
+            &["verify", "--deep", "--json", &archive.to_string_lossy()],
+            &fixture.home(),
+        )
+        .env("GIT", "/nonexistent/git")
+        .output()
+        .expect("rad-backup runs");
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&ran)).expect("the verify report is json");
+    assert_eq!(report["passed"], false, "{report}");
+    let checks = report["checks"]
+        .as_array()
+        .expect("the report lists checks");
+    assert!(
+        !checks
+            .iter()
+            .any(|check| check["checkId"] == "repositories"),
+        "{report}"
+    );
+    assert!(
+        checks.iter().any(|check| check["checkId"] == "public-key"),
+        "the other deep checks still ran: {report}"
+    );
 }
 
 #[test]
@@ -3140,7 +3167,7 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     // The home the archive was taken from: nothing was restored here, so there is no second
     // machine to warn about.
     let ran = fixture.run(&["doctor", "--json"], &fixture.home());
-    assert_eq!(verdict_of(&ran, "key copies"), "pass");
+    assert_eq!(verdict_of(&ran, "key-copies"), "pass");
 
     // How many checks the command runs, asked of the command itself. `doctor.rs` keeps a
     // hand-written list of every check for the rules that sweep their topics, and a tenth
@@ -3156,14 +3183,14 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
 
     // And the home it was restored into, which now holds a key another machine also holds.
     let ran = fixture.run(&["doctor", "--json"], &restored);
-    assert_eq!(verdict_of(&ran, "key copies"), "warn");
+    assert_eq!(verdict_of(&ran, "key-copies"), "warn");
     let report: serde_json::Value =
         serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
     let check = report["checks"]
         .as_array()
         .expect("the report lists checks")
         .iter()
-        .find(|check| check["topic"] == "key copies")
+        .find(|check| check["checkId"] == "key-copies")
         .expect("the check is in the report");
     assert!(
         check["remedy"].is_string(),
@@ -3191,24 +3218,24 @@ fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_
         serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
     // A report at all is the first half of the point: this used to be an sqlite error and no
     // json. The second half is that a check reading nothing from that file still answered.
-    assert_eq!(verdict_of(&ran, "key passphrase"), "pass", "{report}");
+    assert_eq!(verdict_of(&ran, "key-passphrase"), "pass", "{report}");
 
-    for topic in ["public repositories", "unshared work"] {
-        assert_eq!(verdict_of(&ran, topic), "unknown", "{report}");
+    for id in ["public-repositories", "unshared-work"] {
+        assert_eq!(verdict_of(&ran, id), "unknown", "{report}");
         let check = report["checks"]
             .as_array()
             .expect("the report lists checks")
             .iter()
-            .find(|check| check["topic"] == topic)
+            .find(|check| check["checkId"] == id)
             .expect("the check is in the report");
         let remedy = check["remedy"].as_str().unwrap_or_default();
         assert!(
             remedy.contains("could not be read"),
-            "{topic} blamed something other than the file it could not open: {check}"
+            "{id} blamed something other than the file it could not open: {check}"
         );
         assert!(
             !remedy.contains("rad node start"),
-            "{topic} sent the reader to start a node over a database that will not open: {check}"
+            "{id} sent the reader to start a node over a database that will not open: {check}"
         );
     }
 
@@ -3216,20 +3243,21 @@ fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_
     // that would have said something, which this fixture has no way to build: the unit test
     // `a_routing_table_that_would_not_open_is_not_evidence_that_nobody_else_holds_it` holds
     // that half. What this asserts is only that it still answered at all.
-    assert_ne!(verdict_of(&ran, "private repositories"), "", "{report}");
+    assert_ne!(verdict_of(&ran, "private-repositories"), "", "{report}");
 }
 
-/// The verdict of one doctor check, by topic, out of a `--json` run.
-fn verdict_of(ran: &Output, topic: &str) -> String {
+/// The verdict of one doctor check, by `checkId`, out of a `--json` run. By id because that is
+/// what a script matches on, so these tests read the report the same way.
+fn verdict_of(ran: &Output, id: &str) -> String {
     let report: serde_json::Value =
         serde_json::from_str(&stdout(ran)).expect("the doctor report is json");
     report["checks"]
         .as_array()
         .expect("the report lists checks")
         .iter()
-        .find(|check| check["topic"] == topic)
+        .find(|check| check["checkId"] == id)
         .and_then(|check| check["verdict"].as_str())
-        .unwrap_or_else(|| panic!("no check named {topic} in {}", stdout(ran)))
+        .unwrap_or_else(|| panic!("no check with the id {id} in {}", stdout(ran)))
         .to_string()
 }
 

@@ -103,6 +103,20 @@ impl Standing {
         }
     }
 
+    /// The id a script matches on as `standingId`. Ids are frozen once released. `as_str` is
+    /// wording and may change. Named after the matching list in `restore --json`, where one
+    /// exists.
+    fn id(self) -> &'static str {
+        match self {
+            Self::NothingSaysOtherwise => "nothing-reported-otherwise",
+            Self::ArchiveIsAhead => "ahead",
+            Self::ArchiveIsAheadOfAStaleRecord => "ahead-of-a-stale-record",
+            Self::PeerHoldsOther => "at-risk",
+            Self::NothingToCompare => "nothing-to-compare",
+            Self::CouldNotAsk => "not-checked",
+        }
+    }
+
     /// Ordered by what it costs to ignore, so that a repository several nodes disagree about
     /// is reported as the answer that most needs acting on. Safe next to one node and unsafe
     /// next to another is unsafe, and an unknown must not be hidden behind another node's
@@ -1885,7 +1899,11 @@ fn report(
             "home": ctx.home.path().display().to_string(),
             "repositories": restored.len(),
             "standings": standings.iter()
-                .map(|(rid, standing)| serde_json::json!({"rid": rid, "standing": standing.as_str()}))
+                .map(|(rid, standing)| serde_json::json!({
+                    "rid": rid,
+                    "standing": standing.as_str(),
+                    "standingId": standing.id(),
+                }))
                 .collect::<Vec<_>>(),
             "atRisk": at_risk,
             "ahead": ahead,
@@ -2080,6 +2098,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// Every standing id, as the exact string a script matches on. A second copy on purpose:
+    /// an edit to `Standing::id` has to be made twice to ship. Nothing notices a variant left
+    /// out of this list, so a new id needs a line here too.
+    #[test]
+    fn standing_ids_are_pinned_because_scripts_match_on_them() {
+        let pinned = [
+            (Standing::NothingSaysOtherwise, "nothing-reported-otherwise"),
+            (Standing::ArchiveIsAhead, "ahead"),
+            (
+                Standing::ArchiveIsAheadOfAStaleRecord,
+                "ahead-of-a-stale-record",
+            ),
+            (Standing::PeerHoldsOther, "at-risk"),
+            (Standing::NothingToCompare, "nothing-to-compare"),
+            (Standing::CouldNotAsk, "not-checked"),
+        ];
+        for (standing, spelled) in pinned {
+            assert_eq!(standing.id(), spelled);
+        }
+        let distinct: std::collections::BTreeSet<_> =
+            pinned.iter().map(|(standing, _)| standing.id()).collect();
+        assert_eq!(distinct.len(), pinned.len(), "two standings share an id");
+    }
 
     #[test]
     fn a_policy_row_naming_a_flag_is_skipped_without_rad_ever_being_asked() {

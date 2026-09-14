@@ -7,7 +7,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Upgrading
 
 - If you already used `rad backup schedule`, run it again with the same flags, then take a backup. The timer it set up may not have found `rad`. Its backups then left out your private repositories, and with `--keep` they may have deleted the older archives that still had them.
-- If a script matches text in `--json` output, check it. Much of the wording in `doctor`, `restore` and `verify` changed. Three `doctor` checks are renamed: `delegate quorum` is now `sole delegate`, `other seeds` is now `public repositories`, and `signed refs propagation` is now `unshared work`. In `restore --json`, read the `atRisk`, `ahead` and `notChecked` lists instead of the `standing` text.
+- If a script matches text in `doctor`, `verify` or `restore` `--json` output, change it. For `doctor` and `verify`, match each check on its new `checkId` instead. The `doctor` checks once called `delegate quorum`, `other seeds` and `signed refs propagation` have the ids `sole-delegate`, `public-repositories` and `unshared-work`. For `restore`, read the `atRisk`, `ahead` and `notChecked` lists.
+
+### Added
+
+- `doctor --json` and `verify --json` now give each check an id that stays the same when the wording changes. It is called `checkId`. `restore --json` gives each repository one too, called `standingId`.
 
 ### Changed
 
@@ -27,6 +31,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `restore --no-reconcile` no longer warns that repositories could not be compared. You turned the comparison off, so there is nothing to warn about.
 - `diff` now compares which repositories you seed and block, and which peers you follow and block. It used to compare only how many, so swapping one for another showed no change. This starts after your next backup or restore. `diff --json` lists the changes in a new `policies` field, which is `null` until then.
 - `diff` no longer lists a new repository twice.
+- `verify --deep` now shows a failed line for the archived repositories when any of them could not be opened or was empty. It used to show a passed line beside those problems, or no line at all.
 - `doctor` and other commands no longer warn about a helper file next to the node's database. SQLite creates that file, and it is harmless.
 - Several `doctor` findings are corrected. It no longer warns about a recent backup sent to standard output, or claims a machine was never restored. It now says when your node holds no public repositories. When your private repositories are in a different archive from the one it found, it names that archive. On a first run it suggests a full path for `--output`.
 - A backup no longer prints the same warning twice, or says the node is running when it could not tell.

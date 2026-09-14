@@ -40,12 +40,72 @@ pub enum Verdict {
     Skipped,
 }
 
+/// A check's stable identity, printed as `checkId` so a script matches on it and not on
+/// `topic`. Ids are frozen once released. Topics are wording and may change.
+///
+/// Owns its topic, so an id and its topic cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckId {
+    KeyPassphrase,
+    Backup,
+    ArchiveEncryption,
+    ArchiveLocation,
+    PrivateRepositories,
+    SoleDelegate,
+    PublicRepositories,
+    KeyCopies,
+    UnsharedWork,
+}
+
+impl CheckId {
+    /// Spelled out rather than derived from the variant name, so renaming a variant cannot
+    /// change a string scripts already match on.
+    fn id(self) -> &'static str {
+        match self {
+            Self::KeyPassphrase => "key-passphrase",
+            Self::Backup => "backup",
+            Self::ArchiveEncryption => "archive-encryption",
+            Self::ArchiveLocation => "archive-location",
+            Self::PrivateRepositories => "private-repositories",
+            Self::SoleDelegate => "sole-delegate",
+            Self::PublicRepositories => "public-repositories",
+            Self::KeyCopies => "key-copies",
+            Self::UnsharedWork => "unshared-work",
+        }
+    }
+
+    fn topic(self) -> &'static str {
+        match self {
+            Self::KeyPassphrase => "key passphrase",
+            Self::Backup => "backup",
+            Self::ArchiveEncryption => "archive encryption",
+            Self::ArchiveLocation => "archive location",
+            Self::PrivateRepositories => "private repositories",
+            Self::SoleDelegate => "sole delegate",
+            Self::PublicRepositories => "public repositories",
+            Self::KeyCopies => "key copies",
+            Self::UnsharedWork => "unshared work",
+        }
+    }
+}
+
+impl Serialize for CheckId {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.id())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Check {
+    #[serde(rename = "checkId")]
+    pub check_id: CheckId,
     /// What was looked at, never what was hoped for. A topic cannot be read as a claim, so a
     /// failing line can never say the opposite of what it means: "backup: no archive has ever
     /// been taken" is unambiguous where "✗ a backup exists" is a sentence arguing with itself.
-    pub topic: String,
+    pub topic: &'static str,
     pub verdict: Verdict,
     /// What was actually found, as a complete statement that is true on its own.
     pub detail: String,
@@ -54,9 +114,10 @@ pub struct Check {
 }
 
 impl Check {
-    fn new(topic: &str, verdict: Verdict, detail: impl Into<String>) -> Self {
+    fn new(check_id: CheckId, verdict: Verdict, detail: impl Into<String>) -> Self {
         Self {
-            topic: topic.to_string(),
+            check_id,
+            topic: check_id.topic(),
             verdict,
             detail: detail.into(),
             remedy: None,
@@ -335,15 +396,15 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
 }
 
 fn check_key_protection(secret: &SecretKey, key_path: &std::path::Path) -> Check {
-    const TOPIC: &str = "key passphrase";
+    const ID: CheckId = CheckId::KeyPassphrase;
     match secret.protection() {
         crate::key::Protection::Encrypted { cipher, kdf } => Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             format!("the key is encrypted with {cipher} ({kdf})"),
         ),
         crate::key::Protection::Plaintext => Check::new(
-            TOPIC,
+            ID,
             Verdict::Fail,
             "the key is stored in the clear, so anyone who can read the file is you",
         )
@@ -452,7 +513,7 @@ fn check_backup_freshness(
     directory: &std::path::Path,
     now: jiff::Timestamp,
 ) -> Check {
-    const TOPIC: &str = "backup";
+    const ID: CheckId = CheckId::Backup;
     // Absolute, because the directory defaults to `.` and the remedy below is a command to copy:
     // `rad backup --output .` means a different place in every shell it is pasted into.
     let looked_in = std::path::absolute(directory)
@@ -489,7 +550,7 @@ fn check_backup_freshness(
         (None, None) => {
             if let state::Stored::Unreadable { .. } = stored {
                 return Check::new(
-                    TOPIC,
+                    ID,
                     Verdict::Unknown,
                     format!(
                         "no archive of your identity in {looked_in}, and rad-backup's record of \
@@ -499,7 +560,7 @@ fn check_backup_freshness(
                 .with_remedy("take another to replace it: rad backup");
             }
             return Check::new(
-                TOPIC,
+                ID,
                 Verdict::Fail,
                 format!(
                     "no archive of your identity in {looked_in}, and rad-backup has no record of \
@@ -524,24 +585,24 @@ fn check_backup_freshness(
         // alarm open forever: one archive taken on a machine whose clock ran fast reported
         // "taken -300 days ago" and never went stale again.
         Some(days) if days < 0 => Check::new(
-            TOPIC,
+            ID,
             Verdict::Unknown,
             format!("{named} is stamped in the future, so its age cannot be judged{beside}"),
         )
         .with_remedy("check the clock on the machine that took it, then `rad backup`"),
         Some(days) if days <= STALE_AFTER_DAYS => Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             format!("{named} was taken {}{beside}", term::days_ago(days)),
         ),
         Some(days) => Check::new(
-            TOPIC,
+            ID,
             Verdict::Warn,
             format!("{named} was taken {}{beside}", term::days_ago(days)),
         )
         .with_remedy("rad backup"),
         None => Check::new(
-            TOPIC,
+            ID,
             Verdict::Unknown,
             format!("{named} carries a timestamp that does not parse{beside}"),
         ),
@@ -593,13 +654,13 @@ fn check_archive_encryption(
     newest: Option<&crate::archives::Archive>,
     record: Option<&state::Record>,
 ) -> Result<Check> {
-    const TOPIC: &str = "archive encryption";
+    const ID: CheckId = CheckId::ArchiveEncryption;
     let Some(archive) = newest else {
         // Nothing here to open, so the record is all there is, and it is hearsay about a file
         // this run never saw. It is still worth repeating when what it remembers is bad news.
         return Ok(match record {
             Some(record) if !record.is_encrypted => Check::new(
-                TOPIC,
+                ID,
                 Verdict::Warn,
                 "no archive of your identity was found, and the last one rad-backup wrote was \
                  not encrypted",
@@ -609,18 +670,18 @@ fn check_archive_encryption(
                  holding it can read it",
             ),
             Some(_) => Check::new(
-                TOPIC,
+                ID,
                 Verdict::Unknown,
                 "no archive of your identity was found, so none could be opened",
             ),
-            None => Check::new(TOPIC, Verdict::Skipped, NO_ARCHIVE_FOUND),
+            None => Check::new(ID, Verdict::Skipped, NO_ARCHIVE_FOUND),
         });
     };
 
     let name = archive.name();
     if !crate::crypt::looks_encrypted(&archive.path)? {
         return Ok(Check::new(
-            TOPIC,
+            ID,
             Verdict::Fail,
             format!("{name} can be read by anyone who holds it, your key file included"),
         )
@@ -631,7 +692,7 @@ fn check_archive_encryption(
         // that prompts is one people stop running. The header is enough to say which key it
         // wants, and a passphrase is something its owner can test whenever they like.
         return Ok(Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             format!("{name} opens only with the passphrase it was sealed under"),
         ));
@@ -639,7 +700,7 @@ fn check_archive_encryption(
 
     if identities.files.is_empty() {
         return Ok(Check::new(
-            TOPIC,
+            ID,
             Verdict::Unknown,
             format!("{name} is encrypted to a key, and no key was offered to try against it"),
         )
@@ -660,7 +721,7 @@ fn check_archive_encryption(
     Ok(
         match crate::container::Reader::open(&archive.path, None, &silent) {
             Ok(_) => Check::new(
-                TOPIC,
+                ID,
                 Verdict::Pass,
                 format!("{name} is encrypted to a key, and the key offered here opens it"),
             ),
@@ -670,8 +731,8 @@ fn check_archive_encryption(
             // shows.
             Err(
                 Error::KeysStayedLocked { what, remedy } | Error::KeyNotUsable { what, remedy },
-            ) => Check::new(TOPIC, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy),
-            Err(e) => Check::new(TOPIC, Verdict::Fail, format!("{name} did not open: {e}"))
+            ) => Check::new(ID, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy),
+            Err(e) => Check::new(ID, Verdict::Fail, format!("{name} did not open: {e}"))
                 .with_remedy(
                     "an archive whose key is gone is not a backup; take another one you can open",
                 ),
@@ -685,7 +746,7 @@ fn check_archive_location(
     newest: Option<&crate::archives::Archive>,
     record: Option<&state::Record>,
 ) -> Check {
-    const TOPIC: &str = "archive location";
+    const ID: CheckId = CheckId::ArchiveLocation;
     // The file that is there first, then the path the record remembers, which may well be on
     // another disk entirely and is the more interesting answer when it is.
     let recorded = record.and_then(|record| record.archive.as_ref());
@@ -697,7 +758,7 @@ fn check_archive_location(
     let Some(path) = judged else {
         return match (record, recorded) {
             (_, Some(archive)) => Check::new(
-                TOPIC,
+                ID,
                 Verdict::Unknown,
                 format!("{archive} is not there now, so where it is cannot be checked"),
             )
@@ -705,11 +766,11 @@ fn check_archive_location(
                 "if you moved it to another disk, nothing is wrong. If not, run `rad backup`",
             ),
             (Some(_), None) => Check::new(
-                TOPIC,
+                ID,
                 Verdict::Unknown,
                 "the last archive went to standard output, so where it is cannot be checked",
             ),
-            (None, None) => Check::new(TOPIC, Verdict::Skipped, NO_ARCHIVE_FOUND),
+            (None, None) => Check::new(ID, Verdict::Skipped, NO_ARCHIVE_FOUND),
         };
     };
 
@@ -720,7 +781,7 @@ fn check_archive_location(
         // machine, and this tool has no way to know whether one is watching. Failing a posture
         // it cannot evaluate would make `doctor` exit 3 at somebody who is properly covered.
         Some(true) => Check::new(
-            TOPIC,
+            ID,
             Verdict::Warn,
             format!("{name} is on the same disk as your Radicle data"),
         )
@@ -728,12 +789,12 @@ fn check_archive_location(
         // A different filesystem is not always a different disk: two partitions of one drive
         // answer the same way as a second machine would, so the pass says filesystem.
         Some(false) => Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             format!("{name} is on a different filesystem from your Radicle data"),
         ),
         None => Check::new(
-            TOPIC,
+            ID,
             Verdict::Unknown,
             format!("{name} and your Radicle data could not be compared"),
         ),
@@ -761,10 +822,10 @@ fn check_private_coverage(
     newest: Option<&crate::archives::Archive>,
     routing_is_unreadable: bool,
 ) -> Check {
-    const TOPIC: &str = "private repositories";
+    const ID: CheckId = CheckId::PrivateRepositories;
     let private: Vec<&crate::manifest::RepoRecord> = inventory.private().collect();
     if private.is_empty() {
-        return Check::new(TOPIC, Verdict::Pass, "there are none to lose");
+        return Check::new(ID, Verdict::Pass, "there are none to lose");
     }
     let vouched = record.is_some_and(|record| record_is_about(record, newest));
 
@@ -779,7 +840,7 @@ fn check_private_coverage(
     if missing.is_empty() {
         return match vouched {
             true => Check::new(
-                TOPIC,
+                ID,
                 Verdict::Pass,
                 format!("{} in the newest archive", every(private.len())),
             ),
@@ -790,7 +851,7 @@ fn check_private_coverage(
                 let all = every(private.len());
                 match (record.and_then(|record| record.archive.as_deref()), newest) {
                     (None, _) => Check::new(
-                        TOPIC,
+                        ID,
                         Verdict::Unknown,
                         format!(
                             "{all} in the last archive, which went to standard output, \
@@ -798,7 +859,7 @@ fn check_private_coverage(
                         ),
                     ),
                     (Some(recorded), None) => Check::new(
-                        TOPIC,
+                        ID,
                         Verdict::Unknown,
                         format!("{all} in {recorded}, which was not found"),
                     )
@@ -807,7 +868,7 @@ fn check_private_coverage(
                          private`",
                     ),
                     (Some(recorded), Some(found)) => Check::new(
-                        TOPIC,
+                        ID,
                         Verdict::Unknown,
                         format!(
                             "{all} in {recorded}, but the archive found is {}",
@@ -829,7 +890,7 @@ fn check_private_coverage(
     if routing_is_unreadable {
         let (count, verb) = (missing.len(), term::is_or_are(missing.len()));
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Unknown,
             format!(
                 "{count} of {} {verb} in no archive, and whether any other node holds them \
@@ -866,7 +927,7 @@ fn check_private_coverage(
     } else {
         Verdict::Fail
     };
-    Check::new(TOPIC, verdict, detail).with_remedy("rad backup --repos private")
+    Check::new(ID, verdict, detail).with_remedy("rad backup --repos private")
 }
 
 /// Whether losing the key would also cost the repositories nobody else can update.
@@ -884,10 +945,10 @@ fn check_sole_delegate(inventory: &Inventory, key_is_archived: bool) -> Check {
         .iter()
         .filter(|repo| repo.is_delegate)
         .count();
-    const TOPIC: &str = "sole delegate";
+    const ID: CheckId = CheckId::SoleDelegate;
     if sole.is_empty() {
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             if delegated == 0 {
                 "you are not a delegate of any repository on your node".to_string()
@@ -906,14 +967,14 @@ fn check_sole_delegate(inventory: &Inventory, key_is_archived: bool) -> Check {
     // here reads, so the hint says how to add one and makes no claim about how many is best.
     if !key_is_archived {
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Warn,
             format!("if you lose your key, nobody can update {count}: {names}"),
         )
         .with_remedy("back up your key: rad backup");
     }
     Check::new(
-        TOPIC,
+        ID,
         Verdict::Pass,
         format!("you are the only delegate of {count}: {names}"),
     )
@@ -991,12 +1052,12 @@ fn check_replication(
     // visibility, and passing it here put a repository that may well be private into a list
     // whose remedy is `rad sync --announce`. The caller qualifies the count with how many
     // could not be described.
-    const TOPIC: &str = "public repositories";
+    const ID: CheckId = CheckId::PublicRepositories;
     let public = inventory.records.iter().filter(|repo| repo.is_public());
     // "None here" only when every identity was read. Otherwise nothing is known to be public,
     // and an unreadable database is the more useful thing to say.
     if public.clone().next().is_none() && inventory.identities_not_read() == 0 {
-        return Check::new(TOPIC, Verdict::Pass, "your node holds none");
+        return Check::new(ID, Verdict::Pass, "your node holds none");
     }
     let alone: Vec<&str> = public
         .filter(|repo| routing.get(&repo.rid).copied().unwrap_or(0) == 0)
@@ -1010,20 +1071,20 @@ fn check_replication(
             }
             _ => "which other nodes hold them could not be read",
         };
-        return Check::new(TOPIC, Verdict::Unknown, found).with_remedy(empty_because(
+        return Check::new(ID, Verdict::Unknown, found).with_remedy(empty_because(
             nothing_came_back,
             "let it connect to other nodes",
         ));
     }
     if alone.is_empty() {
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             "every one is held by at least one other node",
         );
     }
     Check::new(
-        TOPIC,
+        ID,
         Verdict::Warn,
         format!(
             "{} {} held by no other node: {}",
@@ -1053,7 +1114,7 @@ fn check_sigrefs_propagation(
     node_id: &str,
     nothing_came_back: &NothingCameBack,
 ) -> Check {
-    const TOPIC: &str = "unshared work";
+    const ID: CheckId = CheckId::UnsharedWork;
     // Only a repository known to be public. One whose identity document was never read is not
     // known to be anything, and this list ends in `rad sync --announce`. No signed refs of our
     // own means nothing of ours to share, not work stuck here.
@@ -1065,7 +1126,7 @@ fn check_sigrefs_propagation(
         .collect();
     if yours.is_empty() && inventory.identities_not_read() == 0 {
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             "you have no changes in any public repository on your node",
         );
@@ -1077,7 +1138,7 @@ fn check_sigrefs_propagation(
             }
             _ => "what other nodes hold could not be read",
         };
-        return Check::new(TOPIC, Verdict::Unknown, found).with_remedy(empty_because(
+        return Check::new(ID, Verdict::Unknown, found).with_remedy(empty_because(
             nothing_came_back,
             "run `rad backup doctor` again once it has synced",
         ));
@@ -1097,13 +1158,13 @@ fn check_sigrefs_propagation(
 
     if here_only.is_empty() {
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             "your latest changes to every public repository have reached another node",
         );
     }
     Check::new(
-        TOPIC,
+        ID,
         Verdict::Warn,
         format!(
             "your latest changes to {} have reached no other node: {}",
@@ -1131,12 +1192,12 @@ fn check_sigrefs_propagation(
 /// archive" printed a green line about the double-signing hazard at exactly the people most
 /// likely to be in it.
 fn check_second_key_copy(stored: &state::Stored) -> Check {
-    const TOPIC: &str = "key copies";
+    const ID: CheckId = CheckId::KeyCopies;
     let record = match stored {
         state::Stored::Record(record) => record,
         state::Stored::Absent => {
             return Check::new(
-                TOPIC,
+                ID,
                 Verdict::Unknown,
                 "rad-backup has no record of where this machine's Radicle data came from, so \
                  it cannot tell whether another machine holds the same key",
@@ -1148,7 +1209,7 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
         }
         state::Stored::Unreadable { .. } => {
             return Check::new(
-                TOPIC,
+                ID,
                 Verdict::Unknown,
                 "rad-backup's record of where this machine's Radicle data came from could not \
                  be read, so it cannot tell whether another machine holds the same key",
@@ -1164,7 +1225,7 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
     // record says. A home restored and then backed up lands here too.
     let Some(restored) = record.restored.as_ref() else {
         return Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             "the last thing rad-backup recorded on this machine was a backup, not a restore",
         );
@@ -1176,7 +1237,7 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
         // good one, but a sentence that stated it as fact would be stating something it cannot
         // see, and `--keep-source` is exactly the case where it would be wrong.
         Some(true) => Check::new(
-            TOPIC,
+            ID,
             Verdict::Pass,
             "your Radicle data was moved here, and the archive says the old machine retires its \
              key",
@@ -1185,7 +1246,7 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
         // and telling somebody their identity is being double-signed when it is not would send
         // them to retire a key they still need.
         Some(false) => Check::new(
-            TOPIC,
+            ID,
             Verdict::Warn,
             match (
                 restored.source_node_was_running,
@@ -1210,7 +1271,7 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
              backup move` next time, which retires its key for you",
         ),
         None => Check::new(
-            TOPIC,
+            ID,
             Verdict::Unknown,
             "your Radicle data was restored from an older archive that does not say whether the \
              old machine retires its key",
@@ -1225,6 +1286,32 @@ mod tests {
 
     use super::*;
     use crate::key::tests::TestScratch;
+
+    /// Every check id, as the exact JSON string a script matches on. A second copy on purpose:
+    /// an edit to `CheckId::id` has to be made twice to ship. Nothing notices a variant left
+    /// out of this list, so a new id needs a line here too.
+    #[test]
+    fn check_ids_are_pinned_because_scripts_match_on_them() {
+        let pinned = [
+            (CheckId::KeyPassphrase, "key-passphrase"),
+            (CheckId::Backup, "backup"),
+            (CheckId::ArchiveEncryption, "archive-encryption"),
+            (CheckId::ArchiveLocation, "archive-location"),
+            (CheckId::PrivateRepositories, "private-repositories"),
+            (CheckId::SoleDelegate, "sole-delegate"),
+            (CheckId::PublicRepositories, "public-repositories"),
+            (CheckId::KeyCopies, "key-copies"),
+            (CheckId::UnsharedWork, "unshared-work"),
+        ];
+        for (id, spelled) in pinned {
+            assert_eq!(
+                serde_json::to_value(id).expect("a check id serializes"),
+                spelled
+            );
+        }
+        let distinct: BTreeSet<_> = pinned.iter().map(|(id, _)| id.id()).collect();
+        assert_eq!(distinct.len(), pinned.len(), "two checks share an id");
+    }
 
     fn tally(passed: usize, warned: usize, failed: usize, unknown: usize, skipped: usize) -> Tally {
         Tally {
@@ -1424,7 +1511,7 @@ mod tests {
             ),
         ]
         .into_iter()
-        .map(|check| check.topic)
+        .map(|check| check.topic.to_string())
         .collect()
     }
 
@@ -1458,19 +1545,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn a_topic_does_not_change_with_the_verdict_so_two_runs_can_be_compared_line_by_line() {
-        let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
-        let taken = found_freshness("2026-08-13T12:00:00Z", now);
-        let old = found_freshness("2026-05-01T12:00:00Z", now);
-        let never = recorded_freshness(&state::Stored::Absent, now);
-        assert_eq!(taken.verdict, Verdict::Pass);
-        assert_eq!(old.verdict, Verdict::Warn);
-        assert_eq!(never.verdict, Verdict::Fail);
-        assert_eq!(taken.topic, never.topic);
-        assert_eq!(old.topic, never.topic);
     }
 
     #[test]

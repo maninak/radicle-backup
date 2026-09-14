@@ -17,11 +17,45 @@ use crate::key::{Identity, SecretKey};
 use crate::manifest::Manifest;
 use crate::term;
 
+/// A check's stable identity, printed as `checkId` so a script matches on it and not on the
+/// message. Ids are frozen once released. Messages are wording and may change.
+///
+/// One id per thing looked at, never per outcome: `passed` carries how it went and `problems`
+/// says why, so a script asks one question of one id. Never carries a count or a DID the way
+/// the message beside it can, since those vary between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckId {
+    /// Every entry's digest against the archive's own record.
+    Files,
+    /// The private key's entry exists, asked of every run. The deep pass's `PrivateKey` reads
+    /// it, which a shallow run never does, so the two cannot share an id.
+    PrivateKeyPresent,
+    PublicKey,
+    PrivateKey,
+    SeedingPolicies,
+    Repositories,
+}
+
+impl CheckId {
+    /// Spelled out rather than derived from the variant name, so renaming a variant cannot
+    /// change a string scripts already match on.
+    fn id(self) -> &'static str {
+        match self {
+            Self::Files => "files",
+            Self::PrivateKeyPresent => "private-key-present",
+            Self::PublicKey => "public-key",
+            Self::PrivateKey => "private-key",
+            Self::SeedingPolicies => "seeding-policies",
+            Self::Repositories => "repositories",
+        }
+    }
+}
+
 /// What a verification found. Empty problems is the only passing result.
 pub struct Report {
     pub manifest: Manifest,
     pub problems: Vec<String>,
-    pub checks: Vec<(String, bool)>,
+    pub checks: Vec<(CheckId, String, bool)>,
     /// The archive that was checked, which is not always the one the caller named: with no
     /// argument this is whichever one was newest.
     pub archive: std::path::PathBuf,
@@ -41,7 +75,11 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
             "archive": report.archive.display().to_string(),
             "passed": report.passed(),
             "checks": report.checks.iter()
-                .map(|(name, ok)| serde_json::json!({"check": name, "passed": ok}))
+                .map(|(id, name, ok)| serde_json::json!({
+                    "checkId": id.id(),
+                    "check": name,
+                    "passed": ok,
+                }))
                 .collect::<Vec<_>>(),
             "problems": report.problems,
             "identity": report.manifest.identity.did,
@@ -49,7 +87,7 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
         }))?;
     } else {
         let term = &ctx.term;
-        for (name, passed) in &report.checks {
+        for (_, name, passed) in &report.checks {
             if *passed {
                 term.ok(name);
             } else {
@@ -113,6 +151,7 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
 
     let mismatches = scan.mismatches();
     checks.push((
+        CheckId::Files,
         format!("{} files in the archive are intact", scan.observed.len()),
         mismatches.is_empty(),
     ));
@@ -120,6 +159,7 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
 
     let secret_key_present = scan.observed.contains_key("keys/radicle");
     checks.push((
+        CheckId::PrivateKeyPresent,
         "the private key is in the archive".to_string(),
         secret_key_present,
     ));
@@ -151,14 +191,18 @@ fn unreadable(e: &crate::error::Error) -> String {
 fn check_unpacked_home(
     staging: &Path,
     manifest: &Manifest,
-    checks: &mut Vec<(String, bool)>,
+    checks: &mut Vec<(CheckId, String, bool)>,
     problems: &mut Vec<String>,
 ) -> Result<()> {
     let public_key_path = staging.join("keys/radicle.pub");
     match Identity::read(&public_key_path) {
         Ok(identity) => {
             let matches = identity.did() == manifest.identity.did;
-            checks.push((format!("the public key is {}", identity.did()), matches));
+            checks.push((
+                CheckId::PublicKey,
+                format!("the public key is {}", identity.did()),
+                matches,
+            ));
             if !matches {
                 problems.push(format!(
                     "the public key in the archive is {}, but the archive's record names {}",
@@ -168,7 +212,11 @@ fn check_unpacked_home(
             }
         }
         Err(e) => {
-            checks.push(("the public key is readable".to_string(), false));
+            checks.push((
+                CheckId::PublicKey,
+                "the public key is readable".to_string(),
+                false,
+            ));
             problems.push(format!(
                 "the public key could not be read: {}",
                 unreadable(&e)
@@ -181,6 +229,7 @@ fn check_unpacked_home(
             Ok(identity) => {
                 let matches = identity.did() == manifest.identity.did;
                 checks.push((
+                    CheckId::PrivateKey,
                     "the private key belongs to that identity".to_string(),
                     matches,
                 ));
@@ -191,12 +240,20 @@ fn check_unpacked_home(
                 }
             }
             Err(e) => {
-                checks.push(("the private key is usable".to_string(), false));
+                checks.push((
+                    CheckId::PrivateKey,
+                    "the private key is usable".to_string(),
+                    false,
+                ));
                 problems.push(format!("the private key could not be used: {e}"));
             }
         },
         Err(e) => {
-            checks.push(("the private key is readable".to_string(), false));
+            checks.push((
+                CheckId::PrivateKey,
+                "the private key is readable".to_string(),
+                false,
+            ));
             problems.push(format!(
                 "the private key could not be read: {}",
                 unreadable(&e)
@@ -211,6 +268,7 @@ fn check_unpacked_home(
                 let seeded = policies.seeded().count();
                 let matches = seeded == manifest.policies.seeded;
                 checks.push((
+                    CheckId::SeedingPolicies,
                     format!("{seeded} seeding policies can be restored"),
                     matches,
                 ));
@@ -223,7 +281,11 @@ fn check_unpacked_home(
                 }
             }
             Err(e) => {
-                checks.push(("the policy database can be opened".to_string(), false));
+                checks.push((
+                    CheckId::SeedingPolicies,
+                    "the policy database can be opened".to_string(),
+                    false,
+                ));
                 problems.push(format!("the policy database could not be opened: {e}"));
             }
         }
@@ -239,6 +301,9 @@ fn check_unpacked_home(
         // Not a silent return: without git the bundles are never opened, and a report that
         // said "complete" over an unopened bundle is the same report a fully verified archive
         // gets. The archive may be fine; this run cannot say so.
+        //
+        // No `repositories` check here: a failed one reads the same as a broken archive, and
+        // an absent one is what a check that did not run looks like.
         if carried > 0 {
             problems.push(format!(
                 "git was not found, so {} in this archive could not be checked. Install git \
@@ -264,15 +329,68 @@ fn check_unpacked_home(
             )),
         }
     }
-    if bundles_opened > 0 {
-        checks.push((
-            crate::term::count(
-                bundles_opened,
-                "archived repository can be opened",
-                "archived repositories can be opened",
-            ),
-            true,
-        ));
-    }
+    checks.extend(repositories_check(bundles_opened, carried));
     Ok(())
+}
+
+/// The check over the archived repositories, passed only when every one opened with work in
+/// it. Present whenever the archive carries any, so one bad repository among good ones fails
+/// it. `None` when it carries none, since there is nothing to report on.
+fn repositories_check(opened: usize, carried: usize) -> Option<(CheckId, String, bool)> {
+    if carried == 0 {
+        return None;
+    }
+    let passed = opened == carried;
+    // One wording for both outcomes, naming only what was tested: git lists each bundle's
+    // refs and never unpacks it, so "restored" would claim more.
+    let can_be_opened = crate::term::count(
+        carried,
+        "archived repository can be opened",
+        "archived repositories can be opened",
+    );
+    let said = if passed {
+        can_be_opened
+    } else {
+        format!("{opened} of {can_be_opened}")
+    };
+    Some((CheckId::Repositories, said, passed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every check id, as the exact string a script matches on. A second copy on purpose: an
+    /// edit to `CheckId::id` has to be made twice to ship. Nothing notices a variant left out
+    /// of this list, so a new id needs a line here too.
+    #[test]
+    fn check_ids_are_pinned_because_scripts_match_on_them() {
+        let pinned = [
+            (CheckId::Files, "files"),
+            (CheckId::PrivateKeyPresent, "private-key-present"),
+            (CheckId::PublicKey, "public-key"),
+            (CheckId::PrivateKey, "private-key"),
+            (CheckId::SeedingPolicies, "seeding-policies"),
+            (CheckId::Repositories, "repositories"),
+        ];
+        for (id, spelled) in pinned {
+            assert_eq!(id.id(), spelled);
+        }
+        let distinct: std::collections::BTreeSet<_> =
+            pinned.iter().map(|(id, _)| id.id()).collect();
+        assert_eq!(distinct.len(), pinned.len(), "two checks share an id");
+    }
+
+    #[test]
+    fn one_repository_that_did_not_open_fails_the_repositories_check_however_many_did() {
+        let passed = |opened, carried| repositories_check(opened, carried).map(|check| check.2);
+        assert_eq!(passed(3, 4), Some(false));
+        assert_eq!(
+            passed(0, 2),
+            Some(false),
+            "none opening is still a failed line"
+        );
+        assert_eq!(passed(4, 4), Some(true));
+        assert_eq!(passed(0, 0), None);
+    }
 }
