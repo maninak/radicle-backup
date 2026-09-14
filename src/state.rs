@@ -42,8 +42,15 @@ pub struct Record {
     /// This peer's signed refs per repository, as they were. What `diff` compares against.
     #[serde(default)]
     pub sigrefs: BTreeMap<String, String>,
+    /// Still written beside `policies`, because an older version of this tool requires them
+    /// to read the file at all. Revisit if a state file ever gains a version field.
     pub seeded: usize,
     pub followed: usize,
+    /// Which repositories and peers the home seeded, followed and blocked, by id. What `diff`
+    /// compares against, since equal counts hide a swap of one repository for another.
+    /// `None` in a record written before these were kept, which only has the counts above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<PolicySets>,
     /// Set when a restore, rather than a backup, wrote this record.
     ///
     /// Cleared by the next backup taken here, deliberately: once this machine is taking its
@@ -51,6 +58,34 @@ pub struct Record {
     /// answered is one people learn to scroll past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<Restored>,
+}
+
+/// The policies of a home as sets of ids.
+///
+/// Blocks are kept too. An archive carries the policy database, so a block added after it is
+/// one a restore would lose, and a node that lost it fetches from that peer again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicySets {
+    #[serde(default)]
+    pub seeded: BTreeSet<String>,
+    #[serde(default)]
+    pub followed: BTreeSet<String>,
+    #[serde(default)]
+    pub blocked_repos: BTreeSet<String>,
+    #[serde(default)]
+    pub blocked_peers: BTreeSet<String>,
+}
+
+impl PolicySets {
+    pub fn of(policies: &crate::db::Policies) -> Self {
+        Self {
+            seeded: policies.seeded().map(|p| p.rid.clone()).collect(),
+            followed: policies.followed().map(|p| p.nid.clone()).collect(),
+            blocked_repos: policies.blocked_repos().map(|p| p.rid.clone()).collect(),
+            blocked_peers: policies.blocked_peers().map(|p| p.nid.clone()).collect(),
+        }
+    }
 }
 
 /// What a restore knows about where this home came from.
@@ -120,6 +155,9 @@ impl Record {
                 .collect(),
             seeded: manifest.policies.seeded,
             followed: manifest.policies.followed,
+            // The manifest carries only counts. Each writer fills this from the policies it
+            // read, and a record left without them is compared by count.
+            policies: None,
             // A backup records nothing here. Only a restore knows where a home came from, and
             // it sets this after building the record.
             restored: None,
@@ -333,6 +371,7 @@ mod tests {
             sigrefs: BTreeMap::new(),
             seeded: 45,
             followed: 3,
+            policies: None,
             restored: None,
         }
     }

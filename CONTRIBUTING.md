@@ -36,6 +36,17 @@ The code follows a consistent set of habits. Match them rather than your own:
 
 Every constraint states its reason. If you meet one whose reason no longer holds, say so and propose the change; a rule nobody may question is a rule nobody can fix.
 
+## Messages and docs
+
+Anything a user reads, in the terminal, the README or the changelog, is written for someone who has never read the code:
+
+- Short sentences, one idea each, separated by full stops.
+- When a message points at something, say which thing specifically. Write "the restored repository", "your node" or the path.
+- Avoid internal words such as signed refs, manifest, schema or routing table. Prefer the words `rad` itself shows users.
+- Say whether the user must act, and how.
+- Keep every message true in every branch that prints it.
+- Docs do not copy the code's cases (each exit-code trigger, each message). They state the rule and leave the details to the output.
+
 ## Commits
 
 Conventional commits, lowercase subject in the imperative mood, under 72 characters, no body unless the reason is genuinely not derivable from the diff:

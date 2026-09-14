@@ -113,8 +113,7 @@ pub struct Manifest {
     pub repos: Vec<RepoRecord>,
     #[serde(default)]
     pub policies: PolicySummary,
-    /// Things the user should know that did not stop the run: a skipped repository, a
-    /// node that was running.
+    /// Things the user should know that did not stop the run, such as a skipped repository.
     #[serde(default)]
     pub warnings: Vec<String>,
 }

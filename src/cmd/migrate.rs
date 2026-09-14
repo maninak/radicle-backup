@@ -26,24 +26,21 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     if !state.is_stopped() {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
-                format!("whether the node is running cannot be told: {doubt}"),
-                "make sure it is stopped and run the move again: two nodes sharing one key is \
-                 what this refusal is for",
+                format!("could not tell whether your node is running\n{doubt}"),
+                "make sure your node is stopped, then run the move again",
             ),
             None => match ctx.home.borrowed_socket() {
                 Some(socket) => Error::refused(
                     format!(
-                        "a node answered on {}, which RAD_SOCKET names rather than this home's \
-                         own socket",
+                        "a node is running on {}, the socket RAD_SOCKET points to",
                         socket.display()
                     ),
-                    "stop that node, or unset RAD_SOCKET if it belongs to another home, then \
-                     run the move again",
+                    "stop that node, or unset RAD_SOCKET if that node uses other Radicle data. \
+                     Then run the move again",
                 ),
                 None => Error::refused(
-                    "the node is running",
-                    "run `rad node stop` first: a move that leaves it running is how two nodes \
-                     end up sharing one key",
+                    "your node is running",
+                    "run `rad node stop`, then run the move again",
                 ),
             },
         });
@@ -74,8 +71,8 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     // left.
     if outcome.is_incomplete {
         return Err(Error::refused(
-            "the archive this move would rely on is missing repositories that could not be bundled",
-            "fix or remove the damaged repositories, then run the move again",
+            "the move stopped because the archive may be missing repositories",
+            "fix what the backup reported above, then run the move again",
         ));
     }
     let archive = outcome.path.ok_or_else(|| {
@@ -87,7 +84,7 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
 
     ctx.term.blank();
     ctx.term
-        .step("checking the archive before retiring anything");
+        .step("checking the archive before retiring the key on this machine");
     let report = verify::check(
         ctx,
         &Verify {
@@ -102,53 +99,63 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
             ctx.term.fail(problem);
         }
         return Err(Error::refused(
-            "the archive did not verify, so this machine's key was left alone",
-            "fix the problems above and run the move again",
+            "the archive failed its check. The key on this machine was not changed",
+            "fix the problems above, then run the move again",
         ));
     }
-    ctx.term.ok("the archive restores this identity");
+    ctx.term.ok("the archive can restore your identity");
 
     if args.keep_source {
         ctx.term
-            .warn("--keep-source: this machine keeps its key, and you now have two copies");
+            .warn("--keep-source: this machine still has a usable key for your identity");
         ctx.term
-            .detail("start only one of them, ever, or your peer id will fork");
+            .detail("never run a node on both machines, or your identity will fork");
     } else {
         retire(ctx, &archive)?;
     }
 
     ctx.term.blank();
     ctx.term.headline("on the other machine");
-    ctx.term.hint(&format!(
-        "copy {} across, then run:",
-        archive.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    ctx.term.hint("    rad-backup restore <archive>");
+    let file_name = archive.file_name().unwrap_or_default().to_string_lossy();
     ctx.term
-        .hint("it will put the identity, the policies and the repositories back, then compare");
+        .hint(&format!("copy {file_name} to the other machine, then run:"));
     ctx.term
-        .hint("what came back with what other nodes report holding, and name any repository");
-    ctx.term.hint("you must not write in");
+        .hint(&format!("    rad backup restore {file_name}"));
+    ctx.term
+        .hint("the restore brings back your identity, policies and repositories");
+    ctx.term.hint(
+        "it then compares them with the network and warns about any repository you should not \
+         write to yet",
+    );
     Ok(())
 }
 
 /// Rename the key so this node cannot start with it, and leave a note saying why.
 fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
     let question = format!(
-        "Retire the key on this machine? {} keeps the only usable copy.",
+        "Retire the key on this machine? The archive at {} will hold the only usable copy.",
         archive.display()
     );
     if !ctx.term.confirm(&question)? {
         // The archive is already written, and it says this machine retires its key, because
         // that is what the command was asked to do. Saying so is the whole of the remedy: a
         // home restored from it will be told the source is safe, and it is not.
+        let remedy = match ctx.term.is_interactive() {
+            true => {
+                "delete that archive, then run the move again. Answer yes, or add \
+                     --keep-source to keep the key on this machine"
+            }
+            false => {
+                "delete that archive, then run the move again. Add --yes to retire the key, \
+                      or --keep-source to keep it on this machine"
+            }
+        };
         return Err(Error::refused(
             format!(
-                "nothing was retired, so this machine still holds the identity, and {} says \
-                 otherwise to whoever restores it",
+                "the key on this machine was not retired. The archive at {} says it was",
                 archive.display()
             ),
-            "delete that archive and run the move again with --keep-source, or answer yes",
+            remedy,
         ));
     }
 
@@ -178,8 +185,8 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
         // gets to decide that is worth less than a tidy file.
         FormerNote::Unreadable(e) => {
             ctx.term.warn(&format!(
-                "the note beside the retired key is there and could not be read, so it was \
-                 left alone: {e}"
+                "could not read {}: {e}. The note was left unchanged",
+                note_path.display()
             ));
         }
         former => {
@@ -191,18 +198,20 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
             );
             if let Err(e) = crate::perms::write_atomically(&note_path, note.as_bytes(), MODE_DOC) {
                 ctx.term.warn(&format!(
-                    "the note beside the retired key was not written: {e}"
+                    "could not write the note {}: {e}",
+                    note_path.display()
                 ));
                 ctx.term.detail(
-                    "the key was retired all the same, and nothing in this home explains \
-                     that to whoever finds it next",
+                    "the key was still retired. No note in the keys directory explains why",
                 );
             }
         }
     }
 
-    ctx.term
-        .ok(&format!("retired this machine's key to {}", to.display()));
+    ctx.term.ok(&format!(
+        "retired the key on this machine. It is now at {}",
+        to.display()
+    ));
     Ok(())
 }
 

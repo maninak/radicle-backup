@@ -95,12 +95,12 @@ impl<'a> Writer<'a> {
         if written != size {
             return Err(Error::Refused {
                 what: format!(
-                    "{} changed while it was being archived: the entry says {size} bytes and \
-                     {written} were read",
+                    "{} changed while it was being added to the archive. It was {size} bytes, \
+                     but {written} bytes were read",
                     source.display()
                 ),
-                remedy: "take the backup again, and if it keeps happening, stop whatever is \
-                     writing to the home while it runs (`--stop-node` covers the node itself)"
+                remedy: "run the backup again. If this keeps happening, stop whatever writes to \
+                     your Radicle home during the backup. `--stop-node` stops your node for it"
                     .to_string(),
             });
         }
@@ -128,14 +128,15 @@ impl<'a> Writer<'a> {
         if json.len() as u64 > MAX_MANIFEST_BYTES {
             return Err(Error::Refused {
                 what: format!(
-                    "the manifest for this home is {} bytes, more than the {MAX_MANIFEST_BYTES} \
-                     an archive can carry",
+                    "the archive's record of its files would be {} bytes. The limit is \
+                     {MAX_MANIFEST_BYTES} bytes",
                     json.len()
                 ),
-                remedy: "narrow what the archive carries with `--repos private` or \
-                         `--repos mine`, and report this home: nothing else here can \
-                         split it further"
-                    .to_string(),
+                remedy: format!(
+                    "include fewer repositories with `--repos private` or `--repos mine`. \
+                     Report this with `rad issue open --repo {}`",
+                    crate::credits::RID
+                ),
             });
         }
         let mut header = entry_header(json.len() as u64, MODE_DOC);
@@ -164,18 +165,18 @@ impl Scan {
         for entry in &self.manifest.entries {
             match self.observed.get(&entry.path) {
                 None => problems.push(format!(
-                    "{}: listed in the manifest but missing",
+                    "{}: listed in the archive's record but missing",
                     entry.path
                 )),
                 Some((bytes, sha256)) => {
                     if *bytes != entry.bytes {
                         problems.push(format!(
-                            "{}: {} bytes in the archive, {} in the manifest",
+                            "{}: {} bytes in the archive, but the archive's record says {}",
                             entry.path, bytes, entry.bytes
                         ));
                     } else if *sha256 != entry.sha256 {
                         problems.push(format!(
-                            "{}: contents do not match their digest",
+                            "{}: its contents are damaged or were changed",
                             entry.path
                         ));
                     }
@@ -184,7 +185,9 @@ impl Scan {
         }
         for path in self.observed.keys() {
             if self.manifest.entry(path).is_none() {
-                problems.push(format!("{path}: in the archive but not in the manifest"));
+                problems.push(format!(
+                    "{path}: in the archive but not in the archive's record"
+                ));
             }
         }
         problems
@@ -211,7 +214,7 @@ impl<'a> Reader<'a> {
         };
         let decoder = zstd::Decoder::new(stream).map_err(|e| Error::NotAnArchive {
             path: path.to_path_buf(),
-            reason: format!("not zstd-compressed ({e})"),
+            reason: format!("it is not zstd-compressed ({e})"),
         })?;
         Ok(Self {
             archive: tar::Archive::new(Box::new(decoder)),
@@ -263,7 +266,10 @@ impl<'a> Reader<'a> {
                 .to_str()
                 .ok_or_else(|| Error::NotAnArchive {
                     path: archive_path.to_path_buf(),
-                    reason: format!("entry name is not valid UTF-8: {}", entry_name_os.display()),
+                    reason: format!(
+                        "it holds a file name that is not valid UTF-8: {}",
+                        entry_name_os.display()
+                    ),
                 })?
                 .to_string();
             reject_traversal(&entry_path, archive_path)?;
@@ -279,8 +285,8 @@ impl<'a> Reader<'a> {
                     return Err(Error::NotAnArchive {
                         path: archive_path.to_path_buf(),
                         reason: format!(
-                            "{MANIFEST_ENTRY} declares {declared} bytes, more than the \
-                             {MAX_MANIFEST_BYTES} this reads"
+                            "its {MANIFEST_ENTRY} file claims {declared} bytes. The limit is \
+                             {MAX_MANIFEST_BYTES}"
                         ),
                     });
                 }
@@ -292,7 +298,7 @@ impl<'a> Reader<'a> {
                 manifest = Some(serde_json::from_str::<Manifest>(&json).map_err(|e| {
                     Error::NotAnArchive {
                         path: archive_path.to_path_buf(),
-                        reason: format!("{MANIFEST_ENTRY} is not a manifest this reads: {e}"),
+                        reason: format!("its {MANIFEST_ENTRY} file could not be read: {e}"),
                     }
                 })?);
                 continue;
@@ -302,8 +308,8 @@ impl<'a> Reader<'a> {
                 return Err(Error::NotAnArchive {
                     path: archive_path.to_path_buf(),
                     reason: format!(
-                        "entry {entry_path} declares {declared} bytes, more than the \
-                         {MAX_ENTRY_BYTES} this reads"
+                        "its file {entry_path} claims {declared} bytes. The limit is \
+                         {MAX_ENTRY_BYTES}"
                     ),
                 });
             }
@@ -315,7 +321,7 @@ impl<'a> Reader<'a> {
 
         let manifest = manifest.ok_or_else(|| Error::NotAnArchive {
             path: archive_path.to_path_buf(),
-            reason: format!("no {MANIFEST_ENTRY} inside"),
+            reason: format!("it has no {MANIFEST_ENTRY} file"),
         })?;
         if manifest.format > crate::manifest::FORMAT_VERSION {
             return Err(Error::ArchiveTooNew {
@@ -356,10 +362,11 @@ fn entry_header(size: u64, mode: u32) -> tar::Header {
 fn reject_unwritable_name(path: &str) -> Result<()> {
     if !is_portable_entry_name(path) {
         return Err(Error::Refused {
-            what: format!("`{path}` is not a name an archive entry can carry"),
-            remedy: "archive entry names are relative and separated with `/` on every platform; \
-                     build them as strings, not as paths"
-                .to_string(),
+            what: format!("`{path}` cannot be used as a file name inside an archive"),
+            remedy: format!(
+                "this is a bug in rad-backup. Report it with `rad issue open --repo {}`",
+                crate::credits::RID
+            ),
         });
     }
     Ok(())
@@ -374,7 +381,9 @@ fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
     if !is_portable_entry_name(entry_path) {
         return Err(Error::NotAnArchive {
             path: archive.to_path_buf(),
-            reason: format!("entry `{entry_path}` points outside the archive"),
+            reason: format!(
+                "its file `{entry_path}` would be written outside the target directory"
+            ),
         });
     }
     Ok(())

@@ -31,7 +31,9 @@ pub enum Error {
     #[error("{0}")]
     PathlessIo(io::Error),
 
-    #[error("could not run `{program}`: {source}\nis it installed and on PATH?")]
+    #[error(
+        "could not run `{program}`: {source}\ncheck that {program} is installed and on your PATH"
+    )]
     Spawn { program: String, source: io::Error },
 
     #[error("`{command}` failed with {status}\n{stderr}")]
@@ -42,12 +44,12 @@ pub enum Error {
     },
 
     #[error(
-        "{path}: not a Radicle home (no keys/radicle)\npass --home, set RAD_HOME, or create an \
-         identity first with `rad auth`"
+        "no Radicle identity in {path}. The file keys/radicle is missing\nif your Radicle data is \
+         somewhere else, pass --home <path> or set RAD_HOME. To create an identity, run `rad auth`"
     )]
     NotAHome { path: PathBuf },
 
-    #[error("{path}: {reason}")]
+    #[error("could not read the key at {path}: {reason}")]
     BadKey { path: PathBuf, reason: String },
 
     /// A file this tool reads that is there and does not parse. Separate from a bare
@@ -55,7 +57,7 @@ pub enum Error {
     #[error("{path}: {reason}")]
     Malformed { path: PathBuf, reason: String },
 
-    #[error("this is a {algorithm} key; Radicle identities are ed25519")]
+    #[error("this is a {algorithm} key. A Radicle identity key is ed25519")]
     NotEd25519 { algorithm: String },
 
     #[error("wrong passphrase")]
@@ -65,7 +67,8 @@ pub enum Error {
     NotAnArchive { path: PathBuf, reason: String },
 
     #[error(
-        "archive format v{found} was written by a newer rad-backup; this build reads up to v{supported}"
+        "this archive was written by a newer rad-backup (archive format v{found})\nthis version \
+         reads up to format v{supported}. Install a newer rad-backup to open it"
     )]
     ArchiveTooNew { found: u32, supported: u32 },
 
@@ -96,10 +99,10 @@ pub enum Error {
     /// Names no package that installs the page, because a list here ships inside the binary
     /// and goes stale as packages come and go.
     #[error(
-        "this prints the man page file, which is for saving, not for reading here\n\
-         read the manual with `man rad-backup`, or, if that finds no page:\n  \
+        "`rad-backup man` prints a file to save, not a page to read\n\
+         to read the manual, run `man rad-backup`. If that finds no page, run:\n  \
          rad-backup man > ~/rad-backup.1 && man ~/rad-backup.1\n\
-         or read `rad-backup --help`, and `--help` after any command"
+         `rad-backup --help` and `--help` after any command also show the options"
     )]
     ManAtATerminal,
 
@@ -119,13 +122,32 @@ pub enum Error {
 impl Error {
     /// This error as one line, for the places that carry it as a `why` inside a warning next
     /// to a repository id rather than printing it on its own.
+    ///
+    /// Each line becomes a sentence: a line with no closing punctuation gets a full stop, and a
+    /// line after the first starts with a capital.
     pub fn one_line(&self) -> String {
-        self.to_string()
+        let text = self.to_string();
+        let lines: Vec<&str> = text
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
+            .collect();
+        let last = lines.len().saturating_sub(1);
+        lines
+            .iter()
+            .enumerate()
+            .map(|(at, line)| {
+                let mut sentence = match at {
+                    0 => (*line).to_string(),
+                    _ => capitalised(line),
+                };
+                if at < last && !sentence.ends_with(['.', ':', '?', '!']) {
+                    sentence.push('.');
+                }
+                sentence
+            })
             .collect::<Vec<_>>()
-            .join("; ")
+            .join(" ")
     }
 
     pub fn io(path: impl AsRef<Path>, source: io::Error) -> Self {
@@ -162,6 +184,15 @@ impl Error {
     }
 }
 
+/// `line` with its first letter upper case, for a line that starts a later sentence.
+fn capitalised(line: &str) -> String {
+    let mut chars = line.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 impl From<age::EncryptError> for Error {
     fn from(e: age::EncryptError) -> Self {
         Self::Age(e.to_string())
@@ -178,7 +209,7 @@ impl From<age::DecryptError> for Error {
             // right passphrase that is damage, not a mistake, and saying so points at the
             // copy of the file rather than at the person typing.
             other => Self::Age(format!(
-                "{other}: if the passphrase was right, this archive is damaged"
+                "{other}. If the passphrase was right, the archive is damaged"
             )),
         }
     }

@@ -6,6 +6,7 @@
 //! marker, rewrites its environment file in full every run, and never enables anything the
 //! user did not ask for in the same breath.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use crate::cli::Schedule;
@@ -84,7 +85,11 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     // only their public key, and a plaintext one needs nothing at all.
     let needs_no_passphrase = !args.recipient.is_empty() || args.plaintext;
     let passphrase_file = ctx.global.passphrase_file.clone();
-    if !needs_no_passphrase && passphrase_file.is_none() && !systemd_holds_passphrase(&systemctl)? {
+    let passphrase_env = crate::crypt::ARCHIVE_PASSPHRASE_ENV;
+    if !needs_no_passphrase
+        && passphrase_file.is_none()
+        && !systemd_holds(&systemctl, passphrase_env)?
+    {
         return Err(Error::refused(
             "a scheduled run has nobody to ask for the archive passphrase",
             "put it in a file only you can read and pass --passphrase-file <path>; an exported \
@@ -93,10 +98,14 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         ));
     }
 
+    // Before anything is written, so a machine where `rad` cannot be found gets no timer at
+    // all rather than one that archives no repositories every night.
+    let rad = rad_for_timer()?;
+
     let dir = unit_dir_from_env()?;
     std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
     let environment = environment_file_from_env()?;
-    write_environment(ctx, &environment, args, passphrase_file.as_deref())?;
+    write_environment(ctx, &environment, args, passphrase_file.as_deref(), &rad)?;
     let encryption = encryption_arguments(&args.recipient, args.plaintext);
     write_unit(
         ctx,
@@ -129,14 +138,14 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     status(ctx, &systemctl)
 }
 
-/// Whether systemd's own environment already carries the archive passphrase.
+/// Whether systemd's own environment already sets `name`.
 ///
 /// Asked because refusing on the absence of `--passphrase-file` alone would break a timer that
 /// works: a passphrase put where systemd keeps it, with `systemctl --user set-environment` or
 /// a file in `~/.config/environment.d/`, does reach the service. What this process inherited
 /// from the shell does not, which is why the shell's own environment is not consulted here.
-fn systemd_holds_passphrase(systemctl: &Tool) -> Result<bool> {
-    let prefix = format!("{}=", crate::crypt::ARCHIVE_PASSPHRASE_ENV);
+fn systemd_holds(systemctl: &Tool, name: &str) -> Result<bool> {
+    let prefix = format!("{name}=");
     // `confided` and not `spoken`, because the answer is one bit and the output is systemd's
     // whole environment: when the passphrase lives there, reading it into an ordinary `String`
     // leaves a copy in freed heap the moment this function returns.
@@ -270,12 +279,28 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ctx.term.detail("this crontab line does the same job:");
     ctx.term.blank();
     let encryption = shell_encryption_arguments(&args.recipient, args.plaintext);
+    // cron's PATH is shorter than a login shell's, so the line names `rad` outright when it can.
+    let rad = rad_from_env(crate::exec::rad_override_from_env());
+    let rad_setting = match &rad {
+        Ok(rad) => format!("RAD={} ", shell_systemd_quoted(&rad.display().to_string())),
+        Err(_) => String::new(),
+    };
     ctx.term.print(&format!(
-        "  0 3 * * *  {} --output {} --keep {keep} --yes --quiet{encryption}",
+        "  0 3 * * *  {rad_setting}{} --output {} --keep {keep} --yes --quiet{encryption}",
         shell_systemd_quoted(&binary),
         shell_systemd_quoted(&output.display().to_string())
     ))?;
     ctx.term.blank();
+    if let Err(refused) = &rad {
+        let said = refused.to_string();
+        let mut lines = said.lines();
+        if let Some(headline) = lines.next() {
+            ctx.term.warn(headline);
+        }
+        for line in lines {
+            ctx.term.hint(line);
+        }
+    }
     if encryption.is_empty() {
         ctx.term.hint(
             "the run needs RAD_BACKUP_PASSPHRASE_FILE set in that crontab, or it will stop \
@@ -286,6 +311,69 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
         "no timer was installed",
         "paste the line above into `crontab -e`",
     ))
+}
+
+/// The `rad` a scheduled run is to use.
+///
+/// systemd starts the service with its own PATH, which need not hold the directory `rad` is
+/// installed in: the Radicle installer puts it in `~/.radicle/bin` and adds that to shell rc
+/// files systemd never reads. A run without `rad` can miss repositories, so the one this shell
+/// finds is written to the environment file as `RAD`, which `Tool::rad` honours. A `RAD` set in
+/// systemd's own environment is not read: the file overrides it, and `show-environment` prints
+/// values in a shell quoting that would need its own parser.
+fn rad_for_timer() -> Result<PathBuf> {
+    rad_from_env(crate::exec::rad_override_from_env())
+}
+
+/// `RAD` when it is set, else `rad` from PATH, as an absolute path.
+fn rad_from_env(explicit: Option<OsString>) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(|e| Error::io(".", e))?;
+    let name = explicit.clone().unwrap_or_else(|| OsString::from("rad"));
+    find_program(&name, std::env::var_os("PATH").as_deref(), &cwd).ok_or_else(|| {
+        let remedy = match explicit {
+            Some(_) => "point RAD at the rad binary, or unset it to use the rad on PATH",
+            None => {
+                "install Radicle, or run this again with RAD=/path/to/rad. Without rad, a \
+                 scheduled backup can miss repositories."
+            }
+        };
+        Error::refused(crate::exec::rad_missing(explicit.as_deref()), remedy)
+    })
+}
+
+/// Where a shell would find `name`, as an absolute path. Pure but for reading file metadata:
+/// the PATH to search and the directory a relative `name` is read against are handed in.
+///
+/// Only absolute PATH entries are searched. An empty or relative one is whatever directory
+/// `schedule` runs in, and a `rad` planted there would be pinned into a nightly timer that
+/// holds the key passphrase. A relative `name` is typed on purpose, so it is read against `cwd`.
+///
+/// A symlink is kept rather than resolved, so a `rad` upgraded by repointing its link (a nix
+/// profile, a package manager's alternatives) is still the one the timer runs.
+fn find_program(name: &OsStr, search: Option<&OsStr>, cwd: &Path) -> Option<PathBuf> {
+    let name = Path::new(name);
+    if name.components().count() > 1 {
+        return Some(cwd.join(name)).filter(|path| is_program(path));
+    }
+    std::env::split_paths(search?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|path| is_program(path))
+}
+
+fn is_program(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| is_executable(&metadata))
+}
+
+#[cfg(unix)]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_file()
 }
 
 fn unit_dir_from_env() -> Result<PathBuf> {
@@ -327,8 +415,12 @@ fn environment_text(
     output: Option<&Path>,
     keep: Option<usize>,
     passphrase_file: Option<&Path>,
+    rad: Option<&Path>,
 ) -> Result<String> {
     let mut lines = vec![MARKER_ENVIRONMENT.to_string(), setting("RAD_HOME", home)?];
+    if let Some(rad) = rad {
+        lines.push(setting("RAD", rad)?);
+    }
     if let Some(output) = output {
         lines.push(setting("RAD_BACKUP_DIR", output)?);
     }
@@ -342,17 +434,21 @@ fn environment_text(
 }
 
 /// One `NAME=path` line, or a refusal if the path cannot be written as one.
+///
+/// Beyond line breaks, systemd drops a backslash as an escape, joins the next line on at a
+/// trailing one, and trims whitespace off both ends of a value. A path that is not UTF-8 would
+/// be written with replacement characters, naming a file that is not there.
 fn setting(name: &str, path: &Path) -> Result<String> {
-    let value = path.display().to_string();
-    if value.contains(['\n', '\r']) {
+    let Some(value) = path
+        .to_str()
+        .filter(|value| !value.contains(['\n', '\r', '\\']) && value.trim() == *value)
+    else {
         return Err(Error::refused(
-            format!(
-                "{} has a line break in it, so {name} cannot be set from a file systemd reads a line at a time",
-                path.display()
-            ),
-            "move it somewhere without one, or schedule the backup with cron instead",
+            format!("systemd cannot read {} back as written", path.display()),
+            "use a path without line breaks, backslashes, spaces at either end or bytes that \
+             are not UTF-8. Or schedule the backup with cron instead.",
         ));
-    }
+    };
     Ok(format!("{name}={value}"))
 }
 
@@ -363,6 +459,7 @@ fn write_environment(
     path: &Path,
     args: &Schedule,
     passphrase_file: Option<&Path>,
+    rad: &Path,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
@@ -372,9 +469,14 @@ fn write_environment(
         args.output.as_deref(),
         args.keep,
         passphrase_file,
+        Some(rad),
     )?;
     crate::perms::write_owner_only(path, text.as_bytes())?;
     ctx.term.step(&format!("wrote {}", path.display()));
+    ctx.term.detail(&format!(
+        "scheduled backups will use rad at {}",
+        rad.display()
+    ));
     Ok(())
 }
 
@@ -429,10 +531,11 @@ fn systemd_quoted(argument: &str) -> String {
     )
 }
 
-/// One argument as `sh` will read it back. Single quotes take every other character
-/// literally, and the quote itself is closed, escaped and reopened.
+/// One argument as a crontab line hands it to `sh`. Single quotes take every other character
+/// literally, and the quote itself is closed, escaped and reopened. cron reads an unescaped
+/// `%` as a line break before `sh` sees it, and strips the backslash from `\%`.
 fn shell_systemd_quoted(argument: &str) -> String {
-    format!("'{}'", argument.replace('\'', "'\\''"))
+    format!("'{}'", argument.replace('\'', "'\\''").replace('%', "\\%"))
 }
 
 /// How the scheduled run should encrypt, spelled on the command line rather than put in the
@@ -651,24 +754,93 @@ mod tests {
             String::from_utf8_lossy(&said.stdout),
             "--recipientssh-ed25519 AAAA it's mine"
         );
+
+        // cron ends the command at a bare `%`.
+        assert_eq!(shell_systemd_quoted("/backups/100%"), "'/backups/100\\%'");
     }
 
     #[test]
-    fn a_path_with_a_line_break_is_refused_rather_than_written_as_two_settings() {
+    fn a_path_systemd_would_read_back_differently_is_refused_rather_than_written() {
         // A legal directory name, and systemd reads this file a line at a time: written out,
         // the second half is a setting nobody asked for, in a file an unattended timer reads.
         let smuggled = Path::new("/home/someone/backups\nRAD_BACKUP_PASSPHRASE=hunter2");
-        assert!(environment_text(smuggled, None, None, None).is_err());
-        assert!(environment_text(Path::new("/home/ok"), Some(smuggled), None, None).is_err());
-        assert!(environment_text(Path::new("/home/ok"), None, None, Some(smuggled)).is_err());
+        let ok = Path::new("/home/ok");
+        assert!(environment_text(smuggled, None, None, None, None).is_err());
+        assert!(environment_text(ok, Some(smuggled), None, None, None).is_err());
+        assert!(environment_text(ok, None, None, Some(smuggled), None).is_err());
+        assert!(environment_text(ok, None, None, None, Some(smuggled)).is_err());
         // A carriage return alone ends a line for the same readers.
         let returned = Path::new("/home/someone/backups\rRAD_BACKUP_KEEP=1");
-        assert!(environment_text(returned, None, None, None).is_err());
+        assert!(environment_text(returned, None, None, None, None).is_err());
+        // A trailing backslash joins the next setting onto this value.
+        let joined = Path::new("/home/someone/backups\\");
+        assert!(environment_text(ok, Some(joined), None, None, None).is_err());
+        // systemd trims a space at either end of a value and keeps one inside it.
+        let trailing = Path::new("/home/someone/backups ");
+        assert!(environment_text(ok, Some(trailing), None, None, None).is_err());
+        let spaced = Path::new("/home/some one/.radicle/bin/rad");
+        let text = environment_text(ok, None, None, None, Some(spaced))
+            .expect("a space inside a path survives systemd's reading");
+        assert!(
+            text.lines()
+                .any(|line| line == "RAD=/home/some one/.radicle/bin/rad"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_is_refused_rather_than_written() {
+        use std::os::unix::ffi::OsStrExt;
+        let garbled = Path::new(OsStr::from_bytes(b"/home/someone/\xffbackups"));
+        assert!(environment_text(Path::new("/home/ok"), Some(garbled), None, None, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rad_is_found_as_an_absolute_path_wherever_the_given_path_puts_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = crate::key::tests::TestScratch::create("schedule-find-rad");
+        let installed = scratch.path_of("installed");
+        let decoy = scratch.path_of("decoy");
+        for dir in [&installed, &decoy] {
+            std::fs::create_dir(dir).expect("the test's scratch takes a directory");
+        }
+        let rad = installed.join("rad");
+        std::fs::write(&rad, "#!/bin/sh\n").expect("the test's scratch takes a file");
+        std::fs::set_permissions(&rad, std::fs::Permissions::from_mode(0o755))
+            .expect("the test owns the file it made");
+        // Not executable, so a shell passes over it and so must this.
+        std::fs::write(decoy.join("rad"), "").expect("the test's scratch takes a file");
+
+        let elsewhere = Path::new("/nonexistent");
+        let both = std::env::join_paths([&decoy, &installed]).expect("no separator in the paths");
+        assert_eq!(
+            find_program(OsStr::new("rad"), Some(&both), elsewhere),
+            Some(rad.clone())
+        );
+        assert_eq!(
+            find_program(OsStr::new("rad"), Some(decoy.as_os_str()), elsewhere),
+            None
+        );
+        assert_eq!(find_program(OsStr::new("rad"), None, elsewhere), None);
+
+        // A relative RAD is read against the directory it was given in, not searched for.
+        let root = installed.parent().expect("the scratch dir has a parent");
+        // An empty or relative PATH entry is the directory `schedule` runs in, never searched.
+        let relative = std::env::join_paths([Path::new(""), Path::new("installed")])
+            .expect("no separator in the paths");
+        assert_eq!(find_program(OsStr::new("rad"), Some(&relative), root), None);
+        assert_eq!(
+            find_program(OsStr::new("installed/rad"), Some(decoy.as_os_str()), root),
+            Some(root.join("installed/rad"))
+        );
     }
 
     #[test]
     fn the_environment_file_does_not_promise_that_an_edit_will_survive() {
-        let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None)
+        let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None, None)
             .expect("an ordinary path is writable as a setting");
 
         // MARKER_UNIT says deleting it keeps the user's edits, which `write_unit` honours and

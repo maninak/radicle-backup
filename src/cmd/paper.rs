@@ -29,7 +29,7 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
             Protection::Encrypted { .. } => Some(crypt::read_passphrase(
                 crypt::Protects::RadicleKey,
                 None,
-                "Passphrase for the key: ",
+                "Passphrase for your Radicle key: ",
                 crypt::Purpose::Opening,
                 ctx.term.is_interactive(),
             )?),
@@ -38,8 +38,8 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         let mnemonic = mnemonic(&seed)?;
         (
             "24 words",
-            "These words ARE the key. Anyone holding this sheet is you. Keep it where you \
-             would keep cash.",
+            "These words ARE the key. Anyone holding this sheet can act as you. Keep it where \
+             you would keep cash.",
             mnemonic,
         )
     } else {
@@ -49,12 +49,12 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         );
         let caution = match secret.protection() {
             Protection::Encrypted { .. } => {
-                "This key is still protected by its passphrase. Without that passphrase this \
-                 sheet is useless, so store the passphrase somewhere else, and store it."
+                "This key is protected by its passphrase. The sheet is useless without it. Keep \
+                 the passphrase somewhere safe, apart from this sheet."
             }
             Protection::Plaintext => {
-                "This key has NO passphrase, so this sheet is the key itself. Anyone holding \
-                 it is you. Keep it where you would keep cash."
+                "This key has NO passphrase. This sheet is the key itself. Anyone holding it \
+                 can act as you. Keep it where you would keep cash."
             }
         };
         ("the key file", caution, key)
@@ -87,7 +87,7 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
             crate::perms::write_owner_only(path, sheet.as_bytes())?;
             ctx.term.ok(&format!("wrote {}", path.display()));
             ctx.term
-                .hint("open it in a browser and print it; then delete the file");
+                .hint("open it in a browser and print it. Then delete the file");
         }
         // A terminal keeps thousands of lines of scrollback in its own memory, and some
         // emulators log a session to disk, so a sheet printed to a TTY outlives the process
@@ -96,8 +96,8 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         // the absence of `--output`.
         None if std::io::stdout().is_terminal() => {
             return Err(Error::refused(
-                "this sheet is the key in the clear, and stdout is a terminal",
-                "write it with --output <path>, or pipe it into something that keeps no history",
+                "the recovery sheet holds your key, so it is not printed to the terminal",
+                "write it to a file with --output <path>, or pipe it to another program",
             ));
         }
         None => ctx.term.print(&sheet)?,
@@ -149,7 +149,10 @@ fn mnemonic(seed: &Zeroizing<[u8; 32]>) -> Result<Zeroizing<String>> {
     let mnemonic = bip39::Mnemonic::from_entropy(seed.as_slice()).map_err(|e| {
         Error::refused(
             format!("could not turn this key into words: {e}"),
-            "report this: a 32-byte seed should always convert",
+            format!(
+                "this is a bug in rad-backup. Report it with `rad issue open --repo {}`",
+                crate::credits::RID
+            ),
         )
     })?;
     Ok(Zeroizing::new(mnemonic.to_string()))
@@ -167,8 +170,8 @@ fn mnemonic(seed: &Zeroizing<[u8; 32]>) -> Result<Zeroizing<String>> {
 fn qr_svg(text: &str) -> Result<Zeroizing<String>> {
     let code = QrCode::new(text.as_bytes()).map_err(|e| {
         Error::refused(
-            format!("this key does not fit in a QR code: {e}"),
-            "use --words, which is smaller",
+            format!("could not fit the key into a QR code: {e}"),
+            "use --words to put the key on the sheet as 24 words",
         )
     })?;
     // `build` returns the renderer's buffer by move, so wrapping it wipes the buffer that

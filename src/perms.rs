@@ -112,8 +112,8 @@ mod platform {
     fn announce(path: &Path) {
         ANNOUNCED.call_once(|| {
             eprintln!(
-                "! {}: this platform cannot restrict a file to one user, so it inherits the \
-                 folder's permissions; keep archives and keys inside your own profile",
+                "! {}: this system cannot restrict a file to one user. The file gets the \
+                 permissions of its folder. Keep archives and keys inside your own user folder",
                 path.display()
             );
         });

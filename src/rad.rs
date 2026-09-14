@@ -103,7 +103,7 @@ impl Rad {
         match serde_json::from_str::<serde_json::Value>(&json) {
             Ok(document) => Ok(Described::Identity(RepoIdentity::from_document(&document))),
             Err(e) => Ok(Described::Unavailable {
-                why: format!("its identity document did not parse as JSON: {e}"),
+                why: format!("`rad inspect --identity` did not print valid JSON: {e}"),
             }),
         }
     }

@@ -121,8 +121,8 @@ fn closing_sections() -> String {
          rad issue open \\-\\-repo {rid}\n\
          .fi\n.RE\n\
          .PP\n\
-         A vulnerability goes to {security} instead, because an issue is public, and a copy \
-         another node has fetched cannot be taken back.\n\
+         Report a vulnerability to {security} instead. Issues are public, and other nodes \
+         keep copies of them.\n\
          .SH \"SEE ALSO\"\n\
          \\fBage\\fR(1), \\fBgit\\fR(1), \\fBjq\\fR(1), \\fBrad\\fR(1), \\fBtar\\fR(1), \
          \\fBzstd\\fR(1)\n",

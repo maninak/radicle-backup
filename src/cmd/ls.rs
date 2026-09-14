@@ -17,9 +17,9 @@ use crate::term;
 pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     if let Some(archive) = &args.mistaken {
         return Err(crate::error::Error::refused(
-            "`ls` lists the archives of this identity; it does not open one",
+            "`ls` lists your archives. It does not open one",
             format!(
-                "to see inside that one: rad backup show {}",
+                "to see what is inside that archive, run: rad backup show {}",
                 archive.display()
             ),
         ));
@@ -60,7 +60,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
             identity.did(),
             directory.display()
         ));
-        ctx.term.hint("take one with `rad backup`");
+        ctx.term.hint("create one with `rad backup`");
         return Ok(());
     }
 
@@ -95,7 +95,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     if present.iter().any(|archive| is_recorded(archive, record)) {
         ctx.term.blank();
         ctx.term
-            .hint("* the one this tool last wrote and checks against");
+            .hint("* your last archive, which `rad backup diff` compares against");
     }
     Ok(())
 }

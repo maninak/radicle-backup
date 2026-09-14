@@ -235,7 +235,7 @@ impl Git {
         if !names_a_ref(target) {
             return Err(Error::refused(
                 format!("`{target}` does not name a ref, so HEAD was left alone"),
-                "the archive's manifest is wrong about this repository; report it",
+                "the archive records a wrong HEAD for this repository. Its history is not affected",
             ));
         }
         self.tool.output(&[

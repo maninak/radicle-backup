@@ -69,7 +69,7 @@ impl NodeState {
     pub fn doubt(&self) -> Option<String> {
         match self {
             Self::Unknown { socket, why } => {
-                Some(format!("{} could not be reached: {why}", socket.display()))
+                Some(format!("could not connect to {}: {why}", socket.display()))
             }
             Self::Running | Self::Stopped => None,
         }
@@ -97,7 +97,7 @@ impl Home {
         }
         let user_home = std::env::var_os("HOME").ok_or_else(|| {
             Error::refused(
-                "cannot tell where your Radicle home is",
+                "HOME is not set, so rad-backup cannot find your Radicle home",
                 "set RAD_HOME, or pass --home <path>",
             )
         })?;
@@ -307,10 +307,10 @@ impl Home {
             {
                 NodeState::Unknown {
                     why: format!(
-                        "{e}, and that path is {} bytes: a control socket path can be at most \
+                        "{e}. The path is {} bytes long, but a node socket path can be at most \
                          {SHORTEST_SUN_PATH} bytes on macos and {LONGEST_SUN_PATH} on linux. \
-                         Point RAD_SOCKET at a shorter one, or use a home whose own path is \
-                         shorter",
+                         Set RAD_SOCKET to a shorter path, or use a Radicle home with a shorter \
+                         path",
                         socket.as_os_str().len()
                     ),
                     socket,
@@ -361,7 +361,7 @@ impl Home {
         let config: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| Error::Malformed {
                 path: path.clone(),
-                reason: format!("this is not valid JSON: {e}"),
+                reason: format!("not valid JSON ({e})"),
             })?;
         Ok(config
             .get("node")

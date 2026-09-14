@@ -128,8 +128,8 @@ impl SecretKey {
         let key = if self.key.is_encrypted() {
             let passphrase = passphrase.ok_or_else(|| {
                 Error::refused(
-                    "this key is passphrase-protected",
-                    "re-run and enter the passphrase, or set RAD_PASSPHRASE",
+                    "your Radicle key is protected by a passphrase, and none was given",
+                    "run again and type the passphrase, or set RAD_PASSPHRASE",
                 )
             })?;
             decrypted = self

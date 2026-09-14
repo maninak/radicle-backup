@@ -23,7 +23,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     if home.holds_identity()? {
         return Err(Error::refused(
             format!("{} already holds an identity", home.path().display()),
-            "restore into an empty --home",
+            "pass --home with an empty directory, or move the existing identity aside first",
         ));
     }
     // Read from stdin whether a person is typing or a script is piping. The words are secret,
@@ -48,7 +48,7 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
 
     let mnemonic = bip39::Mnemonic::parse_normalized(line.trim()).map_err(|e| {
         Error::refused(
-            format!("those words are not a valid mnemonic: {e}"),
+            format!("those words are not a valid recovery phrase: {e}"),
             "check the sheet and try again",
         )
     })?;
@@ -56,19 +56,22 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     let seed: Zeroizing<[u8; 32]> =
         Zeroizing::new(<[u8; 32]>::try_from(entropy.as_slice()).map_err(|_| {
             Error::refused(
-                "that mnemonic does not carry 32 bytes",
-                "a Radicle key is 24 words; a 12-word phrase is something else",
+                "those words are not a Radicle key",
+                "a Radicle recovery sheet has 24 words. Check that you typed all of them",
             )
         })?);
 
     let identity = crate::key::identity_from_seed(&seed)?;
-    ctx.term
-        .ok(&format!("those words rebuild {}", identity.did()));
+    ctx.term.ok(&format!(
+        "those words belong to the identity {}",
+        identity.did()
+    ));
     if !ctx.term.confirm("Is that the identity you expected?")? {
-        return Err(Error::refused(
-            "stopped before writing anything",
-            "check the words",
-        ));
+        let remedy = match ctx.term.is_interactive() {
+            true => "check the words on the sheet and run again",
+            false => "rad-backup could not ask for confirmation. Add --yes to accept the identity",
+        };
+        return Err(Error::refused("nothing was written", remedy));
     }
 
     let passphrase = crypt::read_passphrase(
@@ -102,9 +105,9 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     ctx.term
         .ok(&format!("wrote the key into {}", home.keys_dir().display()));
     ctx.term
-        .hint("the key is all this restored: `rad node start` rebuilds the routing table,");
+        .hint("only the key was restored. Run `rad node start` to reconnect to the network");
     ctx.term
-        .hint("your repositories come back with `rad clone <rid>` or `rad seed <rid>`");
+        .hint("to get your repositories back, run `rad clone <rid>` for each one");
     Ok(())
 }
 

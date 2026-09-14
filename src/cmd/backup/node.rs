@@ -50,9 +50,10 @@ impl NodeGuard<'_> {
         // "starting the node again" and then, on the next line, that it had not: the step and
         // the warning contradict each other and the reader has to work out which one won.
         let Some(rad) = self.rad else {
-            self.ctx
-                .term
-                .warn("rad is no longer on PATH, so the node this run stopped is still stopped");
+            self.ctx.term.warn(&format!(
+                "{}, so the node this run stopped is still stopped",
+                crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+            ));
             return;
         };
         self.ctx.term.step("starting the node again");
@@ -84,29 +85,28 @@ fn owes_a_restart(stop_accepted: bool, why_running_is_unknown: Option<&str>) -> 
     stop_accepted && why_running_is_unknown.is_some()
 }
 
-/// Stop the node when `--stop-node` asks for it, and warn when it is running and nothing
+/// What a running node can cost a backup, said without `--stop-node`.
+const MAY_LAG: &str = "a repository that syncs during the backup may be saved slightly behind. \
+                       Use --stop-node for an exact copy.";
+
+/// Stop the node when `--stop-node` asks for it, and say what a running one costs when nothing
 /// asked.
 ///
 /// Only git storage is at risk from a running node: the databases are snapshotted through
-/// SQLite's own backup API, and keys and config do not change. So a running node is a warning
-/// with a reason attached, not a refusal.
+/// SQLite's own backup API, keys and config do not change, and restore compares repositories
+/// with the network. So a running node is a plain step, not a warning. Nothing is stored in
+/// the archive about it beyond `node` in the manifest, which is what restore reads.
 pub(super) fn quiesce<'a>(
     ctx: &'a Ctx,
     args: &Create,
     rad: Option<&'a Rad>,
-    warnings: &mut Vec<String>,
 ) -> Result<NodeGuard<'a>> {
     // A doubt is said out loud and then treated as "running", which is the cautious half:
-    // the warning about refs fetched mid-run is printed, and `--stop-node` still tries. Read
-    // as stopped, this wrote `node.was_running: false` into the manifest over a home whose
-    // node was up, and the restore on the far end skipped the warning that costs an identity.
+    // `--stop-node` still tries, and the manifest records `was_running` with the doubt beside
+    // it. Read as stopped, the restore on the far end skips the warning that costs an identity.
     let state = ctx.home.probe_node_state();
     let why_running_is_unknown = state.doubt();
     if let Some(doubt) = &why_running_is_unknown {
-        warnings.push(format!(
-            "whether the node is running could not be established ({doubt}), so this archive \
-             was taken as though it were"
-        ));
         ctx.term
             .warn(&format!("cannot tell whether the node is running: {doubt}"));
     }
@@ -121,13 +121,11 @@ pub(super) fn quiesce<'a>(
         });
     }
     if !args.stop_node {
-        warnings.push(
-            "the node was running: databases were snapshotted consistently, but a repository \
-             fetched during the run may be missing its newest refs"
-                .to_string(),
-        );
-        ctx.term
-            .warn("the node is running; pass --stop-node for a guaranteed-clean copy");
+        // After a doubt, "the node is running" would contradict the line just printed.
+        match why_running_is_unknown {
+            Some(_) => ctx.term.detail(&format!("if it is, {MAY_LAG}")),
+            None => ctx.term.step(&format!("the node is running, so {MAY_LAG}")),
+        }
         return Ok(NodeGuard {
             ctx,
             rad,
@@ -139,7 +137,10 @@ pub(super) fn quiesce<'a>(
 
     let rad = rad.ok_or_else(|| {
         Error::refused(
-            "--stop-node was passed but rad is not on PATH",
+            format!(
+                "--stop-node was passed, but {}",
+                crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+            ),
             "install rad, or stop the node yourself and run again",
         )
     })?;

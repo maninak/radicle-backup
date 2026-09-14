@@ -62,13 +62,15 @@ pub fn run(ctx: &Ctx, args: &Verify) -> Result<std::process::ExitCode> {
         term.blank();
         if report.passed() {
             term.ok(&format!(
-                "{} is complete: {} entries, {}",
+                "{} is complete: {} files, {}",
                 report.archive.display(),
                 report.manifest.entries.len(),
                 term::human_bytes(report.manifest.total_bytes())
             ));
             if !args.deep {
-                term.hint("--deep also restores it into a throwaway home and checks the identity");
+                term.hint(
+                    "run verify with --deep to also test a restore into a temporary directory",
+                );
             }
         } else {
             term.fail(&format!(
@@ -111,7 +113,7 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
 
     let mismatches = scan.mismatches();
     checks.push((
-        format!("{} entries match their digests", scan.observed.len()),
+        format!("{} files in the archive are intact", scan.observed.len()),
         mismatches.is_empty(),
     ));
     problems.extend(mismatches);
@@ -122,7 +124,11 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
         secret_key_present,
     ));
     if !secret_key_present {
-        problems.push("keys/radicle is not in this archive: it cannot restore an identity".into());
+        problems.push(
+            "the private key (keys/radicle) is missing from the archive. It cannot restore your \
+             identity"
+                .into(),
+        );
     }
 
     Ok(Report {
@@ -131,6 +137,14 @@ pub fn check(ctx: &Ctx, args: &Verify) -> Result<Report> {
         checks,
         archive: archive.clone(),
     })
+}
+
+/// Why a key file did not read, without the path of the throwaway copy it was read from.
+fn unreadable(e: &crate::error::Error) -> String {
+    match e {
+        crate::error::Error::BadKey { reason, .. } => reason.clone(),
+        other => other.one_line(),
+    }
 }
 
 /// Rebuild what the archive holds and compare it with what the archive claims.
@@ -144,13 +158,10 @@ fn check_unpacked_home(
     match Identity::read(&public_key_path) {
         Ok(identity) => {
             let matches = identity.did() == manifest.identity.did;
-            checks.push((
-                format!("the public key restores as {}", identity.did()),
-                matches,
-            ));
+            checks.push((format!("the public key is {}", identity.did()), matches));
             if !matches {
                 problems.push(format!(
-                    "the archived public key is {}, but the manifest says {}",
+                    "the public key in the archive is {}, but the archive's record names {}",
                     identity.did(),
                     manifest.identity.did
                 ));
@@ -158,7 +169,10 @@ fn check_unpacked_home(
         }
         Err(e) => {
             checks.push(("the public key is readable".to_string(), false));
-            problems.push(format!("keys/radicle.pub does not parse: {e}"));
+            problems.push(format!(
+                "the public key could not be read: {}",
+                unreadable(&e)
+            ));
         }
     }
 
@@ -172,18 +186,21 @@ fn check_unpacked_home(
                 ));
                 if !matches {
                     problems.push(
-                        "the archived private key does not match the archived public key".into(),
+                        "the private key in the archive does not match its public key".into(),
                     );
                 }
             }
             Err(e) => {
-                checks.push(("the private key has a public half".to_string(), false));
-                problems.push(format!("keys/radicle is not usable: {e}"));
+                checks.push(("the private key is usable".to_string(), false));
+                problems.push(format!("the private key could not be used: {e}"));
             }
         },
         Err(e) => {
             checks.push(("the private key is readable".to_string(), false));
-            problems.push(format!("keys/radicle does not parse: {e}"));
+            problems.push(format!(
+                "the private key could not be read: {}",
+                unreadable(&e)
+            ));
         }
     }
 
@@ -193,17 +210,21 @@ fn check_unpacked_home(
             Ok(policies) => {
                 let seeded = policies.seeded().count();
                 let matches = seeded == manifest.policies.seeded;
-                checks.push((format!("{seeded} seeding policies come back"), matches));
+                checks.push((
+                    format!("{seeded} seeding policies can be restored"),
+                    matches,
+                ));
                 if !matches {
                     problems.push(format!(
-                        "the policy database holds {seeded} seeded repositories, the manifest says {}",
+                        "the policy database holds {seeded} seeded repositories, but the \
+                         archive's record says {}",
                         manifest.policies.seeded
                     ));
                 }
             }
             Err(e) => {
-                checks.push(("the policy database opens".to_string(), false));
-                problems.push(format!("node/policies.db does not open: {e}"));
+                checks.push(("the policy database can be opened".to_string(), false));
+                problems.push(format!("the policy database could not be opened: {e}"));
             }
         }
     }
@@ -220,9 +241,9 @@ fn check_unpacked_home(
         // gets. The archive may be fine; this run cannot say so.
         if carried > 0 {
             problems.push(format!(
-                "git is not on PATH, so {} in this archive could not be opened; install git \
-                 and verify again",
-                crate::term::count(carried, "repository bundle", "repository bundles")
+                "git was not found, so {} in this archive could not be checked. Install git \
+                 and run verify again",
+                crate::term::count(carried, "repository", "repositories")
             ));
         }
         return Ok(());
@@ -232,19 +253,23 @@ fn check_unpacked_home(
         let bundle = staging.join(crate::git::bundle_entry(&repo.rid));
         match git.bundle_refs(&bundle) {
             Ok(refs) if !refs.is_empty() => bundles_opened += 1,
-            Ok(_) => problems.push(format!("{}: its bundle holds no refs", repo.rid)),
-            Err(e) => problems.push(format!("{}: its bundle does not open ({e})", repo.rid)),
+            Ok(_) => problems.push(format!(
+                "{}: the archived copy of this repository is empty",
+                repo.rid
+            )),
+            Err(e) => problems.push(format!(
+                "{}: the archived copy of this repository could not be opened: {}",
+                repo.rid,
+                e.one_line()
+            )),
         }
     }
     if bundles_opened > 0 {
         checks.push((
-            format!(
-                "{} and hold refs",
-                crate::term::count(
-                    bundles_opened,
-                    "repository bundle opens",
-                    "repository bundles open"
-                )
+            crate::term::count(
+                bundles_opened,
+                "archived repository can be opened",
+                "archived repositories can be opened",
             ),
             true,
         ));

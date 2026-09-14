@@ -34,6 +34,10 @@ pub enum Verdict {
     Fail,
     /// Something could not be looked at. Never counted as a pass.
     Unknown,
+    /// There is nothing yet for the check to look at, such as an archive before the first
+    /// backup. Kept apart from `Unknown`, because a first run would otherwise read as a report
+    /// that could not see half of what it was asked about.
+    Skipped,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,7 +82,7 @@ impl Check {
             return self;
         }
         self.detail = format!(
-            "{}; {} could not be described, so this is what could be seen and not the whole home",
+            "{}. The details of {} could not be read, so this result may be incomplete",
             self.detail,
             term::count(unread, "repository", "repositories")
         );
@@ -102,20 +106,22 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
             .filter(|check| check.verdict == wanted)
             .count()
     };
-    let (passed, warned, failed, unknown) = (
-        tally(Verdict::Pass),
-        tally(Verdict::Warn),
-        tally(Verdict::Fail),
-        tally(Verdict::Unknown),
-    );
+    let tallied = Tally {
+        passed: tally(Verdict::Pass),
+        warned: tally(Verdict::Warn),
+        failed: tally(Verdict::Fail),
+        unknown: tally(Verdict::Unknown),
+        skipped: tally(Verdict::Skipped),
+    };
 
     if ctx.global.json {
         ctx.term.print_json(&serde_json::json!({
             "home": ctx.home.path().display().to_string(),
-            "passed": passed,
-            "warned": warned,
-            "failed": failed,
-            "unknown": unknown,
+            "passed": tallied.passed,
+            "warned": tallied.warned,
+            "failed": tallied.failed,
+            "unknown": tallied.unknown,
+            "skipped": tallied.skipped,
             "total": checks.len(),
             "checks": checks,
         }))?;
@@ -133,6 +139,9 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
                 Verdict::Warn => term.warn(&line),
                 Verdict::Fail => term.fail(&line),
                 Verdict::Unknown => term.unknown(&line),
+                Verdict::Skipped => {
+                    term.step(&format!("{}: skipped, {}", check.topic, check.detail));
+                }
             }
             // The remedy goes through `detail` under anything but a Pass, so `--quiet` cannot
             // print "you would lose this" and withhold the one line that fixes it.
@@ -145,54 +154,68 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
             }
         }
         term.blank();
-        term.headline(&summary(passed, warned, failed, unknown));
-        if failed > 0 {
-            term.detail("every ✗ is a way to lose this identity; the line under it is the fix");
+        term.headline(&tallied.summary());
+        if tallied.failed > 0 {
+            term.detail(
+                "each ✗ is a way to lose your identity or your data. The line under it is the fix.",
+            );
         }
     }
 
-    Ok(if is_a_clean_report(passed, warned, failed) {
+    Ok(if tallied.is_clean() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::from(EXIT_CHECKS_FAILED)
     })
 }
 
-/// Whether a report has earned an exit 0.
-///
-/// A failing check is the ordinary reason not to. So is a report that answered nothing: `doctor
-/// --json` is documented as a monitoring probe, and a run where every check came back "could
-/// not be checked" has established no posture at all, which a probe reading the exit code
-/// cannot tell from a clean one.
-///
-/// Unknowns alongside answers keep the exit 0 they have always had. A machine with no `rad` on
-/// PATH cannot answer several of these and may be perfectly covered, and exiting 3 at it every
-/// night is how a red line stops being read.
-fn is_a_clean_report(passed: usize, warned: usize, failed: usize) -> bool {
-    failed == 0 && passed + warned > 0
+/// How many checks landed in each verdict.
+struct Tally {
+    passed: usize,
+    warned: usize,
+    failed: usize,
+    unknown: usize,
+    skipped: usize,
 }
 
-/// Name every bucket that has something in it, rather than reporting a score.
-///
-/// "2 of 7 checks pass" leaves the other five to the reader's imagination, and it counts a
-/// check that could not be run as one that did not pass. Naming the buckets means the line
-/// adds up to the number of checks and says which of them need a person.
-fn summary(passed: usize, warned: usize, failed: usize, unknown: usize) -> String {
-    let total = passed + warned + failed + unknown;
-    if passed == total {
-        return format!("all {total} checks pass");
+impl Tally {
+    /// Whether a report has earned an exit 0.
+    ///
+    /// A failing check is the ordinary reason not to. So is a report that answered nothing:
+    /// `doctor --json` is documented as a monitoring probe, and a run where no check passed or
+    /// warned has established no posture at all. A skipped check is not an answer either, so
+    /// it counts toward neither side.
+    ///
+    /// Unknowns alongside answers keep the exit 0. A machine with no `rad` on PATH cannot
+    /// answer several of these and may be perfectly covered, and exiting 3 at it every night is
+    /// how a red line stops being read.
+    fn is_clean(&self) -> bool {
+        self.failed == 0 && self.passed + self.warned > 0
     }
-    let mut parts = vec![format!("{passed} pass")];
-    if warned > 0 {
-        parts.push(format!("{warned} worth improving"));
+
+    /// Name every bucket that has something in it, rather than reporting a score.
+    ///
+    /// "2 of 7 checks pass" counts a check that could not be run as one that did not pass.
+    /// Naming the buckets means the line adds up to the number of checks and says which of
+    /// them need a person.
+    fn summary(&self) -> String {
+        let total = self.passed + self.warned + self.failed + self.unknown + self.skipped;
+        if self.passed == total {
+            return format!("all {total} checks pass");
+        }
+        let mut parts = vec![format!("{} pass", self.passed)];
+        for (count, bucket) in [
+            (self.warned, "worth improving"),
+            (self.failed, "failing"),
+            (self.unknown, "could not be checked"),
+            (self.skipped, "skipped"),
+        ] {
+            if count > 0 {
+                parts.push(format!("{count} {bucket}"));
+            }
+        }
+        parts.join(", ")
     }
-    if failed > 0 {
-        parts.push(format!("{failed} failing"));
-    }
-    if unknown > 0 {
-        parts.push(format!("{unknown} could not be checked"));
-    }
-    parts.join(", ")
 }
 
 fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
@@ -222,6 +245,7 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         &git,
         rad.as_ref(),
         RepoSelection::None,
+        inventory::Purpose::Inspection,
         &node_id,
         &policies,
         &routing,
@@ -268,7 +292,13 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         )
         .qualified_by_unread(unread),
     );
-    checks.push(check_sole_delegate(&inventory).qualified_by_unread(unread));
+    checks.push(
+        check_sole_delegate(
+            &inventory,
+            newest.is_some() || record.is_some_and(|record| record.restored.is_none()),
+        )
+        .qualified_by_unread(unread),
+    );
     checks.push(
         check_replication(
             &inventory,
@@ -346,6 +376,9 @@ enum Aside {
     /// The age was read off the record, and the file it names is not there. A pass would
     /// otherwise read as "there is an archive here to restore from", and there is not.
     NotAtHand(String),
+    /// The age was read off the record of a `--stdout` run. There was never a file here to
+    /// find, and warning about that every night would push people off a documented setup.
+    WentToStdout(String),
     /// A file is here, and the record remembers a newer archive that went somewhere else.
     /// The age below is right about this file; it is just not the newest one that exists.
     SomethingNewerElsewhere(String),
@@ -354,7 +387,9 @@ enum Aside {
 impl Aside {
     fn said(&self) -> &str {
         match self {
-            Self::NotAtHand(what) | Self::SomethingNewerElsewhere(what) => what,
+            Self::NotAtHand(what)
+            | Self::WentToStdout(what)
+            | Self::SomethingNewerElsewhere(what) => what,
         }
     }
 
@@ -418,7 +453,12 @@ fn check_backup_freshness(
     now: jiff::Timestamp,
 ) -> Check {
     const TOPIC: &str = "backup";
-    let looked_in = directory.display().to_string();
+    // Absolute, because the directory defaults to `.` and the remedy below is a command to copy:
+    // `rad backup --output .` means a different place in every shell it is pasted into.
+    let looked_in = std::path::absolute(directory)
+        .unwrap_or_else(|_| directory.to_path_buf())
+        .display()
+        .to_string();
     let record = stored.record();
 
     // The file that is there answers first: it is what a restore would actually use, and it is
@@ -438,11 +478,13 @@ fn check_backup_freshness(
         }
         (None, Some(record)) => Newest {
             days: record.age_in_days(now),
-            named: format!("the newest {} archive this tool recorded", record.tier),
-            caveat: Some(Aside::NotAtHand(match &record.archive {
-                Some(path) => not_listed_here(path),
-                None => "it went to stdout, so this tool never knew where it landed".to_string(),
-            })),
+            named: format!("the newest {} archive rad-backup recorded", record.tier),
+            caveat: Some(match &record.archive {
+                Some(path) => Aside::NotAtHand(not_listed_here(path)),
+                None => Aside::WentToStdout(
+                    "it went to standard output, so rad-backup cannot see where it is".to_string(),
+                ),
+            }),
         },
         (None, None) => {
             if let state::Stored::Unreadable { .. } = stored {
@@ -450,8 +492,8 @@ fn check_backup_freshness(
                     TOPIC,
                     Verdict::Unknown,
                     format!(
-                        "no archive of this identity in {looked_in}, and the record of earlier \
-                         ones could not be read"
+                        "no archive of your identity in {looked_in}, and rad-backup's record of \
+                         earlier ones could not be read"
                     ),
                 )
                 .with_remedy("take another to replace it: rad backup");
@@ -460,11 +502,11 @@ fn check_backup_freshness(
                 TOPIC,
                 Verdict::Fail,
                 format!(
-                    "no archive of this identity in {looked_in}, and this tool has no record of \
-                     one anywhere"
+                    "no archive of your identity in {looked_in}, and rad-backup has no record of \
+                     one"
                 ),
             )
-            .with_remedy(format!("rad backup --output {looked_in}"));
+            .with_remedy(format!("rad backup --output {}", shell_word(&looked_in)));
         }
     };
 
@@ -513,8 +555,28 @@ fn check_backup_freshness(
             verdict: Verdict::Warn,
             ..check
         }
-        .with_remedy("take another where this tool will find it: rad backup"),
+        .with_remedy("take another where rad-backup can find it: rad backup"),
         false => check,
+    }
+}
+
+/// "it is" for one and "all 3 are" for more, so a sentence about a count never reads "all 1 are".
+fn every(count: usize) -> String {
+    match count {
+        1 => "it is".to_string(),
+        _ => format!("all {count} are"),
+    }
+}
+
+/// What a check that needs an archive says when there is none to look at.
+const NO_ARCHIVE_FOUND: &str = "no archive found";
+
+/// A path as one shell word, quoted only when it needs to be, so a remedy pastes as printed.
+fn shell_word(path: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+=:@,".contains(c);
+    match path.chars().all(plain) && !path.is_empty() {
+        true => path.to_string(),
+        false => format!("'{}'", path.replace('\'', r"'\''")),
     }
 }
 
@@ -539,8 +601,8 @@ fn check_archive_encryption(
             Some(record) if !record.is_encrypted => Check::new(
                 TOPIC,
                 Verdict::Warn,
-                "no archive of this identity was found here, and the last one this tool wrote \
-                 was written in the clear",
+                "no archive of your identity was found, and the last one rad-backup wrote was \
+                 not encrypted",
             )
             .with_remedy(
                 "take another without --plaintext, then find that one and delete it: anyone \
@@ -549,9 +611,9 @@ fn check_archive_encryption(
             Some(_) => Check::new(
                 TOPIC,
                 Verdict::Unknown,
-                "no archive of this identity was found here, so none could be opened",
+                "no archive of your identity was found, so none could be opened",
             ),
-            None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to judge"),
+            None => Check::new(TOPIC, Verdict::Skipped, NO_ARCHIVE_FOUND),
         });
     };
 
@@ -633,14 +695,21 @@ fn check_archive_location(
             .filter(|path| path.exists())
     });
     let Some(path) = judged else {
-        return match recorded {
-            Some(archive) => Check::new(
+        return match (record, recorded) {
+            (_, Some(archive)) => Check::new(
                 TOPIC,
                 Verdict::Unknown,
-                format!("{archive} is not there now, so where it sits could not be judged"),
+                format!("{archive} is not there now, so where it is cannot be checked"),
             )
-            .with_remedy("if you moved it somewhere safe, this is fine; if not, take another"),
-            None => Check::new(TOPIC, Verdict::Unknown, "there is no archive to locate"),
+            .with_remedy(
+                "if you moved it to another disk, nothing is wrong. If not, run `rad backup`",
+            ),
+            (Some(_), None) => Check::new(
+                TOPIC,
+                Verdict::Unknown,
+                "the last archive went to standard output, so where it is cannot be checked",
+            ),
+            (None, None) => Check::new(TOPIC, Verdict::Skipped, NO_ARCHIVE_FOUND),
         };
     };
 
@@ -653,29 +722,20 @@ fn check_archive_location(
         Some(true) => Check::new(
             TOPIC,
             Verdict::Warn,
-            format!("{name} is on the same filesystem as the home it protects"),
+            format!("{name} is on the same disk as your Radicle data"),
         )
-        .with_remedy(
-            "one dead disk would take both, unless something replicates that directory off this \
-             machine. If a sync client watches it, this line is noise; if not, copy the archive \
-             to another disk, another machine, or a service you trust",
-        ),
-        // A different filesystem is not always a different disk: two partitions of one drive,
-        // or a loopback mount, answer the same way as a second machine would. It is the most
-        // this can be told without asking the kernel about the block device under each.
+        .with_remedy("copy archives to another disk or machine, unless a sync tool already does"),
+        // A different filesystem is not always a different disk: two partitions of one drive
+        // answer the same way as a second machine would, so the pass says filesystem.
         Some(false) => Check::new(
             TOPIC,
             Verdict::Pass,
-            format!("{name} is on a different filesystem from the home it protects"),
-        )
-        .with_remedy(
-            "worth confirming it is also a different disk, which two partitions of one drive \
-             are not",
+            format!("{name} is on a different filesystem from your Radicle data"),
         ),
         None => Check::new(
             TOPIC,
             Verdict::Unknown,
-            format!("{name} and the home could not be compared"),
+            format!("{name} and your Radicle data could not be compared"),
         ),
     }
 }
@@ -721,27 +781,45 @@ fn check_private_coverage(
             true => Check::new(
                 TOPIC,
                 Verdict::Pass,
-                format!(
-                    "all {} of them are in the newest archive here",
-                    private.len()
-                ),
+                format!("{} in the newest archive", every(private.len())),
             ),
             // A pass on the strength of a record about a file nothing here matched. Said as an
             // unknown, because "they are all backed up" about an archive this run never found
             // is the shape of claim this whole report exists not to make.
-            false => Check::new(
-                TOPIC,
-                Verdict::Unknown,
-                format!(
-                    "all {} of them are in the last archive this tool recorded, which is not \
-                     the newest one found here",
-                    private.len()
-                ),
-            )
-            .with_remedy(
-                "point --dir at where that archive went, or take one here with `rad backup \
-                 --repos private`",
-            ),
+            false => {
+                let all = every(private.len());
+                match (record.and_then(|record| record.archive.as_deref()), newest) {
+                    (None, _) => Check::new(
+                        TOPIC,
+                        Verdict::Unknown,
+                        format!(
+                            "{all} in the last archive, which went to standard output, \
+                             so rad-backup cannot check it"
+                        ),
+                    ),
+                    (Some(recorded), None) => Check::new(
+                        TOPIC,
+                        Verdict::Unknown,
+                        format!("{all} in {recorded}, which was not found"),
+                    )
+                    .with_remedy(
+                        "point --dir at the directory that holds it, or run `rad backup --repos \
+                         private`",
+                    ),
+                    (Some(recorded), Some(found)) => Check::new(
+                        TOPIC,
+                        Verdict::Unknown,
+                        format!(
+                            "{all} in {recorded}, but the archive found is {}",
+                            found.name()
+                        ),
+                    )
+                    .with_remedy(
+                        "point --dir at the directory that holds it, or run `rad backup --repos \
+                         private`",
+                    ),
+                }
+            }
         };
     }
     // The routing table is half of what `has_another_holder` answers with, so a table that
@@ -768,8 +846,8 @@ fn check_private_coverage(
     let (count, verb) = (missing.len(), term::is_or_are(missing.len()));
     let detail = if alone == 0 {
         format!(
-            "{count} of {} {verb} in no archive, though somebody else holds every one of \
-             those: a delegate, an allowed peer, or a node announcing it",
+            "{count} of {} {verb} in no archive. Another delegate, an allowed peer or a node \
+             announcing it holds each of them",
             private.len(),
         )
     } else if alone == missing.len() {
@@ -791,7 +869,12 @@ fn check_private_coverage(
     Check::new(TOPIC, verdict, detail).with_remedy("rad backup --repos private")
 }
 
-fn check_sole_delegate(inventory: &Inventory) -> Check {
+/// Whether losing the key would also cost the repositories nobody else can update.
+///
+/// `key_is_archived` is whether any archive of the key is known: one found on disk, or one
+/// rad-backup recorded writing. A restore's record does not count, because the archive it came
+/// from may be gone. Its age does not matter, because the key in an old archive is the same key.
+fn check_sole_delegate(inventory: &Inventory, key_is_archived: bool) -> Check {
     let sole: Vec<&str> = inventory
         .solely_delegated()
         .map(|repo| repo.display_name())
@@ -801,39 +884,42 @@ fn check_sole_delegate(inventory: &Inventory) -> Check {
         .iter()
         .filter(|repo| repo.is_delegate)
         .count();
-    const TOPIC: &str = "delegate quorum";
+    const TOPIC: &str = "sole delegate";
     if sole.is_empty() {
         return Check::new(
             TOPIC,
             Verdict::Pass,
             if delegated == 0 {
-                "you are not a delegate of anything".to_string()
+                "you are not a delegate of any repository on your node".to_string()
             } else {
-                format!(
-                    "all {} you delegate have another delegate too",
-                    term::count(delegated, "repository", "repositories")
-                )
+                "every repository you are a delegate of has another delegate too".to_string()
             },
         );
     }
-    let (has, whose) = if sole.len() == 1 {
-        ("has", "its")
-    } else {
-        ("have", "their")
-    };
+    let (count, names) = (
+        term::count(sole.len(), "repository", "repositories"),
+        sole.join(", "),
+    );
+    // Being the only delegate is how most repositories start, so it warns only when nothing
+    // could bring the key back. A warning nobody is expected to act on is one people learn to
+    // scroll past. Whether a second delegate helps depends on the threshold, which nothing
+    // here reads, so the hint says how to add one and makes no claim about how many is best.
+    if !key_is_archived {
+        return Check::new(
+            TOPIC,
+            Verdict::Warn,
+            format!("if you lose your key, nobody can update {count}: {names}"),
+        )
+        .with_remedy("back up your key: rad backup");
+    }
     Check::new(
         TOPIC,
-        Verdict::Warn,
-        format!(
-            "{} {has} you as {whose} only delegate: {}",
-            term::count(sole.len(), "repository", "repositories"),
-            sole.join(", ")
-        ),
+        Verdict::Pass,
+        format!("you are the only delegate of {count}: {names}"),
     )
     .with_remedy(
-        "a backup covers loss but not theft. Three delegates survive one lost key; two are \
-         worse than one, because both are still needed and there is twice the chance of \
-         losing one. Add one with `rad id edit`",
+        "if you lose your key, your backup brings it back. To add a second delegate: rad id \
+         update --repo <rid> --delegate <did>",
     )
 }
 
@@ -880,18 +966,15 @@ impl NothingCameBack {
             (None, false) => Self::NodeHasNotRun,
         }
     }
-
-    /// Whether the emptiness is the database's silence rather than an answer it gave.
-    fn is_unreadable(&self) -> bool {
-        matches!(self, Self::Unreadable(_))
-    }
 }
 
 fn empty_because(nothing_came_back: &NothingCameBack, then: &str) -> String {
     match nothing_came_back {
         NothingCameBack::Unreadable(why) => why.clone(),
         NothingCameBack::SchemaHasMovedOn => {
-            "this build cannot read part of the node's schema; see the warnings below".to_string()
+            "install a newer rad-backup. The installed rad-backup cannot read part of your \
+             node's data"
+                .to_string()
         }
         NothingCameBack::NodeHasNotRun => {
             format!("start the node with `rad node start` and {then}")
@@ -908,43 +991,48 @@ fn check_replication(
     // visibility, and passing it here put a repository that may well be private into a list
     // whose remedy is `rad sync --announce`. The caller qualifies the count with how many
     // could not be described.
-    let alone: Vec<&str> = inventory
-        .records
-        .iter()
-        .filter(|repo| repo.is_public())
+    const TOPIC: &str = "public repositories";
+    let public = inventory.records.iter().filter(|repo| repo.is_public());
+    // "None here" only when every identity was read. Otherwise nothing is known to be public,
+    // and an unreadable database is the more useful thing to say.
+    if public.clone().next().is_none() && inventory.identities_not_read() == 0 {
+        return Check::new(TOPIC, Verdict::Pass, "your node holds none");
+    }
+    let alone: Vec<&str> = public
         .filter(|repo| routing.get(&repo.rid).copied().unwrap_or(0) == 0)
         .map(|repo| repo.display_name())
         .collect();
 
-    const TOPIC: &str = "other seeds";
     if routing.is_empty() {
-        let found = match nothing_came_back.is_unreadable() {
-            true => {
-                "the routing table could not be read, so no other node is known to hold anything"
+        let found = match nothing_came_back {
+            NothingCameBack::NodeHasNotRun => {
+                "your node knows of no other node holding any repository yet"
             }
-            false => "the routing table is empty, so no other node is known to hold anything",
+            _ => "which other nodes hold them could not be read",
         };
-        return Check::new(TOPIC, Verdict::Unknown, found)
-            .with_remedy(empty_because(nothing_came_back, "let it gossip"));
+        return Check::new(TOPIC, Verdict::Unknown, found).with_remedy(empty_because(
+            nothing_came_back,
+            "let it connect to other nodes",
+        ));
     }
     if alone.is_empty() {
         return Check::new(
             TOPIC,
             Verdict::Pass,
-            "every public repository is announced by at least one other node",
+            "every one is held by at least one other node",
         );
     }
     Check::new(
         TOPIC,
         Verdict::Warn,
         format!(
-            "{} {} announced by no other node: {}",
-            term::count(alone.len(), "public repository", "public repositories"),
+            "{} {} held by no other node: {}",
+            alone.len(),
             term::is_or_are(alone.len()),
             alone.join(", ")
         ),
     )
-    .with_remedy("`rad sync --announce` them, or ask a seed to hold a copy")
+    .with_remedy("announce them with `rad sync --announce <rid>`, or ask a seed to hold a copy")
 }
 
 /// Work that is signed here and has reached nobody.
@@ -965,60 +1053,67 @@ fn check_sigrefs_propagation(
     node_id: &str,
     nothing_came_back: &NothingCameBack,
 ) -> Check {
-    const TOPIC: &str = "signed refs propagation";
+    const TOPIC: &str = "unshared work";
+    // Only a repository known to be public. One whose identity document was never read is not
+    // known to be anything, and this list ends in `rad sync --announce`. No signed refs of our
+    // own means nothing of ours to share, not work stuck here.
+    let yours: Vec<(&crate::manifest::RepoRecord, &String)> = inventory
+        .records
+        .iter()
+        .filter(|repo| repo.is_public())
+        .filter_map(|repo| repo.sigrefs.get(node_id).map(|mine| (repo, mine)))
+        .collect();
+    if yours.is_empty() && inventory.identities_not_read() == 0 {
+        return Check::new(
+            TOPIC,
+            Verdict::Pass,
+            "you have no changes in any public repository on your node",
+        );
+    }
     if synced_heads.is_empty() {
-        let found = match nothing_came_back.is_unreadable() {
-            true => "what other nodes hold could not be read, so nothing can be compared",
-            false => {
-                "the node has no record of what any other node holds, so nothing can be compared"
+        let found = match nothing_came_back {
+            NothingCameBack::NodeHasNotRun => {
+                "your node has no record of syncing with another node yet"
             }
+            _ => "what other nodes hold could not be read",
         };
         return Check::new(TOPIC, Verdict::Unknown, found).with_remedy(empty_because(
             nothing_came_back,
-            "run this again once it has synced",
+            "run `rad backup doctor` again once it has synced",
         ));
     }
 
-    let mut here_only = Vec::new();
-    for repo in &inventory.records {
-        // Only a repository known to be public. One whose identity document was never read is
-        // not known to be anything, and this list ends in `rad sync --announce`.
-        if !repo.is_public() {
-            continue;
-        }
-        // No signed refs of our own means nothing of ours to propagate, not work stuck here.
-        let Some(mine) = repo.sigrefs.get(node_id) else {
-            continue;
-        };
-        // When each node said so is not this check's question, and the reader no longer
-        // offers it: a head that reached anybody, ever, has left this disk.
-        let elsewhere = synced_heads
-            .get(&repo.rid)
-            .is_some_and(|heads| heads.iter().any(|head| crate::git::same_oid(head, mine)));
-        if !elsewhere {
-            here_only.push(repo.display_name());
-        }
-    }
+    // When each node said so is not this check's question: a head that reached anybody, ever,
+    // has left this disk.
+    let here_only: Vec<&str> = yours
+        .into_iter()
+        .filter(|(repo, mine)| {
+            !synced_heads
+                .get(&repo.rid)
+                .is_some_and(|heads| heads.iter().any(|head| crate::git::same_oid(head, mine)))
+        })
+        .map(|(repo, _)| repo.display_name())
+        .collect();
 
     if here_only.is_empty() {
         return Check::new(
             TOPIC,
             Verdict::Pass,
-            "every public repository here has its current signed refs on at least one other node",
+            "your latest changes to every public repository have reached another node",
         );
     }
     Check::new(
         TOPIC,
         Verdict::Warn,
         format!(
-            "the newest signed refs of {} {} on this disk and no other: {}",
+            "your latest changes to {} have reached no other node: {}",
             term::count(here_only.len(), "repository", "repositories"),
-            term::is_or_are(here_only.len()),
             here_only.join(", ")
         ),
     )
     .with_remedy(
-        "`rad sync --announce` them, and keep an archive covering them until they have propagated",
+        "announce them with `rad sync --announce <rid>`. Keep your backups until another node \
+         has them",
     )
 }
 
@@ -1043,33 +1138,35 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
             return Check::new(
                 TOPIC,
                 Verdict::Unknown,
-                "this tool has no record of where this home came from, so whether another \
-                 machine holds the same key is not known here",
+                "rad-backup has no record of where this machine's Radicle data came from, so \
+                 it cannot tell whether another machine holds the same key",
             )
             .with_remedy(
-                "if this home was restored or copied from another machine, make sure that \
-                 machine is not running a node",
+                "if this machine's Radicle data was restored or copied from another machine, \
+                 make sure that machine is not running a node",
             );
         }
         state::Stored::Unreadable { .. } => {
             return Check::new(
                 TOPIC,
                 Verdict::Unknown,
-                "the record of where this home came from could not be read, so whether another \
-                 machine holds the same key is not known here",
+                "rad-backup's record of where this machine's Radicle data came from could not \
+                 be read, so it cannot tell whether another machine holds the same key",
             )
             .with_remedy(
-                "if this home was restored or copied from another machine, make sure that \
-                 machine is not running a node",
+                "if this machine's Radicle data was restored or copied from another machine, \
+                 make sure that machine is not running a node",
             );
         }
     };
 
+    // Every backup writes a record with no `restored` in it, so this is only what the latest
+    // record says. A home restored and then backed up lands here too.
     let Some(restored) = record.restored.as_ref() else {
         return Check::new(
             TOPIC,
             Verdict::Pass,
-            "this home was not restored from an archive, so nothing here suggests a second copy",
+            "the last thing rad-backup recorded on this machine was a backup, not a restore",
         );
     };
 
@@ -1081,8 +1178,8 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
         Some(true) => Check::new(
             TOPIC,
             Verdict::Pass,
-            "this home was moved here, and the archive records the machine it came from as \
-             retiring its key",
+            "your Radicle data was moved here, and the archive says the old machine retires its \
+             key",
         ),
         // Said as a possibility, never as a finding: this tool cannot see the other machine,
         // and telling somebody their identity is being double-signed when it is not would send
@@ -1095,18 +1192,16 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
                 restored.source_node_state_was_guessed,
             ) {
                 (true, false) => {
-                    "this home was restored from a backup, and that backup was taken from a \
-                     machine with a node running"
+                    "your Radicle data was restored from a backup of a machine with a node running"
                 }
                 // The source run could not reach the socket and recorded the cautious answer.
                 // Repeating that as a fact is this report asserting what nothing established.
                 (true, true) => {
-                    "this home was restored from a backup, and the run that took it could not \
-                     tell whether that machine had a node running"
+                    "your Radicle data was restored from a backup of a machine that may have had a \
+                     node running"
                 }
                 (false, _) => {
-                    "this home was restored from a backup, which leaves the key on the machine \
-                     the backup was taken from"
+                    "your Radicle data was restored from a backup, so the old machine still has the key"
                 }
             },
         )
@@ -1117,8 +1212,8 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
         None => Check::new(
             TOPIC,
             Verdict::Unknown,
-            "this home was restored from an archive written before archives said whether their \
-             source retires its key",
+            "your Radicle data was restored from an older archive that does not say whether the \
+             old machine retires its key",
         )
         .with_remedy("make sure the machine it came from is not running a node"),
     }
@@ -1131,14 +1226,46 @@ mod tests {
     use super::*;
     use crate::key::tests::TestScratch;
 
+    fn tally(passed: usize, warned: usize, failed: usize, unknown: usize, skipped: usize) -> Tally {
+        Tally {
+            passed,
+            warned,
+            failed,
+            unknown,
+            skipped,
+        }
+    }
+
     #[test]
     fn a_report_that_could_not_check_anything_is_not_a_clean_one() {
-        assert!(is_a_clean_report(9, 0, 0));
-        assert!(is_a_clean_report(7, 2, 0));
-        assert!(!is_a_clean_report(8, 0, 1));
-        // Nine checks, nine "could not be checked": no `rad`, no node database, no archive to
-        // open. Green here is a monitoring probe reporting a posture nothing looked at.
-        assert!(!is_a_clean_report(0, 0, 0));
+        assert!(tally(9, 0, 0, 0, 0).is_clean());
+        assert!(tally(7, 2, 0, 0, 0).is_clean());
+        assert!(!tally(8, 0, 1, 0, 0).is_clean());
+        // No check answered: some could not be looked at and the rest had nothing to look at.
+        // Green here is a monitoring probe reporting a posture nothing looked at.
+        assert!(!tally(0, 0, 0, 6, 3).is_clean());
+        assert!(tally(6, 0, 0, 0, 3).is_clean());
+    }
+
+    /// A first run has no archive, and the checks that read one have nothing to look at. That
+    /// is not a question the report failed to answer, but a recorded archive this run cannot
+    /// see is.
+    #[test]
+    fn the_archive_checks_skip_when_there_is_no_archive_and_no_record_of_one() {
+        let home = std::path::Path::new("/nowhere");
+        let none = check_archive_encryption(&Default::default(), None, None)
+            .expect("no archive is not an error");
+        assert_eq!(none.verdict, Verdict::Skipped, "{}", none.detail);
+        let none = check_archive_location(home, None, None);
+        assert_eq!(none.verdict, Verdict::Skipped, "{}", none.detail);
+
+        // A `--stdout` run: an archive exists somewhere this tool cannot see.
+        let recorded = record();
+        let elsewhere = check_archive_encryption(&Default::default(), None, Some(&recorded))
+            .expect("no archive is not an error");
+        assert_eq!(elsewhere.verdict, Verdict::Unknown, "{}", elsewhere.detail);
+        let elsewhere = check_archive_location(home, None, Some(&recorded));
+        assert_eq!(elsewhere.verdict, Verdict::Unknown, "{}", elsewhere.detail);
     }
 
     /// A key file for a test, owner-only inside an owner-only directory, because these used
@@ -1286,7 +1413,7 @@ mod tests {
                 .expect("no archive is not an error"),
             check_archive_location(std::path::Path::new("/nowhere"), None, None),
             check_private_coverage(&empty, None, None, false),
-            check_sole_delegate(&empty),
+            check_sole_delegate(&empty, false),
             check_replication(&empty, &BTreeMap::new(), &NothingCameBack::NodeHasNotRun),
             check_second_key_copy(&state::Stored::Absent),
             check_sigrefs_propagation(
@@ -1348,14 +1475,17 @@ mod tests {
 
     #[test]
     fn the_summary_names_every_bucket_rather_than_folding_them_into_a_score() {
-        assert_eq!(summary(7, 0, 0, 0), "all 7 checks pass");
+        assert_eq!(tally(7, 0, 0, 0, 0).summary(), "all 7 checks pass");
         assert_eq!(
-            summary(2, 2, 1, 2),
-            "2 pass, 2 worth improving, 1 failing, 2 could not be checked"
+            tally(2, 2, 1, 2, 2).summary(),
+            "2 pass, 2 worth improving, 1 failing, 2 could not be checked, 2 skipped"
         );
-        // The old line said "6 of 7 checks pass" here, which reads as one failure when there
-        // is none: a check nobody could run is not a check that went wrong.
-        assert_eq!(summary(6, 0, 0, 1), "6 pass, 1 could not be checked");
+        // "6 of 7 checks pass" reads as one failure when there is none: a check nobody could
+        // run is not a check that went wrong.
+        assert_eq!(
+            tally(6, 0, 0, 1, 0).summary(),
+            "6 pass, 1 could not be checked"
+        );
     }
 
     #[test]
@@ -1691,6 +1821,24 @@ mod tests {
     }
 
     #[test]
+    fn being_the_only_delegate_warns_only_when_no_archive_holds_the_key() {
+        let mut repo = public_repo_signed_at("rad:zAAA", "aaa");
+        repo.is_delegate = true;
+        repo.delegates = vec![ME.to_string()];
+        let inventory = holding(vec![repo]);
+
+        let unarchived = check_sole_delegate(&inventory, false);
+        assert_eq!(unarchived.verdict, Verdict::Warn, "{}", unarchived.detail);
+        assert!(
+            unarchived.remedy.is_some(),
+            "a warning with no way out is a nag"
+        );
+
+        let archived = check_sole_delegate(&inventory, true);
+        assert_eq!(archived.verdict, Verdict::Pass, "{}", archived.detail);
+    }
+
+    #[test]
     fn work_no_other_node_holds_is_named_as_being_on_this_disk_alone() {
         let inventory = holding(vec![
             public_repo_signed_at("rad:zAAA", "aaa"),
@@ -1778,7 +1926,6 @@ mod tests {
         assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
         let remedy = check.remedy.expect("an unknown says what would answer it");
         assert!(!remedy.contains("rad node start"), "{remedy}");
-        assert!(remedy.contains("schema"), "{remedy}");
 
         let check = check_replication(
             &inventory,
@@ -1787,6 +1934,7 @@ mod tests {
         );
         let remedy = check.remedy.expect("an unknown says what would answer it");
         assert!(!remedy.contains("rad node start"), "{remedy}");
+        assert!(remedy.contains("newer rad-backup"), "{remedy}");
     }
 
     #[test]
@@ -1817,7 +1965,7 @@ mod tests {
         let guessed = check_second_key_copy(&state::Stored::Record(Box::new(record)));
         assert_eq!(guessed.verdict, Verdict::Warn);
         assert!(
-            guessed.detail.contains("could not tell"),
+            guessed.detail.contains("may have had"),
             "{}",
             guessed.detail
         );
@@ -1911,7 +2059,11 @@ mod tests {
         for newest in [Some(&other), None] {
             let check = check_private_coverage(&inventory, Some(&record), newest, false);
             assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
-            assert!(check.detail.contains("recorded"), "{}", check.detail);
+            assert!(
+                check.detail.contains("/backups/one.tar.zst.age"),
+                "{}",
+                check.detail
+            );
         }
     }
 
@@ -1955,6 +2107,7 @@ mod tests {
             sigrefs: Default::default(),
             seeded: 0,
             followed: 0,
+            policies: None,
             restored: None,
         }
     }

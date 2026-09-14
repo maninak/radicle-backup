@@ -34,6 +34,75 @@ fn comparison_selection(recorded: &str) -> RepoSelection {
     }
 }
 
+/// What one set of ids gained and lost since the last archive. Sorted, as the sets are.
+#[derive(Debug, serde::Serialize)]
+struct SetChange<'a> {
+    added: Vec<&'a str>,
+    removed: Vec<&'a str>,
+}
+
+impl<'a> SetChange<'a> {
+    fn between(then: &'a BTreeSet<String>, now: &'a BTreeSet<String>) -> Self {
+        Self {
+            added: now.difference(then).map(String::as_str).collect(),
+            removed: then.difference(now).map(String::as_str).collect(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty()
+    }
+}
+
+/// Every policy set compared by id. Equal counts are not enough, because seeding one
+/// repository and unseeding another leaves them equal while the archive no longer matches.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PolicyChanges<'a> {
+    seeded: SetChange<'a>,
+    followed: SetChange<'a>,
+    blocked_repos: SetChange<'a>,
+    blocked_peers: SetChange<'a>,
+}
+
+impl<'a> PolicyChanges<'a> {
+    fn between(then: &'a state::PolicySets, now: &'a state::PolicySets) -> Self {
+        Self {
+            seeded: SetChange::between(&then.seeded, &now.seeded),
+            followed: SetChange::between(&then.followed, &now.followed),
+            blocked_repos: SetChange::between(&then.blocked_repos, &now.blocked_repos),
+            blocked_peers: SetChange::between(&then.blocked_peers, &now.blocked_peers),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.seeded.is_empty()
+            && self.followed.is_empty()
+            && self.blocked_repos.is_empty()
+            && self.blocked_peers.is_empty()
+    }
+}
+
+/// "2 repositories newly seeded" and "1 repository no longer seeded", each over its names.
+fn say_set_change(
+    term: &term::Term,
+    change: &SetChange,
+    (singular, plural): (&str, &str),
+    verb: &str,
+    name: &dyn Fn(&str) -> String,
+) {
+    for (ids, how) in [(&change.added, "newly"), (&change.removed, "no longer")] {
+        if ids.is_empty() {
+            continue;
+        }
+        let count = term::count(ids.len(), singular, plural);
+        term.warn(&format!("{count} {how} {verb}"));
+        for id in ids {
+            term.hint(&name(id));
+        }
+    }
+}
+
 pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     ctx.home.require_identity()?;
     let identity = Identity::read(ctx.home.public_key())?;
@@ -56,6 +125,12 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     let git = Git::new();
     let rad = Rad::new(ctx.home.path());
     let rad = rad.is_available().then_some(rad);
+    if rad.is_none() {
+        ctx.term.warn(&format!(
+            "{}. `diff` may report some of your repositories as changed or gone when they are not.",
+            crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+        ));
+    }
     let policies = db::read_policies(&ctx.home.policies_db())?;
     let routing = db::read_routing_counts(&ctx.home.node_db(), &node_id)?;
     let inventory = inventory::collect(
@@ -63,6 +138,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         &git,
         rad.as_ref(),
         comparison_selection(&record.repo_selection),
+        inventory::Purpose::Inspection,
         &node_id,
         &policies,
         &routing,
@@ -78,9 +154,12 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
 
     // A repository has moved on when the signed refs of this peer point somewhere else than
     // they did. That is the only change that can cost work, so it is the one worth naming.
+    // A new repository is named once, as new: it has no archived signed refs either, so
+    // without the first check it was listed a second time as moved.
     let moved: Vec<&crate::manifest::RepoRecord> = inventory
         .records
         .iter()
+        .filter(|repo| record.described.contains(&repo.rid))
         .filter(|repo| {
             let current = repo.sigrefs.get(&node_id);
             match (current, record.sigrefs.get(&repo.rid)) {
@@ -95,8 +174,20 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     let moved_rids: Vec<&String> = moved.iter().map(|repo| &repo.rid).collect();
     let moved_names: Vec<&str> = moved.iter().map(|repo| repo.display_name()).collect();
 
-    let policy_drift = policies.seeded().count() != record.seeded
-        || policies.followed().count() != record.followed;
+    let policies_now = state::PolicySets::of(&policies);
+    let policy_changes = record
+        .policies
+        .as_ref()
+        .map(|then| PolicyChanges::between(then, &policies_now));
+    let policy_drift = match &policy_changes {
+        Some(changes) => !changes.is_empty(),
+        // A record written before the sets were kept has only counts, and a swap of one
+        // repository for another passes them.
+        None => {
+            policies_now.seeded.len() != record.seeded
+                || policies_now.followed.len() != record.followed
+        }
+    };
     let drifted =
         !added.is_empty() || !removed.is_empty() || !moved_names.is_empty() || policy_drift;
 
@@ -112,6 +203,8 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
             "repositoriesGone": removed,
             "repositoriesMoved": moved_rids,
             "policiesChanged": policy_drift,
+            // `null` when the record predates the sets, and `policiesChanged` compared counts.
+            "policies": policy_changes,
         }))?;
     } else {
         let term = &ctx.term;
@@ -123,12 +216,16 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         term.blank();
 
         if !drifted {
-            term.ok("nothing has changed");
+            match policy_changes {
+                Some(_) => term.ok("nothing has changed"),
+                None => term.ok("no repository has changed"),
+            }
         }
         if !added.is_empty() {
-            term.warn(&format!(
-                "{} new",
-                term::count(added.len(), "repository", "repositories")
+            term.warn(&term::count(
+                added.len(),
+                "new repository",
+                "new repositories",
             ));
             for rid in &added {
                 // By name here and by rid in the JSON report, for the same reason each way
@@ -140,7 +237,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         }
         if !moved_names.is_empty() {
             term.warn(&format!(
-                "{} with new signed refs of yours",
+                "{} with new work of yours",
                 term::count(moved_names.len(), "repository", "repositories")
             ));
             for name in &moved_names {
@@ -149,18 +246,55 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         }
         if !removed.is_empty() {
             term.step(&format!(
-                "{} no longer here",
+                "{} no longer on this machine",
                 term::count(removed.len(), "repository", "repositories")
             ));
         }
-        if policy_drift {
-            term.warn(&format!(
-                "policies changed: {} seeded and {} followed now, {} and {} then",
-                policies.seeded().count(),
-                policies.followed().count(),
-                record.seeded,
-                record.followed
-            ));
+        let repo_name = |rid: &str| inventory.display_name(rid);
+        // The local alias beside the id when there is one, since an id alone is unrecognisable.
+        let peer_name = |nid: &str| {
+            let alias = policies
+                .following
+                .iter()
+                .find(|policy| policy.nid == nid)
+                .and_then(|policy| policy.alias.as_deref())
+                .filter(|alias| !alias.is_empty());
+            match alias {
+                Some(alias) => format!("{alias} ({nid})"),
+                None => nid.to_string(),
+            }
+        };
+        const REPOS: (&str, &str) = ("repository", "repositories");
+        const PEERS: (&str, &str) = ("peer", "peers");
+        match &policy_changes {
+            Some(changes) => {
+                say_set_change(term, &changes.seeded, REPOS, "seeded", &repo_name);
+                say_set_change(term, &changes.followed, PEERS, "followed", &peer_name);
+                say_set_change(term, &changes.blocked_repos, REPOS, "blocked", &repo_name);
+                say_set_change(term, &changes.blocked_peers, PEERS, "blocked", &peer_name);
+            }
+            None => {
+                if policies_now.seeded.len() != record.seeded {
+                    term.warn(&format!(
+                        "{} seeded now, {} at the last archive",
+                        term::count(policies_now.seeded.len(), REPOS.0, REPOS.1),
+                        record.seeded
+                    ));
+                }
+                if policies_now.followed.len() != record.followed {
+                    term.warn(&format!(
+                        "{} followed now, {} at the last archive",
+                        term::count(policies_now.followed.len(), PEERS.0, PEERS.1),
+                        record.followed
+                    ));
+                }
+                if record.seeded + record.followed > 0 {
+                    term.hint(
+                        "the last archive only counted your policies. After your next backup, \
+                         `rad backup diff` names each change.",
+                    );
+                }
+            }
         }
         if drifted {
             term.blank();

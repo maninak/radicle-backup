@@ -726,6 +726,8 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     let ran = fixture.run(
         &[
             "--plaintext",
+            "--repos",
+            "none",
             "--output",
             &backups.to_string_lossy(),
             "--yes",
@@ -785,11 +787,11 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
     // arrived with a run of eighteen spaces in the middle of a sentence. Neither `cargo fmt`
     // nor clippy reads inside a literal, so nothing but a reader would ever have caught it.
     assert!(
-        said.contains("1 repository bundle in this archive could not be opened"),
+        said.contains("1 repository in this archive could not be checked"),
         "the sentence has to read as one: {said}"
     );
     assert!(
-        !said.contains("  not opened"),
+        !said.contains("  not checked"),
         "no run of spaces inside the sentence: {said}"
     );
 }
@@ -813,10 +815,29 @@ fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
 
     let ran = fixture.run(&["diff"], &fixture.home());
     assert_success(&ran, "diffing an unchanged home");
-    assert!(
-        stderr(&ran).contains("nothing has changed"),
-        "{}",
+
+    // One followed peer swapped for another leaves every count equal. A scheduled
+    // `diff || backup` still has to take the archive, since a restore would bring back the
+    // old peer.
+    let db = rusqlite::Connection::open(fixture.home().join("node/policies.db"))
+        .expect("the policy database opens");
+    db.execute_batch(
+        "delete from following where id = 'z6MkFriend';
+         insert into following values ('z6MkStranger', '', 'allow');",
+    )
+    .expect("the followed peer is swappable");
+    let ran = fixture.run(&["diff", "--json"], &fixture.home());
+    assert_eq!(
+        ran.status.code(),
+        Some(3),
+        "a swapped peer is drift: {}",
         stderr(&ran)
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&ran)).expect("--json prints json");
+    assert_eq!(
+        report["policies"]["followed"],
+        serde_json::json!({"added": ["z6MkStranger"], "removed": ["z6MkFriend"]})
     );
 
     fixture.advance();
@@ -908,7 +929,10 @@ fn a_private_selection_leaves_out_the_repository_rad_calls_public() {
     // And the summary says so in the line somebody actually reads, because an archive that
     // quietly carries none of the repositories it was taken for is the failure this selection
     // exists to avoid.
-    assert!(said.contains("repositories private (0 carried)"), "{said}");
+    assert!(
+        said.contains("saved: your key, 0 private repositories,"),
+        "{said}"
+    );
 }
 
 #[test]
@@ -920,7 +944,12 @@ fn a_state_archive_carries_the_paperwork_but_not_the_repositories() {
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    assert_success(&ran, "taking a state backup");
+    // The fixture has no `rad`, so the default private selection cannot see which repository
+    // is private and carries none. That still writes the archive, and exits 3 so a timer hears.
+    assert_checks_failed(
+        &ran,
+        "a state backup that could not tell private repositories apart",
+    );
     let archive = only_archive(&backups);
 
     let ran = fixture.run(
@@ -961,7 +990,13 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     let backups = fixture.path("backups");
 
     let ran = fixture.run(
-        &["--output", &backups.to_string_lossy(), "--yes"],
+        &[
+            "--repos",
+            "none",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
         &fixture.home(),
     );
     assert_success(&ran, "taking a backup");
@@ -1151,7 +1186,13 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     let backups = fixture.path("backups");
 
     let ran = fixture.run(
-        &["--output", &backups.to_string_lossy(), "--yes"],
+        &[
+            "--repos",
+            "none",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
         &fixture.home(),
     );
     assert_success(&ran, "taking a backup");
@@ -1481,8 +1522,9 @@ fn a_move_whose_note_cannot_be_written_still_says_where_the_key_went() {
         said.contains("radicle.retired"),
         "the run must say where the key went: {said}"
     );
+    let note = fixture.home().join("keys/RETIRED.txt");
     assert!(
-        said.contains("could not be read, so it was left alone"),
+        said.contains(&format!("could not read {}", note.display())),
         "a note that could not be read must be said out loud: {said}"
     );
 }
@@ -1591,15 +1633,12 @@ fn a_home_restored_without_policies_reports_no_drift_over_the_ones_it_never_got(
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
     assert_success(&ran, "restoring an identity-tier archive");
 
+    // Exit 0 is the whole answer: an identity-tier archive carries no policies, so there is
+    // no drift to report.
     let ran = fixture.run(&["diff"], &restored);
-    let said = stderr(&ran);
     assert_success(
         &ran,
         "diffing a home restored from an identity-tier archive",
-    );
-    assert!(
-        said.contains("nothing has changed"),
-        "an identity-tier archive carries no policies, so there is no drift to report: {said}"
     );
 }
 
@@ -1611,7 +1650,13 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
     // A `state` archive describes the repository without carrying it, which is the case that
     // made a freshly restored home report the repositories it never asked for as missing.
     let ran = fixture.run(
-        &["--output", &backups.to_string_lossy(), "--yes"],
+        &[
+            "--repos",
+            "none",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
         &fixture.home(),
     );
     assert_success(&ran, "taking a state backup");
@@ -1621,13 +1666,13 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
     assert_success(&ran, "restoring the archive");
 
-    let ran = fixture.run(&["diff"], &restored);
+    let ran = fixture.run(&["diff", "--json"], &restored);
     assert_success(&ran, "diffing a freshly restored home");
-    assert!(
-        stderr(&ran).contains("nothing has changed"),
-        "a restore should leave nothing to report: {}",
-        stderr(&ran)
-    );
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&ran)).expect("--json prints json");
+    // Not null: a restore records which policies it put back, so the next diff compares them
+    // by id and not only by count.
+    assert!(report["policies"].is_object(), "{report}");
 
     // Asserted on the detail rather than the topic, because the topic prints whatever the
     // verdict is: matching it would pass just as happily on "no archive has ever been taken".
@@ -1651,12 +1696,18 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
     let backups = fixture.path("backups");
     let dir = backups.to_string_lossy().into_owned();
 
-    let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    let ran = fixture.run(
+        &["--repos", "none", "--output", &dir, "--yes"],
+        &fixture.home(),
+    );
     assert_success(&ran, "taking the first archive");
     // The name carries a whole-second stamp, so two archives need a second between them.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     fixture.advance();
-    let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    let ran = fixture.run(
+        &["--repos", "none", "--output", &dir, "--yes"],
+        &fixture.home(),
+    );
     assert_success(&ran, "taking the second archive");
 
     let mut archives: Vec<PathBuf> = std::fs::read_dir(&backups)
@@ -1706,7 +1757,10 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
     let dir = backups.to_string_lossy().into_owned();
 
     for _ in 0..2 {
-        let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+        let ran = fixture.run(
+            &["--repos", "none", "--output", &dir, "--yes"],
+            &fixture.home(),
+        );
         assert_success(&ran, "taking an archive");
         std::thread::sleep(std::time::Duration::from_millis(1100));
     }
@@ -3019,7 +3073,13 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     let backups = fixture.path("backups");
 
     let ran = fixture.run(
-        &["--output", &backups.to_string_lossy(), "--yes"],
+        &[
+            "--repos",
+            "none",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
         &fixture.home(),
     );
     assert_success(&ran, "taking a backup");
@@ -3081,7 +3141,7 @@ fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_
     // json. The second half is that a check reading nothing from that file still answered.
     assert_eq!(verdict_of(&ran, "key passphrase"), "pass", "{report}");
 
-    for topic in ["other seeds", "signed refs propagation"] {
+    for topic in ["public repositories", "unshared work"] {
         assert_eq!(verdict_of(&ran, topic), "unknown", "{report}");
         let check = report["checks"]
             .as_array()

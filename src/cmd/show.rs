@@ -93,10 +93,13 @@ pub fn run(ctx: &Ctx, args: &ArchiveArg) -> Result<()> {
         manifest.policies.blocked_peers
     ))?;
 
+    // Under a heading and without `!`, because these describe the run that took the archive
+    // and not anything wrong now.
     if !manifest.warnings.is_empty() {
         term.blank();
+        term.headline("noted when this archive was taken");
         for warning in &manifest.warnings {
-            term.warn(warning);
+            term.print(warning)?;
         }
     }
     Ok(())

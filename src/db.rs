@@ -390,9 +390,8 @@ pub(crate) fn while_reading_drift() -> std::sync::MutexGuard<'static, ()> {
 /// both printed by the run and recorded in a manifest, and the two must not drift apart.
 pub fn schema_drift_warning(drift: &SchemaDrift) -> String {
     format!(
-        "{} does not have the {} this tool reads ({}): the node's schema has moved on, so \
-         whatever would have been read from it is reported as not known rather than as empty; \
-         a newer rad-backup may read it",
+        "{} was written by a Radicle version this rad-backup cannot fully read yet. Anything \
+         that needs its {} shows as unknown. A newer rad-backup may fix this ({})",
         drift.path.display(),
         drift.wanted,
         drift.reason

@@ -120,10 +120,10 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
     let Some(archive) = found else {
         return Err(Error::refused(
             format!(
-                "no archive was named, and none of this identity is in {}",
+                "no archive was given, and no archive of your identity is in {}",
                 directory.display()
             ),
-            "name one, or set RAD_BACKUP_DIR to where you keep them",
+            "pass the path to an archive, or set RAD_BACKUP_DIR to the directory that holds them",
         ));
     };
     ctx.term.step(&format!(
@@ -156,8 +156,8 @@ impl Scratch {
         // why the error names the path to remove.
         crate::perms::create_private_dir(&path).map_err(|e| match e {
             Error::Io { .. } if path.exists() => Error::refused(
-                format!("{} is already there", path.display()),
-                "remove it if it is left over from a run that crashed, then try again",
+                format!("the working directory {} already exists", path.display()),
+                "if an earlier run crashed and left it behind, delete it and run again",
             ),
             other => other,
         })?;
@@ -175,7 +175,8 @@ impl Drop for Scratch {
             // Leaving working files behind can mean leaving repository data behind, so it is
             // said out loud even though there is nothing left to do about it here.
             eprintln!(
-                "! could not remove the working directory {}: {e}",
+                "! could not remove the working directory {}: {e}. It may hold copies of your \
+                 data. Delete it yourself",
                 self.path.display()
             );
         }
@@ -244,8 +245,8 @@ fn room_for(template: &str, values: &[(&str, &str)]) -> usize {
 pub fn refuse_keep_zero(keep: usize) -> Result<()> {
     if keep == 0 {
         return Err(Error::refused(
-            "--keep 0 would delete every archive of this identity",
-            "keep at least one, or delete the files yourself if that is really what you mean",
+            "--keep 0 would delete every archive of your identity",
+            "use --keep 1 or more. To delete every archive, delete the files yourself",
         ));
     }
     Ok(())
@@ -280,6 +281,7 @@ mod tests {
             sigrefs: Default::default(),
             seeded: 0,
             followed: 0,
+            policies: None,
             restored: None,
         };
         let flag = PathBuf::from("/flag");

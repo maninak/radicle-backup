@@ -18,10 +18,10 @@ use crate::manifest::{RepoSelection, Tier};
     version,
     about = "Back up, restore and move a Radicle identity",
     long_about = "Back up, restore and move a Radicle identity, node state and repositories.\n\n\
-                  With no command, `rad-backup` creates an archive, as `create` does, and \
-                  takes the options listed under Options. The global options work with or \
-                  without a command.\n\n\
-                  Installed on PATH, this is also `rad backup`.",
+                  With no command, `rad-backup` creates an archive, the same as `rad-backup \
+                  create`. The options listed under Options are for that. Global options work \
+                  with or without a command.\n\n\
+                  When rad-backup is on your PATH, you can also run it as `rad backup`.",
     after_long_help = crate::credits::help_footer(),
     disable_help_subcommand = true
 )]
@@ -138,7 +138,7 @@ fn misplaced_create_flag_complaint(matches: &ArgMatches) -> Option<String> {
         return Some(format!("`--{flag}` belongs after `{verb}`, not before it"));
     }
     Some(format!(
-        "`--{flag}` shapes an archive, and `{verb}` does not create one"
+        "`--{flag}` only works when creating an archive. `{verb}` does not create one"
     ))
 }
 
@@ -153,15 +153,15 @@ fn declares(verb: &str, id: &str) -> bool {
 
 #[derive(Parser, Debug, Clone)]
 pub struct Global {
-    /// The Radicle home to work on. Defaults to RAD_HOME, then ~/.radicle.
+    /// The Radicle home directory to use. Defaults to RAD_HOME, then ~/.radicle.
     #[arg(long, global = true, value_name = "PATH")]
     pub home: Option<PathBuf>,
 
-    /// Report as JSON on stdout instead of prose on stderr.
+    /// Print a JSON report on stdout instead of text on stderr.
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Answer every prompt with yes. What a cron job wants.
+    /// Answer yes to every question. Use this in scripts and cron jobs.
     #[arg(long, short = 'y', global = true)]
     pub yes: bool,
 
@@ -169,18 +169,17 @@ pub struct Global {
     #[arg(long, short = 'q', global = true)]
     pub quiet: bool,
 
-    /// Never colour the output. NO_COLOR is honoured too.
+    /// Turn off colour. Setting NO_COLOR does the same.
     #[arg(long, global = true)]
     pub no_color: bool,
 
-    /// Where to put working files: database snapshots, freshly built bundles, and the
-    /// staging copy a restore is checked in.
+    /// Where to put temporary working files while a command runs.
     ///
-    /// The default is beside whatever the command is producing, which is a filesystem the
-    /// user already chose and which has room for the result. `backup --stdout` produces no
-    /// file to sit beside, so that one run falls back to the system temporary directory.
-    /// Point this elsewhere when the default filesystem is small, read-only, or somewhere a
-    /// private repository should not appear even briefly.
+    /// These are copies of node databases and repositories, and the copy a restore checks
+    /// before it moves anything into place. By default they go next to the archive being
+    /// written or read, or next to the Radicle home being restored into. With `--stdout`
+    /// there is no archive file, so they go to the system temporary directory. Set this when
+    /// that disk is small or read-only, or when private repository data must not appear there.
     #[arg(
         long,
         global = true,
@@ -191,8 +190,9 @@ pub struct Global {
 
     /// Read the archive passphrase from a file instead of asking for it.
     ///
-    /// A file is checked first, then RAD_BACKUP_PASSPHRASE, then a hidden prompt. Prefer the
-    /// file: an environment variable is readable by anything that can see the process.
+    /// This file is used first. Without it, rad-backup reads RAD_BACKUP_PASSPHRASE. Without
+    /// that, it asks you. Prefer the file. Other programs can sometimes read the environment
+    /// variables of a running process.
     #[arg(
         long,
         global = true,
@@ -201,7 +201,8 @@ pub struct Global {
     )]
     pub passphrase_file: Option<PathBuf>,
 
-    /// An age or ssh private key file to decrypt an archive that was encrypted to a key.
+    /// A private key file (age or ssh) that opens an archive encrypted to its public key.
+    /// Repeatable.
     //
     // The flag stays `--identity`, which is what age and `age-keygen` call this and what every
     // recipe on the internet spells; the field is named for what it holds, because "identity"
@@ -211,14 +212,14 @@ pub struct Global {
 
     /// Read the passphrase for the --identity key from a file instead of asking for it.
     ///
-    /// This is the passphrase on the private KEY, not the one on the archive: an archive
-    /// encrypted to a recipient has no passphrase of its own. A file is checked first, then
-    /// RAD_BACKUP_IDENTITY_PASSPHRASE, then a hidden prompt. Prefer the file: an environment
-    /// variable is readable by anything that can see the process.
+    /// This passphrase unlocks the private key file. It is not a passphrase for the archive.
+    /// An archive encrypted to a public key has no passphrase of its own. This file is used
+    /// first. Without it, rad-backup reads RAD_BACKUP_IDENTITY_PASSPHRASE. Without that, it
+    /// asks you. Prefer the file. Other programs can sometimes read the environment variables
+    /// of a running process.
     ///
-    /// One passphrase for every --identity given. age stops at the first key it cannot
-    /// unlock, so an unattended run should offer the one key the archive was encrypted to
-    /// rather than a directory of them.
+    /// The same passphrase is used for every --identity key. age stops at the first key it
+    /// cannot unlock, so in a script pass only the key the archive was encrypted to.
     #[arg(
         long = "identity-passphrase-file",
         global = true,
@@ -233,16 +234,16 @@ pub enum Command {
     /// Create an archive. The default when no command is given.
     Create(Create),
 
-    /// Restore a Radicle home from an archive.
+    /// Restore your Radicle identity and data from an archive.
     ///
-    /// When a `rad-restore` link to this binary is on PATH, `rad restore <archive>` is the
-    /// same as `rad backup restore <archive>`.
+    /// If a `rad-restore` link to rad-backup is on your PATH, `rad restore <archive>` also
+    /// works.
     Restore(Restore),
 
-    /// Check that an archive is complete, readable and holds the identity it claims.
+    /// Check that an archive is complete and can be read.
     Verify(Verify),
 
-    /// List the archives of this identity, newest first.
+    /// List the archives of your identity, newest first.
     #[command(visible_alias = "list")]
     Ls(Ls),
 
@@ -250,59 +251,58 @@ pub enum Command {
     #[command(visible_alias = "inspect")]
     Show(ArchiveArg),
 
-    /// Delete older archives of this identity, keeping the newest few.
+    /// Delete older archives of your identity, keeping the newest few.
     Prune(Prune),
 
-    /// Take an archive automatically, on a timer.
+    /// Create archives automatically on a schedule.
     Schedule(Schedule),
 
-    /// Report how recoverable this identity currently is.
+    /// Check whether your identity and data could be recovered right now.
     Doctor(Doctor),
 
-    /// Render a printable recovery sheet.
+    /// Create a recovery sheet to print.
     Paper(Paper),
 
-    /// Move this identity to another machine.
+    /// Move your identity to another machine.
     #[command(name = "move")]
     Move(Migrate),
 
-    /// Show what changed since the last archive was taken.
+    /// Show what changed since the last archive.
     Diff,
 
-    /// Write shell completions to stdout.
+    /// Print shell completions.
     Completions(Completions),
 
-    /// Print the man page file, for installing where `man rad-backup` finds it.
+    /// Print the man page, to save where `man rad-backup` can find it.
     ///
-    /// At a terminal it prints no page, and says how to read the manual instead.
+    /// In a terminal it shows how to read the manual instead.
     Man,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Create {
-    /// Where to write the archive. A path ending in `.tar.zst`, `.age` or `.tar` names the
-    /// file; anything else is a directory, created if it is missing, and the archive is named
-    /// inside it. Defaults to the working directory, or to RAD_BACKUP_DIR when it is set.
+    /// Where to write the archive. A path ending in `.tar.zst`, `.age` or `.tar` is used as
+    /// the file name. Any other path is a directory, created if missing, and the archive gets
+    /// a name inside it. Defaults to RAD_BACKUP_DIR, then the current directory.
     #[arg(long, short = 'o', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub output: Option<PathBuf>,
 
-    /// How much of the home to carry.
+    /// How much to include in the archive.
     #[arg(long, value_enum, default_value_t = TierArg::State, env = "RAD_BACKUP_TIER")]
     pub tier: TierArg,
 
-    /// Which repositories to carry. Defaults to what the tier implies.
+    /// Which repositories to include. Defaults to what --tier includes.
     #[arg(long, value_enum, value_name = "WHICH")]
     pub repos: Option<ReposArg>,
 
     /// Write the archive to stdout, for piping into restic, borg or ssh.
     ///
-    /// Refuses `--json` because both write to stdout, and a JSON report glued onto the end of
-    /// an age stream is an archive that decrypts, fails to decompress, and says so only on
-    /// the day somebody needs it back.
+    /// Cannot be used with --output or --json.
     #[arg(long, conflicts_with = "output", conflicts_with = "json")]
     pub stdout: bool,
 
-    /// Do not encrypt. The archive will hold your private key in the clear.
+    /// Do not encrypt the archive. Anyone with the file can read everything in it, your key
+    /// file included.
     #[arg(long, conflicts_with = "recipient")]
     pub plaintext: bool,
 
@@ -310,26 +310,29 @@ pub struct Create {
     #[arg(long, value_name = "KEY", action = ArgAction::Append)]
     pub recipient: Vec<String>,
 
-    /// Stop the node before reading storage, and start it again afterwards.
+    /// Stop your node while the archive is created, then start it again.
     #[arg(long)]
     pub stop_node: bool,
 
-    /// Include the routing table and address book, which otherwise regenerate from gossip.
+    /// Also include the node database of known peers and their addresses. Your node rebuilds
+    /// it from the network when it is left out.
     #[arg(long)]
     pub with_node_db: bool,
 
-    /// Delete older archives of this identity in the output directory, keeping this many.
+    /// After writing, delete older archives of your identity in the output directory, keeping
+    /// the newest N.
     #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: Option<usize>,
 
-    /// Say what would be carried, and how much of it, without writing anything.
+    /// Show what the archive would include and how big it would be, without writing anything.
     #[arg(long)]
     pub dry_run: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Ls {
-    /// Where to look. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
+    /// The directory to look in. Defaults to RAD_BACKUP_DIR, then the directory of your last
+    /// archive.
     #[arg(long, short = 'd', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub dir: Option<PathBuf>,
 
@@ -345,18 +348,19 @@ pub struct Prune {
     #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: usize,
 
-    /// Where to prune. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
+    /// The directory to delete archives from. Defaults to RAD_BACKUP_DIR, then the directory
+    /// of your last archive.
     #[arg(long, short = 'd', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub dir: Option<PathBuf>,
 
-    /// List what would be deleted, and delete nothing.
+    /// List what would be deleted without deleting it.
     #[arg(long)]
     pub dry_run: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Schedule {
-    /// How often to take one: `daily`, `weekly`, `hourly`, or any systemd calendar
+    /// How often to create an archive: `daily`, `weekly`, `hourly`, or a systemd calendar
     /// expression such as `Mon,Thu 04:00`.
     #[arg(long, value_name = "WHEN", default_value = "daily")]
     pub every: String,
@@ -372,8 +376,7 @@ pub struct Schedule {
     /// Encrypt the scheduled archives to an age or ssh public key instead of to a
     /// passphrase. Repeatable.
     ///
-    /// Nothing has to be unlocked to write to a recipient, so a timer set up this way needs
-    /// no passphrase file and an unattended run has nothing to be asked for.
+    /// With a public key, the scheduled run needs no passphrase file.
     #[arg(long, value_name = "KEY", action = ArgAction::Append)]
     pub recipient: Vec<String>,
 
@@ -381,18 +384,18 @@ pub struct Schedule {
     #[arg(long, conflicts_with = "recipient")]
     pub plaintext: bool,
 
-    /// Turn the timer off again. The unit files are left in place.
+    /// Turn the schedule off. The systemd unit files stay in place.
     #[arg(long, conflicts_with_all = ["every", "output", "keep", "recipient", "plaintext"])]
     pub off: bool,
 
-    /// Say whether it is on, and when it next runs, without changing anything.
+    /// Show whether the schedule is on and when it runs next. Changes nothing.
     #[arg(long, conflicts_with_all = ["every", "output", "keep", "off", "recipient", "plaintext"])]
     pub status: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct ArchiveArg {
-    /// The archive to read. Defaults to the newest one this tool knows about.
+    /// The archive to read. Defaults to your newest archive.
     #[arg(value_name = "ARCHIVE")]
     pub archive: Option<PathBuf>,
 }
@@ -402,53 +405,52 @@ pub struct Verify {
     #[command(flatten)]
     pub target: ArchiveArg,
 
-    /// Restore into a throwaway home and prove that it comes back as the same identity.
+    /// Also restore the archive into a temporary directory and check that its keys match the
+    /// identity it names.
     #[arg(long)]
     pub deep: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Restore {
-    /// The archive to read. Not needed with `--words`, which rebuilds the key from a
-    /// recovery sheet and has no archive to read.
+    /// The archive to restore from. Not needed with `--words`.
     #[arg(value_name = "ARCHIVE", required_unless_present = "words")]
     pub archive: Option<PathBuf>,
 
-    /// Restore into a home that already holds an identity, stored repositories, a node
-    /// database or a config, overwriting what is there.
+    /// Restore even when the Radicle home already holds an identity, repositories, a node
+    /// database or a config. What is there gets overwritten.
     #[arg(long)]
     pub force: bool,
 
-    /// Skip the check that compares restored repositories with the network.
+    /// Skip comparing the restored repositories with the network.
     ///
-    /// Building on a restored repository whose signed refs are behind what the network holds
-    /// forks your own history. Only skip this offline, and fetch before you push.
+    /// Other nodes may hold newer work of yours than the archive. Writing to a restored
+    /// repository then forks your history. Before you write, clone each repository into a new,
+    /// empty RAD_HOME to check what the network holds.
     ///
-    /// This is also the one way a restore that compared nothing still exits 0. Without it a
-    /// comparison that could not run costs exit 3, because the hazard was never looked at.
+    /// Without this flag, a restore that could not do the comparison exits 3.
     #[arg(long)]
     pub no_reconcile: bool,
 
-    /// Re-apply seeding and following policies through `rad` instead of copying the database.
-    /// For restoring into a Radicle whose schema has moved on.
+    /// Re-apply seeding and follow policies with `rad` commands instead of copying the policy
+    /// database. Use this when the installed Radicle cannot read the archived database.
     #[arg(long)]
     pub replay_policies: bool,
 
     /// Rebuild the key from a recovery sheet's 24 words instead of from an archive.
     ///
-    /// This brings back the identity and nothing else: no policies, no repositories. It is
-    /// the path for someone who has the sheet and no archive at all.
+    /// This restores only your identity key. It brings back no policies and no repositories.
+    /// Use it when you have the recovery sheet and no archive.
     #[arg(long, conflicts_with = "archive")]
     pub words: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Doctor {
-    /// Where to look. Defaults to RAD_BACKUP_DIR, then wherever the last archive went.
+    /// The directory to look in. Defaults to RAD_BACKUP_DIR, then the directory of your last
+    /// archive.
     ///
-    /// `--backup-dir` still works: it was this flag's only name until the checks started
-    /// reading the archive itself, and a script that schedules `doctor` should not break for
-    /// having been written first.
+    /// `--backup-dir` is an older name for this option and still works.
     #[arg(
         long,
         short = 'd',
@@ -470,24 +472,25 @@ pub struct Paper {
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Print the key as 24 words instead of as its encrypted file.
+    /// Put the key on the sheet as 24 words instead of the key file.
     ///
-    /// This decrypts the key, so the sheet must be stored the way cash is stored. In exchange
-    /// it needs nothing but itself to restore, and words survive a bad photocopy.
+    /// The words are your key with no passphrase on it. Keep the sheet as safe as cash. You
+    /// can restore from the words alone, and they survive a bad photocopy.
     #[arg(long)]
     pub words: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
 pub struct Migrate {
-    /// Where to write the archive the other machine will read.
+    /// Where to write the archive to copy to the other machine.
     #[arg(value_name = "PATH")]
     pub output: PathBuf,
 
-    /// Do not retire the key on this machine.
+    /// Keep the key usable on this machine.
     ///
-    /// Two nodes running one key fork the identity they share, so the source is retired by
-    /// default and this flag is for someone who has thought about it.
+    /// By default the move renames the key on this machine, so no node here can start with
+    /// it. Two nodes running with the same key fork your identity. Only use this flag if you
+    /// will never run both.
     #[arg(long)]
     pub keep_source: bool,
 }
@@ -501,12 +504,12 @@ pub struct Completions {
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TierArg {
-    /// Keys and config: the bytes nothing can give back.
+    /// Your keys and config. Nothing else can give these back.
     Identity,
-    /// Keys, config, policies, aliases, inventory, and any repository the network does not
-    /// have a copy of.
+    /// Keys, config, seeding and follow policies, peer aliases, the list of repositories you
+    /// store, and your private repositories.
     State,
-    /// All of the above, plus every repository that is yours.
+    /// Everything in `state`, plus all your own repositories.
     Full,
 }
 

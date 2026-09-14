@@ -59,22 +59,62 @@ impl Inventory {
     }
 }
 
+/// Whether a run could tell which stored repositories are private.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateSight {
+    /// It could, or it was not asked to.
+    Seen,
+    /// A private selection with no `rad` to read visibility, over a storage that holds
+    /// repositories. The selection resolves to nothing, and that is never what was meant.
+    Blind,
+}
+
+/// Whether the caller is choosing repositories for an archive it is about to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// `backup`: the selection decides what the archive holds.
+    Archive,
+    /// `doctor` and `diff`: nothing is written, so no warning may talk about an archive.
+    Inspection,
+}
+
 /// Work out what is in storage, what of it is yours, and what the selection asks for.
+#[allow(clippy::too_many_arguments)]
 pub fn collect(
     home: &Home,
     git: &Git,
     rad: Option<&Rad>,
     selection: RepoSelection,
+    purpose: Purpose,
     node_id: &str,
     policies: &Policies,
     routing: &BTreeMap<String, u64>,
 ) -> Result<Inventory> {
+    collect_with_sight(
+        home, git, rad, selection, purpose, node_id, policies, routing,
+    )
+    .map(|(inventory, _)| inventory)
+}
+
+/// `collect`, and whether it could see which repositories are private, for a backup to turn
+/// into its exit code.
+#[allow(clippy::too_many_arguments)]
+pub fn collect_with_sight(
+    home: &Home,
+    git: &Git,
+    rad: Option<&Rad>,
+    selection: RepoSelection,
+    purpose: Purpose,
+    node_id: &str,
+    policies: &Policies,
+    routing: &BTreeMap<String, u64>,
+) -> Result<(Inventory, PrivateSight)> {
     let mut warnings = Vec::new();
     let (stored, not_utf8_names) = home.read_inventory()?;
     for name in &not_utf8_names {
         warnings.push(format!(
-            "storage/{name} was skipped: its directory name is not valid UTF-8, so it cannot \
-             be a repository id and nothing in this archive carries it"
+            "storage/{name} was skipped. Its name is not valid UTF-8, so it cannot be a \
+             repository."
         ));
     }
 
@@ -122,27 +162,42 @@ pub fn collect(
     // The default selection is decided after the records exist, because "private" is a fact
     // about a repository that only the paperwork knows.
     let selected = match selection {
-        RepoSelection::Private => {
-            let private = private_selection(&records, &undescribed);
-            // Visibility lives in the identity document, which only `rad` reads. Without it
-            // every repository looks public, so this selection resolves to nothing, silently
-            // and with no repository named. That is the STATE tier's default, which is what
-            // the shipped systemd timer runs nightly: the failure mode was a year of green
-            // runs over archives carrying none of the repositories they were taken for. Not
-            // a refusal, because a home with no private repositories legitimately selects
-            // nothing and restoring on a machine without `rad` is real, but this exact
-            // combination is never what the person running it believes is happening.
-            if rad.is_none() && private.is_empty() && !stored.is_empty() {
-                warnings.push(format!(
-                    "this archive carries NO repositories: {} are in storage, and without \
-                     `rad` there is no way to tell which of them are private",
-                    stored.len()
-                ));
-            }
-            private
-        }
+        RepoSelection::Private => private_selection(&records, &undescribed),
         _ => selected,
     };
+    // Visibility lives in the identity document, which only `rad` reads. Without it every
+    // repository looks public, so a private selection resolves to nothing. That is the state
+    // tier's default, which the shipped systemd timer runs nightly. Not a refusal, because the
+    // archive still holds the identity. It is exit 3 instead, through `PrivateSight`.
+    let blind = purpose == Purpose::Archive
+        && rad.is_none()
+        && selection == RepoSelection::Private
+        && !stored.is_empty();
+    let sight = match blind {
+        true => PrivateSight::Blind,
+        false => PrivateSight::Seen,
+    };
+    // Said only where `rad` changes what an archive holds. `mine` falls back to refs alone,
+    // which can miss a repository `rad` would have listed. The other selections do not ask it.
+    if rad.is_none() && purpose == Purpose::Archive {
+        let missing = crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref());
+        match sight {
+            PrivateSight::Blind => warnings.push(format!(
+                "{missing}. rad-backup cannot tell which repositories are private, so {} Install \
+                 rad, or set RAD to its full path.",
+                match stored.len() {
+                    1 => "the one repository on this machine is not in the archive.".to_string(),
+                    n => format!("none of the {n} on this machine are in the archive."),
+                }
+            )),
+            PrivateSight::Seen if selection == RepoSelection::Mine && !stored.is_empty() => {
+                warnings.push(format!(
+                    "{missing}. rad-backup may miss some of your repositories."
+                ));
+            }
+            PrivateSight::Seen => {}
+        }
+    }
 
     // After the selection, because what either warning may promise depends on it: a `--tier
     // identity` run carries no repositories at all, and telling somebody their unreadable one
@@ -152,36 +207,53 @@ pub fn collect(
     // thousands of lines into `manifest.warnings`, which is the same manifest the writer
     // refuses its own archive over past `MAX_MANIFEST_BYTES`.
     if let Some(why) = first_unreadable {
-        warnings.push(unreadable_warning(&unreadable, &selected, &why));
+        warnings.push(unreadable_warning(&unreadable, &selected, purpose, &why));
     }
     if let Some(why) = first_undescribed_why {
-        warnings.push(undescribed_warning(&undescribed, &selected, &why));
+        warnings.push(undescribed_warning(
+            &undescribed,
+            &selected,
+            selection,
+            purpose,
+            &why,
+        ));
     }
 
-    Ok(Inventory {
-        records,
-        selected,
-        warnings,
-    })
+    Ok((
+        Inventory {
+            records,
+            selected,
+            warnings,
+        },
+        sight,
+    ))
 }
 
 /// The one warning that stands for every repository `rad` could not describe.
 fn undescribed_warning(
     undescribed: &BTreeSet<String>,
     selected: &BTreeSet<String>,
+    selection: RepoSelection,
+    purpose: Purpose,
     why: &str,
 ) -> String {
-    let carried = count_also_selected(undescribed, selected);
-    let fate = match carried {
-        0 => "This run was not asked for them, so the archive holds none of them".to_string(),
-        n => format!(
-            "{n} of them {} carried as though private, because a repository whose visibility \
-             cannot be read must not be left out of an archive for looking public",
-            crate::term::is_or_are(n)
+    // Carried as though private under a private selection, because a repository whose
+    // visibility cannot be read must not be left out for looking public.
+    let fate = match (count_also_selected(undescribed, selected), selection) {
+        _ if purpose == Purpose::Inspection => String::new(),
+        (0, _) => left_out(undescribed.len()),
+        (n, RepoSelection::Private) => format!(
+            " {n} of them {} included in case {} private.",
+            crate::term::is_or_are(n),
+            match n {
+                1 => "it is",
+                _ => "they are",
+            }
         ),
+        (n, _) => format!(" {n} of them {} included.", crate::term::is_or_are(n)),
     };
     format!(
-        "`rad` could not describe {}: {} ({why}). {fate}",
+        "`rad` could not read the details of {}: {} ({why}).{fate}",
         crate::term::count(undescribed.len(), "repository", "repositories"),
         crate::term::shortlist(undescribed)
     )
@@ -191,27 +263,27 @@ fn undescribed_warning(
 fn unreadable_warning(
     unreadable: &BTreeSet<String>,
     selected: &BTreeSet<String>,
+    purpose: Purpose,
     why: &str,
 ) -> String {
-    let carried = count_also_selected(unreadable, selected);
-    let fate = match carried {
-        0 => "This run was not asked for them, so nothing will try to bundle them".to_string(),
-        n => format!(
-            "{n} of them {} in this archive, and bundling {} will fail, so the archive is \
-             written and marked incomplete rather than not written at all",
-            crate::term::is_or_are(n),
-            match n {
-                1 => "it",
-                _ => "them",
-            }
-        ),
+    let fate = match count_also_selected(unreadable, selected) {
+        _ if purpose == Purpose::Inspection => String::new(),
+        0 => left_out(unreadable.len()),
+        n => format!(" {n} of them cannot be saved, so the archive will be marked incomplete."),
     };
     format!(
-        "`git` could not read {}: {} ({why}). Each is listed in the inventory with no refs. \
-         {fate}",
+        "`git` could not read {}: {} ({why}).{fate}",
         crate::term::count(unreadable.len(), "repository", "repositories"),
         crate::term::shortlist(unreadable)
     )
+}
+
+/// What a troubled repository the archive does not carry costs, as a sentence to append.
+fn left_out(troubled: usize) -> String {
+    match troubled {
+        1 => " It is not in this archive.".to_string(),
+        _ => " They are not in this archive.".to_string(),
+    }
 }
 
 /// How many of these this run will actually carry.
@@ -243,24 +315,20 @@ fn own_repository_ids(
 ) -> Result<BTreeSet<String>> {
     let mut mine = BTreeSet::new();
 
-    match rad {
-        Some(rad) => {
-            for listing in [Listing::Own, Listing::Private] {
-                match rad.list(listing)? {
-                    Listed::Ids(ids) => mine.extend(ids),
-                    // A listing that failed is not a listing that came back empty, and the
-                    // difference decides whether a repository is in the archive at all.
-                    Listed::Unavailable { why } => warnings.push(format!(
-                        "`rad {}` failed, so repositories it would have named were judged by \
-                         their refs alone: {why}",
-                        listing.spelling()
-                    )),
-                }
+    // No `rad` is said by `collect`, which knows whether this run is blind to private ones.
+    if let Some(rad) = rad {
+        for listing in [Listing::Own, Listing::Private] {
+            match rad.list(listing)? {
+                Listed::Ids(ids) => mine.extend(ids),
+                // A listing that failed is not a listing that came back empty, and the
+                // difference decides whether a repository is in the archive at all.
+                Listed::Unavailable { why } => warnings.push(format!(
+                    "`rad {}` failed, so repositories it would have named were judged by \
+                     their refs alone: {why}",
+                    listing.spelling()
+                )),
             }
         }
-        None => warnings.push(
-            "`rad` is not on PATH, so repositories were judged by their refs alone".to_string(),
-        ),
     }
 
     for rid in stored {
@@ -318,8 +386,8 @@ fn describe(
         Some(rad) => Some(rad.describe_repo(rid)?),
         None => None,
     };
-    // No `rad` at all is already said once, up front; only a `rad` that was asked and could
-    // not answer is worth a line naming this repository.
+    // No `rad` at all is said once, by the collection or by its caller. Only a `rad` that was
+    // asked and could not answer is worth a line naming this repository.
     let (identity, unavailable) = match described {
         Some(Described::Identity(identity)) => (Some(identity), None),
         Some(Described::Unavailable { why }) => (None, Some(why)),
@@ -456,7 +524,12 @@ mod tests {
     #[test]
     fn one_warning_stands_for_every_repository_git_could_not_read() {
         let many: BTreeSet<String> = (0..9).map(|n| format!("rad:z{n:02}")).collect();
-        let warning = unreadable_warning(&many, &many, "fatal: not a git repository");
+        let warning = unreadable_warning(
+            &many,
+            &many,
+            Purpose::Archive,
+            "fatal: not a git repository",
+        );
 
         // Same ceiling as the `rad` warning: a storage directory that has gone would fail for
         // every repository at once, and one line each would fill the manifest that the writer
@@ -472,7 +545,13 @@ mod tests {
     #[test]
     fn one_warning_stands_for_every_repository_rad_could_not_describe() {
         let many: BTreeSet<String> = (0..12).map(|n| format!("rad:z{n:02}")).collect();
-        let warning = undescribed_warning(&many, &many, "rad exited 1");
+        let warning = undescribed_warning(
+            &many,
+            &many,
+            RepoSelection::Private,
+            Purpose::Archive,
+            "rad exited 1",
+        );
 
         // A `rad` that has stopped answering fails for every repository at once. One line per
         // repository would put thousands of them in `manifest.warnings`, and that manifest is
@@ -486,7 +565,13 @@ mod tests {
     #[test]
     fn a_handful_of_undescribable_repositories_are_all_named() {
         let few = BTreeSet::from(["rad:zA".to_string(), "rad:zB".to_string()]);
-        let warning = undescribed_warning(&few, &few, "rad exited 1");
+        let warning = undescribed_warning(
+            &few,
+            &few,
+            RepoSelection::Private,
+            Purpose::Archive,
+            "rad exited 1",
+        );
         assert!(warning.contains("rad:zA, rad:zB"), "{warning}");
         assert!(!warning.contains("more"), "{warning}");
     }
@@ -495,22 +580,37 @@ mod tests {
     fn a_troubled_repository_this_run_does_not_carry_is_not_promised_a_place_in_the_archive() {
         let troubled = BTreeSet::from(["rad:zA".to_string()]);
         let nothing = BTreeSet::new();
+        const GIT_SAID: &str = "fatal: not a git repository";
 
-        // `--tier identity` carries no repositories at all, and `--repos seeded` carries only
-        // what is seeded. Saying "carried as though private" there is the same over-assurance
-        // about archive contents that this warning was added to prevent.
-        let undescribed = undescribed_warning(&troubled, &nothing, "rad exited 1");
-        assert!(undescribed.contains("holds none of them"), "{undescribed}");
-        assert!(!undescribed.contains("carried as though"), "{undescribed}");
-
-        // And nothing bundles a repository that was never selected, so nothing marks the
-        // archive incomplete over it either.
-        let unreadable = unreadable_warning(&troubled, &nothing, "fatal: not a git repository");
-        assert!(
-            unreadable.contains("nothing will try to bundle"),
-            "{unreadable}"
+        // `--repos seeded` carries only what is seeded, so the warning may not promise the
+        // repository a place, nor mark the archive incomplete over it.
+        let undescribed = undescribed_warning(
+            &troubled,
+            &nothing,
+            RepoSelection::Seeded,
+            Purpose::Archive,
+            "x",
         );
+        assert!(undescribed.contains("not in this archive"), "{undescribed}");
+        assert!(!undescribed.contains("included"), "{undescribed}");
+        let unreadable = unreadable_warning(&troubled, &nothing, Purpose::Archive, GIT_SAID);
+        assert!(unreadable.contains("not in this archive"), "{unreadable}");
         assert!(!unreadable.contains("incomplete"), "{unreadable}");
+
+        // `doctor` and `diff` write no archive, so neither warning may talk about one, even
+        // over a repository their selection would carry.
+        for said in [
+            undescribed_warning(
+                &troubled,
+                &troubled,
+                RepoSelection::Private,
+                Purpose::Inspection,
+                "x",
+            ),
+            unreadable_warning(&troubled, &troubled, Purpose::Inspection, GIT_SAID),
+        ] {
+            assert!(!said.contains("archive"), "{said}");
+        }
     }
 
     #[test]

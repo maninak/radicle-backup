@@ -7,7 +7,7 @@
 //! heartwood publishes a stable on-disk format guarantee that makes linking `radicle` safe
 //! across versions.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -37,7 +37,7 @@ pub struct Spoken {
 
 /// A program we shell out to, with the environment it needs to see.
 pub struct Tool {
-    program: String,
+    program: OsString,
     home: Option<String>,
     secrets: Secrets,
 }
@@ -54,12 +54,27 @@ pub enum Answer {
     },
 }
 
+/// `RAD`, when it names a binary to run in place of `rad` from PATH. Empty counts as unset.
+/// Read as an `OsString`, so a path that is not UTF-8 still names the binary it names.
+pub fn rad_override_from_env() -> Option<OsString> {
+    std::env::var_os("RAD").filter(|rad| !rad.is_empty())
+}
+
+/// Why `rad` could not be run, for a caller whose probe said no. It names `RAD` when that is
+/// set, because PATH was never searched and pointing the user at it sends them the wrong way.
+pub fn rad_missing(rad_override: Option<&OsStr>) -> String {
+    match rad_override {
+        Some(rad) => format!("RAD is set to {}, but it could not be run", rad.display()),
+        None => "rad is not on PATH".to_string(),
+    }
+}
+
 impl Tool {
     /// `rad`, pointed at a specific Radicle home. Honours `RAD` so an operator can name a
     /// specific binary, the same way radicle-seed-prune does.
     pub fn rad(home: &Path) -> Self {
         Self {
-            program: std::env::var("RAD").unwrap_or_else(|_| "rad".to_string()),
+            program: rad_override_from_env().unwrap_or_else(|| OsString::from("rad")),
             home: Some(home.to_string_lossy().into_owned()),
             secrets: Secrets::Only(crate::crypt::Protects::RadicleKey),
         }
@@ -68,7 +83,7 @@ impl Tool {
     /// Any other program on PATH, with no Radicle home to point it at.
     pub fn on_path(program: &str) -> Self {
         Self {
-            program: program.to_string(),
+            program: OsString::from(program),
             home: None,
             secrets: Secrets::None,
         }
@@ -77,7 +92,7 @@ impl Tool {
     /// `git`, which needs no Radicle home of its own.
     pub fn git() -> Self {
         Self {
-            program: std::env::var("GIT").unwrap_or_else(|_| "git".to_string()),
+            program: std::env::var_os("GIT").unwrap_or_else(|| OsString::from("git")),
             home: None,
             secrets: Secrets::None,
         }
@@ -159,8 +174,14 @@ impl Tool {
             return Ok(Some(said));
         }
         Ok(Some(match finished.status.code() {
-            Some(code) => format!("{} exited {code} without saying why", self.program),
-            None => format!("{} was killed before it could say why", self.program),
+            Some(code) => format!(
+                "{} exited {code} without saying why",
+                self.program.display()
+            ),
+            None => format!(
+                "{} was killed before it could say why",
+                self.program.display()
+            ),
         }))
     }
 
@@ -198,7 +219,7 @@ impl Tool {
             .stderr(Stdio::inherit())
             .status()
             .map_err(|source| Error::Spawn {
-                program: self.program.clone(),
+                program: self.program.to_string_lossy().into_owned(),
                 source,
             })?;
         Ok(status.success())
@@ -247,7 +268,7 @@ impl Tool {
             .stdin(Stdio::null())
             .output()
             .map_err(|source| Error::Spawn {
-                program: self.program.clone(),
+                program: self.program.to_string_lossy().into_owned(),
                 source,
             })
     }
@@ -266,7 +287,7 @@ impl Tool {
     }
 
     fn command_line<S: AsRef<OsStr>>(&self, args: &[S]) -> String {
-        let mut line = self.program.clone();
+        let mut line = self.program.to_string_lossy().into_owned();
         for arg in args {
             line.push(' ');
             line.push_str(&arg.as_ref().to_string_lossy());
@@ -298,7 +319,7 @@ mod tests {
                 assert!(
                     removed.contains(&protects.env().to_string()),
                     "{} would have inherited {}",
-                    tool.program,
+                    tool.program.display(),
                     protects.env()
                 );
             }

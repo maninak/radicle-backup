@@ -38,9 +38,9 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     let doomed: Vec<&Archive> = present.iter().skip(args.keep).collect();
     if doomed.is_empty() {
         ctx.term.ok(&format!(
-            "nothing to prune: {} of this identity in {}, keeping {}",
-            term::count(present.len(), "archive", "archives"),
+            "nothing to delete. {} holds {} of your identity, and --keep is {}",
             directory.display(),
+            term::count(present.len(), "archive", "archives"),
             args.keep
         ));
         return Ok(());
@@ -63,20 +63,20 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
 
     if args.dry_run {
         ctx.term.hint(&format!(
-            "{} would come back; nothing was deleted",
+            "deleting them would free {}. Nothing was deleted",
             term::human_bytes(freed)
         ));
         return Ok(());
     }
     if !ctx.term.confirm(&format!(
-        "Delete them, freeing {}?",
+        "Delete them and free {}?",
         term::human_bytes(freed)
     ))? {
         // Two different noes, as in `restore`: somebody who typed `n` has decided, and a run
         // with nobody to ask needs to be told how to say yes, not to decide.
         let remedy = match ctx.term.is_interactive() {
-            true => "run again when you want them gone",
-            false => "this run has nobody to ask: pass --yes to delete them",
+            true => "run the same command again when you want them deleted",
+            false => "rad-backup could not ask for confirmation. Add --yes to delete them",
         };
         return Err(Error::refused("nothing was deleted", remedy));
     }
@@ -84,8 +84,10 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
         let sidecar = sidecar_path(&archive.path);
         if let Some(e) = unremoved_sidecar(&sidecar) {
-            ctx.term
-                .warn(&format!("{} could not be removed: {e}", sidecar.display()));
+            ctx.term.warn(&format!(
+                "could not delete {}: {e}. Its archive is gone, so delete the note yourself",
+                sidecar.display()
+            ));
         }
     }
     ctx.term.ok(&format!(

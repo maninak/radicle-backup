@@ -126,23 +126,25 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         false => Some(ask_encryption(ctx, args)?),
     };
 
-    let mut warnings = Vec::new();
-    let mut node = quiesce(ctx, args, rad.as_ref(), &mut warnings)?;
+    let mut node = quiesce(ctx, args, rad.as_ref())?;
 
     term.step("reading policies and inventory");
     let policies = db::read_policies(&home.policies_db())?;
     let routing = db::read_routing_counts(&home.node_db(), &node_id)?;
     let aliases = db::read_alias_book(&home.node_db())?;
-    let inventory = inventory::collect(
+    let (inventory, sight) = inventory::collect_with_sight(
         home,
         &git,
         rad.as_ref(),
         selection,
+        inventory::Purpose::Archive,
         &node_id,
         &policies,
         &routing,
     )?;
-    warnings.extend(inventory.warnings.iter().cloned());
+    // What this run has to say at the end, and the archive keeps. Anything already printed as
+    // it happened goes into `said` instead, so the closing report does not repeat it.
+    let mut warnings = inventory.warnings.clone();
 
     if args.dry_run {
         dry_run(ctx, &inventory, tier, selection, &warnings)?;
@@ -225,7 +227,10 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     if home.config().is_file() {
         writer.add_file("config.json", &home.config(), MODE_DOC)?;
     } else {
-        warnings.push("there is no config.json in this home".to_string());
+        warnings.push(format!(
+            "{} does not exist, so the archive has no node settings",
+            home.config().display()
+        ));
     }
 
     if tier != Tier::Identity {
@@ -257,16 +262,11 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         }
     }
 
-    let bundled = archive_repositories(
-        ctx,
-        &mut writer,
-        &scratch,
-        &git,
-        &inventory,
-        &mut manifest,
-        &mut warnings,
-    )?;
+    let bundled =
+        archive_repositories(ctx, &mut writer, &scratch, &git, &inventory, &mut manifest)?;
     let archived = bundled.archived;
+    let dropped = bundled.failures.len();
+    let mut said = bundled.failures;
 
     let restore_doc = fill(
         RESTORE_DOC,
@@ -302,10 +302,10 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     for drift in crate::db::drain_schema_drift() {
         let warning = crate::db::schema_drift_warning(&drift);
         ctx.term.warn(&warning);
-        warnings.push(warning);
+        said.push(warning);
     }
 
-    manifest.warnings = warnings;
+    manifest.warnings = warnings.iter().chain(&said).cloned().collect();
     writer.finish(&mut manifest)?;
     let path = destination.commit(&ctx.term)?;
 
@@ -328,7 +328,14 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
             "the archive is written, but older ones were not swept: {e}"
         ));
     }
-    remember(ctx, &manifest, path.as_deref(), &node_id, &encryption);
+    remember(
+        ctx,
+        &manifest,
+        &policies,
+        path.as_deref(),
+        &node_id,
+        &encryption,
+    );
 
     report(
         ctx,
@@ -337,10 +344,13 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         archived,
         path.as_deref(),
         &encryption,
+        &warnings,
     )?;
     Ok(Outcome {
         path,
-        is_incomplete: bundled.dropped > 0,
+        // A private selection that could not see which repositories are private carried none
+        // of them, and a timer reading only the exit status has to hear about it.
+        is_incomplete: dropped > 0 || sight == inventory::PrivateSight::Blind,
     })
 }
 
@@ -479,11 +489,14 @@ fn directory_size(path: &Path) -> (u64, usize) {
 fn remember(
     ctx: &Ctx,
     manifest: &Manifest,
+    policies: &db::Policies,
     path: Option<&Path>,
     node_id: &str,
     encryption: &Encryption,
 ) {
-    let record = state::Record::from_manifest(manifest, path, node_id, encryption.is_encrypted());
+    let mut record =
+        state::Record::from_manifest(manifest, path, node_id, encryption.is_encrypted());
+    record.policies = Some(state::PolicySets::of(policies));
     if let Err(e) = state::write(&record) {
         ctx.term.warn(&format!(
             "the archive is written, but this tool could not remember it: {e}"
@@ -525,10 +538,10 @@ fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &
     Ok(())
 }
 
-/// How many repositories reached the archive, and how many were selected but could not.
+/// How many repositories reached the archive, and why each one that was selected did not.
 struct Bundled {
     archived: usize,
-    dropped: usize,
+    failures: Vec<String>,
 }
 
 /// Bundle each selected repository and record what went in.
@@ -539,12 +552,11 @@ fn archive_repositories(
     git: &Git,
     inventory: &Inventory,
     manifest: &mut Manifest,
-    warnings: &mut Vec<String>,
 ) -> Result<Bundled> {
     if inventory.selected.is_empty() {
         return Ok(Bundled {
             archived: 0,
-            dropped: 0,
+            failures: Vec::new(),
         });
     }
     ctx.term.step(&format!(
@@ -594,20 +606,23 @@ fn archive_repositories(
         archived += 1;
     }
 
-    // Into the run's own vec, NOT `manifest.warnings`: `run` assigns that field wholesale
-    // just before `finish`, so anything put there here was dropped on the floor and the
-    // archive recorded nothing about the repositories it had lost.
-    warnings.extend(bundle_failures.iter().cloned());
+    // Handed back rather than put in `manifest.warnings`, which `run` assigns wholesale just
+    // before `finish`. Each one has been printed above, so `run` keeps it out of the report.
     if !bundle_failures.is_empty() {
         ctx.term.warn(&format!(
-            "{} of {} selected repositories could not be bundled and are NOT in this archive",
+            "{} of {} could not be bundled and {} NOT in this archive",
             bundle_failures.len(),
-            inventory.selected.len()
+            term::count(
+                inventory.selected.len(),
+                "selected repository",
+                "selected repositories"
+            ),
+            term::is_or_are(bundle_failures.len())
         ));
     }
     Ok(Bundled {
         archived,
-        dropped: bundle_failures.len(),
+        failures: bundle_failures,
     })
 }
 
@@ -729,6 +744,7 @@ fn report(
     archived: usize,
     path: Option<&Path>,
     encryption: &Encryption,
+    unsaid: &[String],
 ) -> Result<()> {
     if ctx.global.json {
         let mut value = serde_json::to_value(manifest)?;
@@ -747,19 +763,39 @@ fn report(
         Some(path) => term.ok(&format!("wrote {}", path.display())),
         None => term.ok("wrote the archive to stdout"),
     }
+    // Labelled, because a bare "state tier, --repos private" under the progress lines read as
+    // one more diagnostic rather than as what this archive holds and the settings that chose it.
     term.hint(&format!(
-        "{} ({}), {} entries, {} of content",
+        "identity: {} ({})",
         manifest.identity.alias.as_deref().unwrap_or("unnamed"),
         manifest.identity.did,
-        manifest.entries.len(),
+    ));
+    let mut saved = vec!["your key".to_string()];
+    if manifest.repo_selection != RepoSelection::None {
+        saved.push(match manifest.repo_selection {
+            RepoSelection::Private => {
+                term::count(archived, "private repository", "private repositories")
+            }
+            _ => term::count(archived, "repository", "repositories"),
+        });
+    }
+    // Policies only above the identity tier: the manifest counts them at every tier, but only
+    // the higher tiers carry the policy database.
+    if manifest.tier != Tier::Identity {
+        saved.push(format!(
+            "{} seeded and {} followed policies",
+            manifest.policies.seeded, manifest.policies.followed
+        ));
+    }
+    let saved = saved.join(", ");
+    term.hint(&format!(
+        "saved: {saved} ({})",
         term::human_bytes(manifest.total_bytes())
     ));
     term.hint(&format!(
-        "tier {}, repositories {} ({archived} carried), policies {} seeded / {} followed",
+        "settings: --tier {} --repos {}",
         manifest.tier.as_str(),
         manifest.repo_selection.as_str(),
-        manifest.policies.seeded,
-        manifest.policies.followed
     ));
 
     // Named here as well as in the note beside the archive, because the note is read during a
@@ -813,7 +849,8 @@ fn report(
         ));
         term.hint("include them with --repos private");
     }
-    for warning in &manifest.warnings {
+    // Only what was not printed as it happened. The manifest keeps every one of them.
+    for warning in unsaid {
         term.warn(warning);
     }
     if let Some(path) = path {

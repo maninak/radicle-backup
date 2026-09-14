@@ -123,31 +123,33 @@ Every knob that is not a one-off is an environment variable, so a run is configu
 Taking the default archive of a home with four repositories, two of them private:
 
 ```
+· the node is running, so a repository that syncs during the backup may be saved slightly behind. Use --stop-node for an exact copy.
 · reading policies and inventory
 · archiving the identity
 · archiving policies, aliases and inbox state
 · bundling 2 repositories
 
 ✓ wrote ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
-  alice (did:key:z6Mk<nid>), 12 entries, 30.7 KiB of content
-  tier state, repositories private (2 carried), policies 16 seeded / 3 followed
+  identity: alice (did:key:z6Mk<nid>)
+  saved: your key, 2 private repositories, 16 seeded and 3 followed policies (30.7 KiB)
+  settings: --tier state --repos private
 
   check it: rad-backup verify ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ```
 
-The two private repositories were carried; the two public ones are on other nodes and were not. A plain-text note lands beside every archive as `<name>.README.txt`, saying what the file is and how to open it, for whoever finds it without this tool.
+The two private repositories were saved. The two public ones are on other nodes, so they were left out. A plain-text note lands beside every archive as `<name>.README.txt`, saying what the file is and how to open it, for whoever finds it without this tool.
 
 ### Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | It worked, and nothing needs your attention. |
-| `1` | It failed: a file could not be read, a passphrase was wrong, an archive did not decrypt. |
-| `2` | The arguments were wrong. Clap's own code. |
-| `3` | Checks failed: `verify` found the archive incomplete, `doctor` has a failing line, `diff` found drift, `backup` could not carry a repository, `restore` did not get one back or found one another node holds signed refs for. |
-| `4` | Refused. Everything is intact and nothing was written, because doing it would have been unsafe. |
+| `1` | It failed. The output says why. |
+| `2` | The arguments were wrong. |
+| `3` | It ran, but found something you should look at. The output says what. |
+| `4` | It refused because going on was unsafe. Nothing was written. |
 
-Codes `3` and `4` are the ones worth scripting against: `rad-backup diff || rad-backup` takes an archive only when something changed. Script against `rad-backup` itself, since `rad backup` turns every code but `0` into `1` and adds its own `✗ Error: rad-backup exited with an error.` line. That line follows every exit other than `0`, including a `doctor` report with a failing check or a `diff` that found changes, and adds nothing to what was printed above it.
+Script against `rad-backup` itself. For example, `rad-backup diff || rad-backup` takes a backup only when something changed. `rad backup` turns every code other than `0` into `1` and adds a line of its own, `✗ Error: rad-backup exited with an error.` That line only means the code was not `0`.
 
 ## What gets backed up
 
@@ -156,7 +158,7 @@ Three tiers, each a superset of the one above it. The default is `state`.
 | Tier | Carries | Size | For |
 |---|---|---|---|
 | `identity` | Keys and `config.json` | ~1 KiB | The absolute minimum. Everything else can be rebuilt from the network, slowly. |
-| `state` *(default)* | ...plus seeding and following policies, aliases, inbox state, an inventory of every repository, and the data of any repository the network does not have | KiBs to MiBs | Daily use. |
+| `state` *(default)* | ...plus seeding and following policies, aliases, inbox state, an inventory of every repository, and your private repositories | KiBs to MiBs | Daily use. |
 | `full` | ...plus every repository that is yours | MiBs to GiBs | Leaving a machine, or being the only copy. |
 
 `--repos` overrides what the tier implies: `none`, `private`, `mine`, `seeded`, `all`.
@@ -180,7 +182,7 @@ restore.sh                    a script that does it, needing only git and a POSI
 
 The manifest is written last, after every entry. `verify` reads it both directions: an entry that is listed but missing, and an entry that is present but unlisted, are both reported.
 
-`node.db` (the routing table and address book) is excluded by default because a node rebuilds it from gossip within minutes; `--with-node-db` includes it. The COB cache is never archived, because it is rebuilt from the repositories that are.
+`node.db` (which nodes hold which repositories, and how to reach them) is excluded by default because a node rebuilds it from gossip within minutes; `--with-node-db` includes it. The COB cache is never archived, because it is rebuilt from the repositories that are.
 
 ## Encryption
 
@@ -222,48 +224,53 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 
 ```
 · unpacking ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
-✓ the archive restores alice (did:key:z6Mk<nid>)
+✓ the archive holds alice (did:key:z6Mk<nid>)
 ✓ installed the identity into ~/.radicle
 · restoring 2 repositories
+· starting the node to compare the restored repositories with the network
 · comparing 2 repositories with the network
-· starting the node, to compare what was restored with the network
-· waiting 20 seconds for other nodes to say what they hold of these refs
+· waiting 20 seconds for other nodes to report what they hold
 · stopping the node again
 
 ✓ restored alice into ~/.radicle
-  2 repositories, 16 seeding and 3 following policies
-  no other node has reported holding signed refs of yours missing here
-  that is not proof there are none: a fetch never brings your own back
+  2 repositories, 16 seeded and 3 followed policies
+  no other node reported work of yours that is not in the archive
 
-  start the node with `rad node start`
+! if the machine this archive came from still runs its node, stop it before you run `rad node start`
 ```
 
 Everything is unpacked into a staging directory first and every digest is checked before a single byte lands in the home, so a truncated or tampered archive cannot leave you with half an identity.
 
-A restore refuses outright while a node is running against the home it is restoring into, because installing over a live home corrupts both. It also refuses (exit `4`) a home that already holds something: an identity, stored repositories, a node database, a `config.json`, or a key `move` retired. `--force` overrides the second refusal and names what it is about to write over. It never lets a restore write *outside* the home: that is a separate question, asked when `keys`, `node` or `storage` is a symlink, and answered yes by `--yes`, so an unattended restore into a home somebody else can write to is a restore that follows whatever link they left. A link that changes after the question is answered is refused whatever the flags say. The comparison at the end needs a node, so the run starts one itself when the home's own is down, and stops it again.
+A restore refuses (exit `4`) while the node for that home is running, or when the home already holds a Radicle identity or data. `--force` overwrites existing data and names what it replaces. When `keys`, `node` or `storage` is a symlink, the restore asks before writing through it, and `--yes` answers yes. `SECURITY.md` explains how links are handled. The comparison at the end needs a node, so `restore` starts one if needed and stops it again.
 
 ### The fork hazard, and what this does about it
 
-Radicle signs a set of refs per peer. If you restore an archive taken before your last push, your storage now holds signed refs that are *behind* what the network already accepted. Push on top of them and you sign a second, conflicting history for your own peer id. Other nodes do not resolve that: they see your identity fork.
+Radicle signs your work in each repository with your key. Say you restore a backup taken before your last push. The restored repository is now behind what other nodes already hold from you. If you commit and push on top of it, you sign a second, conflicting history under your own identity. Other nodes cannot merge the two.
 
-So after restoring, and before handing control back, every restored repository is fetched, and the archived signed refs are held against what other nodes have said they hold of yours. That second half matters: a fetch into a repository already in storage is a *pull*, and a pull ignores your own key, so your own refs come back exactly as the archive wrote them however far the network has moved. The node's record of what peers announced is the only view of your own namespace this machine can get.
+So before it hands back control, `restore` fetches every restored repository and asks other nodes what they hold of your work. A fetch alone cannot show the problem, because it never updates your own work in a repository you already have. What other nodes report is the only view of it this machine gets.
 
-| Standing | What it means | What happens |
-|---|---|---|
-| no other node has reported holding anything else | Nothing on record contradicts this copy | Nothing to do, and read the next two paragraphs for what that is worth |
-| holds work no node that answered has | A node said during this restore that it is behind this copy | Kept; push when ready |
-| holds work no node had when the archive was taken | The same, from a record written before the backup, which has had every day since to go stale | Named; fetch and look before you announce |
-| another node holds signed refs this copy does not have | Somebody has refs signed with your key that are not here, including the case where the archive holds none of yours for it at all | **Named, and the restore exits `3`** |
-| could not be compared | The fetch failed, `git` could not answer, the recorded head was not an oid, or the node's own record could not be read | **Each one named, and the restore exits `3`**; leave the node running and look again |
-| nothing to compare it with | Announced to nobody, delegated to you alone and allowed to nobody, so no node can hold anything to compare | Nothing to do |
+`restore` then says what it found for each restored repository and what to do about it. It exits `3` when another node holds newer work of yours, or when it meant to compare a repository and could not. Do not commit or push in a repository it names until you have checked. `restore --json` lists the repositories by what was found.
 
-A refs announcement is a separate message from a fetch, so after the fetches the run waits twenty seconds for other nodes to say what they hold. It is a flat wait with nothing to poll for: heartwood rewrites a peer's row only when that peer announces a *different* head, so a node that holds exactly what you hold writes nothing, and no observable state ever says the answers are in.
+```
+✓ restored alice into ~/.radicle
+  2 repositories, 16 seeded and 3 followed policies
 
-That same rule is why there is no "in step with the network" row: this tool cannot establish it, only the absence of anything against you. To prove a repository is current, clone it into an empty home and look at what the network holds under your peer id.
+✗ another node holds work of yours missing from these restored repositories:
+  rad:z<rid>
 
-A row saying another node holds refs you do not is true however old it is. "That node is behind you" is only true of the moment it was written, so a row that was already there when the run started earns `holds work no node had when the archive was taken`, which is the true half without the `rad sync --announce` that would publish a fork.
+✗ do not commit or push in these repositories yet
+  committing or pushing in them would fork your own history
+  a fetch cannot fix this. It never updates your own work in a repository you already have
+  to see what the network holds, clone each one into a new, empty RAD_HOME
 
-`--no-reconcile` skips all of this, for restoring on a machine with no network; fetch before you push. It is the one way a restore that compared nothing still exits `0`: a check that was declined is not a check that failed, and every other route to an uncompared repository (no `rad` on `PATH`, a node that would not start, a fetch that did not work) is a question this run meant to ask and could not.
+  start the node with `rad node start`
+```
+
+After the fetches, `restore` waits twenty seconds for other nodes to report. A node that holds exactly your work reports nothing, so there is no signal that all answers are in.
+
+For the same reason, `restore` never says a repository is up to date. To be sure a repository is current, clone it into a new, empty `RAD_HOME` and look at what the network holds for your identity.
+
+`--no-reconcile` turns the comparison off, for a machine with no network. `restore` then does not exit `3` over repositories it did not compare. Before you write in the restored repositories, clone each one into a new, empty `RAD_HOME` to check what the network holds.
 
 `--replay-policies` re-applies the seeding and following policies through `rad` instead of copying the policy database, for restoring into a Radicle whose schema has moved past the archived one.
 
@@ -287,28 +294,27 @@ sh restore.sh ~/.radicle                             # or just run it
 recovery posture of /home/alice/.radicle
 
 ✓ key passphrase: the key is encrypted with aes256-ctr (bcrypt)
-✗ backup: no archive of this identity in /home/alice/backups, and this tool has no record of one anywhere
-  --> rad backup --output /home/alice/backups
-? archive encryption: there is no archive to judge
-? archive location: there is no archive to locate
-! private repositories: 3 of 3 are in no archive, though somebody else holds every one of those: a delegate, an allowed peer, or a node announcing it
+✓ backup: alice-z6Mk<nid>-20260914T031700Z.tar.zst.age in /mnt/backups/radicle was taken today
+✓ archive encryption: alice-z6Mk<nid>-20260914T031700Z.tar.zst.age opens only with the passphrase it was sealed under
+✓ archive location: /mnt/backups/radicle/alice-z6Mk<nid>-20260914T031700Z.tar.zst.age is on a different filesystem from your Radicle data
+✗ private repositories: 1 of 3 is in no archive and on no other node
   --> rad backup --repos private
-! delegate quorum: 6 repositories have you as their only delegate: example-app, example-tool, example-config, example-docs, example-site, example-lib
-  --> a backup covers loss but not theft. Three delegates survive one lost key; two are worse than one, because both are still needed and there is twice the chance of losing one. Add one with `rad id edit`
-✓ other seeds: every public repository is announced by at least one other node
-✓ key copies: this home was not restored from an archive, so nothing here suggests a second copy
-! signed refs propagation: the newest signed refs of 1 repository is on this disk and no other: example-app
-  --> `rad sync --announce` them, and keep an archive covering them until they have propagated
+✓ sole delegate: you are the only delegate of 4 repositories: example-app, example-tool, example-docs, example-site
+  --> if you lose your key, your backup brings it back. To add a second delegate: rad id update --repo <rid> --delegate <did>
+✓ public repositories: every one is held by at least one other node
+✓ key copies: the last thing rad-backup recorded on this machine was a backup, not a restore
+! unshared work: your latest changes to 1 repository have reached no other node: example-app
+  --> announce them with `rad sync --announce <rid>`. Keep your backups until another node has them
 
-3 pass, 3 worth improving, 1 failing, 2 could not be checked
-  every ✗ is a way to lose this identity; the line under it is the fix
+7 pass, 1 worth improving, 1 failing
+  each ✗ is a way to lose your identity or your data. The line under it is the fix.
 ```
 
-Nine checks. The left of each line names what was looked at and the right says what was found, so a line never argues with its own marker: `✓` passed, `!` is worth improving, `✗` is a way to lose the identity, `?` could not be looked at at all. A `-->` line says what fixes the one above it, usually as a command to run.
+The left of each line names what was looked at. The right says what was found. `✓` passed. `!` is worth improving. `✗` is a way to lose your identity or your data. `?` could not be checked. `·` was skipped because there is nothing to check yet, such as an archive before your first backup. A `-->` line says what to do about the line above it, usually as a command to run.
 
 `key copies` is the only check about a machine that is not this one, and so it reports a possibility rather than a finding: this tool cannot see the other machine. `archive encryption` is the only one that opens anything, and only far enough to prove the `--identity` key on hand still unwraps the archive.
 
-`doctor --json` prints the same as structured data. It exits `3` when any check fails, and also when every check came back "could not be checked", because a probe reading the exit code cannot tell a posture nothing looked at from a clean one. Unknowns beside real answers still exit `0`: a machine with no `rad` on `PATH` cannot answer several of these and may be perfectly covered.
+`doctor --json` prints the same report as structured data, with a `skipped` count beside `unknown`. `doctor` exits `3` when any check fails. It also exits `3` when no check passed or warned. Skipped and unknown checks never change the exit code on their own.
 
 ## `diff`
 
@@ -318,7 +324,7 @@ Answers "is the newest archive still current?" without a passphrase and without 
 rad-backup diff || rad-backup      # take a new archive only when something changed
 ```
 
-It exits `0` when nothing has moved and `3` when something has: a new repository, one that is gone, one whose signed refs have moved on, or a policy change.
+It exits `0` when nothing has changed and `3` when something has. That includes a new or removed repository, new work of yours, and any change to what you seed, follow or block. Right after an upgrade, `diff` can only compare how many repositories you seed and peers you follow. Your next backup lets it name each one.
 
 ## Keeping the pile tidy
 
@@ -377,7 +383,7 @@ rad backup schedule --off           # stop, leaving the unit files in place
 rad backup schedule --every 'Mon,Thu 04:00'   # any systemd calendar expression
 ```
 
-It refuses to enable a timer that cannot work. An unattended run has nobody to type a passphrase at, so a passphrase-encrypted schedule needs `--passphrase-file`. A passphrase exported in your shell does not count, because the timer is started from systemd's own environment rather than yours; one put where systemd keeps it does. `--recipient` and `--plaintext` need no passphrase at all. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
+It refuses to enable a timer that cannot work. The timer does not see your shell's PATH, so `schedule` saves the full path of `rad` for it. If it cannot find `rad`, it stops and says so. An unattended run has nobody to type a passphrase at, so a passphrase-encrypted schedule needs `--passphrase-file`. A passphrase exported in your shell does not count, because the timer is started from systemd's own environment rather than yours; one put where systemd keeps it does. `--recipient` and `--plaintext` need no passphrase at all. The timer is `Persistent=true`, so a laptop that was asleep at the appointed hour takes its backup when it wakes.
 
 It writes `~/.config/systemd/user/rad-backup.{service,timer}` and the settings they read in `~/.config/rad-backup/env`. To keep a hand edit to a unit, delete the two marker lines at the top of it; the `env` file has no such escape and is rewritten in full by every run. The package ships the same units under `/usr/lib/systemd/user`, disabled, for anyone who would rather wire it up themselves.
 
@@ -385,7 +391,7 @@ Or with cron, if you prefer:
 
 ```sh
 # every day at 03:17, keep the newest fortnight
-17 3 * * * RAD_BACKUP_PASSPHRASE_FILE=$HOME/.config/rad-backup/passphrase rad-backup --output /mnt/backups/radicle --keep 14 --yes --quiet
+17 3 * * * RAD=$HOME/.radicle/bin/rad RAD_BACKUP_PASSPHRASE_FILE=$HOME/.config/rad-backup/passphrase rad-backup --output /mnt/backups/radicle --keep 14 --yes --quiet
 ```
 
 Point either at a destination that does not die with this disk. A second disk or another machine is the obvious answer, but a directory that a sync client already carries off the machine (MEGA, Dropbox, Drive, Syncthing) counts too, even though it shares a filesystem with your home. `doctor` cannot tell those apart, so it warns when the archive is on the same filesystem and leaves the call to you.

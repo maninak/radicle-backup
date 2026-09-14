@@ -88,12 +88,16 @@ pub enum Standing {
 impl Standing {
     fn as_str(self) -> &'static str {
         match self {
-            Self::NothingSaysOtherwise => "no other node has reported holding anything else",
-            Self::ArchiveIsAhead => "holds work no node that answered has",
-            Self::ArchiveIsAheadOfAStaleRecord => {
-                "holds work no node had when the archive was taken"
+            Self::NothingSaysOtherwise => {
+                "no other node reported work of yours missing from the restored repository"
             }
-            Self::PeerHoldsOther => "another node holds signed refs this copy does not have",
+            Self::ArchiveIsAhead => "holds work the nodes that answered do not have",
+            Self::ArchiveIsAheadOfAStaleRecord => {
+                "holds work no other node had when the backup was taken"
+            }
+            Self::PeerHoldsOther => {
+                "another node holds work of yours missing from the restored repository"
+            }
             Self::NothingToCompare => "nothing to compare it with",
             Self::CouldNotAsk => "could not be compared",
         }
@@ -166,7 +170,7 @@ fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
         let there = std::fs::read_link(&here);
         let where_to = match &there {
             Ok(there) => there.display().to_string(),
-            Err(e) => format!("somewhere this run could not read: {e}"),
+            Err(e) => format!("a place that could not be read ({e})"),
         };
         ctx.term
             .warn(&format!("{} is a symlink to {where_to}", here.display()));
@@ -175,29 +179,34 @@ fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
             leads_to: there.ok(),
         });
     }
-    ctx.term
-        .detail("everything restored into it lands there, not in this home");
+    ctx.term.detail(&format!(
+        "anything restored through a symlink lands where it leads, not in {}",
+        ctx.home.path().display()
+    ));
     if ctx.term.confirm("restore through them anyway?")? {
         return Ok(settled);
     }
     // Two different noes. Somebody who read the prompt and typed `n` is not a run with nobody
     // to ask, and telling them to pass --yes is advice for the opposite of what they answered.
+    let (links, them) = match elsewhere.len() {
+        1 => ("is a symlink", "it"),
+        _ => ("are symlinks", "them"),
+    };
     let (why, remedy) = match ctx.term.is_interactive() {
         true => (
-            "and restoring through them was declined",
-            "move them aside, or restore into a different --home",
+            format!("You chose not to restore through {them}."),
+            format!("move {them} aside, or restore into a different --home"),
         ),
         false => (
-            "and this run has nobody to ask about it",
-            "pass --yes if restoring through them is what you want, or move them aside",
+            format!("rad-backup could not ask whether to restore through {them}."),
+            format!("pass --yes to restore through {them}, or move {them} aside"),
         ),
     };
     Err(Error::refused(
         format!(
-            "in {}, {} {} a symlink {why}",
-            ctx.home.path().display(),
+            "{} in {} {links} to somewhere else. {why}",
             term::shortlist(&elsewhere),
-            term::is_or_are(elsewhere.len())
+            ctx.home.path().display(),
         ),
         remedy,
     ))
@@ -236,12 +245,11 @@ fn refuse_a_link_that_appeared_mid_restore(home: &Home, settled: &[Settled]) -> 
     }
     Err(Error::refused(
         format!(
-            "in {}, {} {} a symlink that is not the one this restore began with",
-            home.path().display(),
+            "{} in {} changed while the restore was running",
             term::shortlist(&elsewhere),
-            term::is_or_are(elsewhere.len())
+            home.path().display()
         ),
-        "nothing else should be writing to a home mid-restore: find out what did, then \
+        "something else is writing to the home you are restoring into. Find out what, then \
          restore again",
     ))
 }
@@ -277,7 +285,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         if !occupied.is_empty() {
             return Err(Error::refused(
                 format!(
-                    "{} holds no identity, and holds {}, which this restore would write over",
+                    "{} already holds {}, which a restore would overwrite",
                     home.path().display(),
                     occupied.join(", ")
                 ),
@@ -292,23 +300,25 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     if !state.is_stopped() {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
-                format!("whether a node is running against this home cannot be told: {doubt}"),
-                "make sure no node is running, then restore into this home again",
+                format!(
+                    "cannot tell whether a node is running for {}: {doubt}",
+                    home.path().display()
+                ),
+                "make sure no node is running, then restore again",
             ),
             None => match home.borrowed_socket() {
                 Some(socket) => Error::refused(
                     format!(
-                        "a node answered on {}, which RAD_SOCKET names rather than this home's \
-                         own socket",
+                        "a node is running on {}, the socket RAD_SOCKET points to",
                         socket.display()
                     ),
-                    "stop that node, or unset RAD_SOCKET if it belongs to another home, then \
+                    "stop that node, or unset RAD_SOCKET if it belongs to another home. Then \
                      restore again",
                 ),
                 None => Error::refused(
-                    "the node is running against the home being restored into",
-                    "run `rad node stop` first: a node writing to a home mid-restore corrupts \
-                     both",
+                    format!("the node for {} is running", home.path().display()),
+                    "run `rad node stop`, then restore again. A running node can damage your \
+                     Radicle data during a restore",
                 ),
             },
         });
@@ -342,14 +352,14 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
             term.fail(problem);
         }
         return Err(Error::refused(
-            "this archive does not match its own manifest, so nothing was installed",
+            "the files in this archive do not match its own record of them. Nothing was installed",
             "check the file transferred completely, or restore an older archive",
         ));
     }
     let manifest = scan.manifest;
     prove_identity(&staging, &manifest)?;
     term.ok(&format!(
-        "the archive restores {} ({})",
+        "the archive holds {} ({})",
         manifest.identity.alias.as_deref().unwrap_or("unnamed"),
         manifest.identity.did
     ));
@@ -427,6 +437,7 @@ fn remember(
     if let Ok(installed) = crate::db::read_policies(&ctx.home.policies_db()) {
         record.seeded = installed.seeded().count();
         record.followed = installed.followed().count();
+        record.policies = Some(state::PolicySets::of(&installed));
     }
     // What `doctor` needs to answer "may another machine still be running this identity". Only
     // a restore can record it: by the time doctor runs, the archive is gone and the machine it
@@ -471,13 +482,16 @@ fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
 fn describes_this_key(did: &str, claimed_did: &str, claimed_node_id: &str) -> Result<()> {
     if did != claimed_did {
         return Err(Error::refused(
-            format!("the archived key is {did} but the manifest says {claimed_did}"),
+            format!("the key in the archive is {did}, but the archive's record says {claimed_did}"),
             "this archive is inconsistent; do not install it",
         ));
     }
     if did.strip_prefix("did:key:") != Some(claimed_node_id) {
         return Err(Error::refused(
-            format!("the archived key is {did} but the manifest calls its node {claimed_node_id}"),
+            format!(
+                "the key in the archive is {did}, but the archive's record names its node \
+                 {claimed_node_id}"
+            ),
             "this archive is inconsistent; do not install it",
         ));
     }
@@ -524,8 +538,7 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
             ctx.home.path().display()
         )),
         _ => ctx.term.warn(&format!(
-            "{} holds a key whose identity could not be read, so whether this archive would \
-             replace it cannot be told",
+            "{} holds a key that could not be read, so it may not be the one in this archive",
             ctx.home.path().display()
         )),
     }
@@ -587,7 +600,7 @@ fn write_displaced_note(
         None => String::new(),
     };
     let note = format!(
-        "A restore on {} put another identity into this home.\n\
+        "A restore on {} put another identity into {}.\n\
          \n\
          The key that used to be at keys/radicle is now beside this note as {name}{half}.\n\
          It was {}.\n\
@@ -595,6 +608,7 @@ fn write_displaced_note(
          It still works. Put it back only into a home of its own, and never start a node with\n\
          it while another machine is running one under the same peer id.\n",
         crate::cmd::rfc3339_stamp(jiff::Timestamp::now()),
+        ctx.home.path().display(),
         former_did.unwrap_or("an identity this tool could not read"),
     );
     let path = ctx.home.keys_dir().join("DISPLACED.txt");
@@ -641,24 +655,28 @@ fn install(ctx: &Ctx, staging: &Path, settled: &[Settled]) -> Result<()> {
         return Err(match state.doubt() {
             Some(doubt) => Error::refused(
                 format!(
-                    "whether a node started against this home while the archive was being \
-                     read cannot be told: {doubt}"
+                    "cannot tell whether a node started for {} while the archive was \
+                     unpacking: {doubt}",
+                    home.path().display()
                 ),
-                "make sure no node is running, then restore again: nothing has been written yet",
+                "make sure no node is running, then restore again. Nothing has been written yet",
             ),
             None => match home.borrowed_socket() {
                 Some(socket) => Error::refused(
                     format!(
-                        "a node answered on {} while the archive was being read, which \
-                         RAD_SOCKET names rather than this home's own socket",
+                        "a node started on {} while the archive was unpacking. RAD_SOCKET \
+                         points to that socket",
                         socket.display()
                     ),
-                    "stop that node, or unset RAD_SOCKET if it belongs to another home, then \
-                     restore again: nothing has been written yet",
+                    "stop that node, or unset RAD_SOCKET if it belongs to another home. Then \
+                     restore again. Nothing has been written yet",
                 ),
                 None => Error::refused(
-                    "the node started against this home while the archive was being read",
-                    "run `rad node stop` and restore again: nothing has been written yet",
+                    format!(
+                        "the node for {} started while the archive was unpacking",
+                        home.path().display()
+                    ),
+                    "run `rad node stop` and restore again. Nothing has been written yet",
                 ),
             },
         });
@@ -794,18 +812,18 @@ fn bundle_check_notice(reaches: Option<bool>) -> Option<(String, Option<String>)
     match reaches {
         Some(true) => None,
         Some(false) => Some((
-            "this git does not check the objects inside a bundle it fetches from, so the \
-             repositories below are written without that check"
+            "the installed git cannot check the archived repositories for damage. They are \
+             restored without that check"
                 .to_string(),
             Some(format!(
-                "git {}.{} or newer runs it; until then, trust the archive's source",
+                "git {}.{} or newer checks them. Until then, restore only archives you trust",
                 crate::git::FSCK_ON_A_BUNDLE_SINCE.0,
                 crate::git::FSCK_ON_A_BUNDLE_SINCE.1
             )),
         )),
         None => Some((
-            "the version of git could not be read, so it is not known whether the objects \
-             inside each bundle were checked"
+            "the git version could not be read, so the objects inside each bundle may not be \
+             checked"
                 .to_string(),
             None,
         )),
@@ -953,17 +971,14 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
                             term::shortlist(&dropped)
                         ));
                         ctx.term.detail(
-                            "git runs commands out of a repository config, and an archive is",
+                            "a config can make git run commands, so a restore keeps only \
+                             user.name and user.email",
                         );
-                        ctx.term.detail(
-                            "not vouched for by anybody: everything else here is what `git`",
-                        );
-                        ctx.term.detail("itself wrote when it made the repository");
                     }
                     for (name, value) in &allowed.kept {
                         if let Some(why) = git.set_config(&target, name, value)? {
                             ctx.term.warn(&format!(
-                                "{}: `{name}` did not come back out of the archive's config: \
+                                "{}: `{name}` could not be restored from the archive's config: \
                                  {why}",
                                 repo.display_name()
                             ));
@@ -994,7 +1009,7 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
                 && swept.kind() != std::io::ErrorKind::NotFound
             {
                 ctx.term.detail(&format!(
-                    "the half-made {} could not be removed either: {swept}",
+                    "the partly restored {} could not be removed either: {swept}",
                     target.display()
                 ));
             }
@@ -1047,10 +1062,14 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
 
     let rad = Rad::new(ctx.home.path());
     if !rad.is_available() {
-        ctx.term
-            .warn("rad is not on PATH, so nothing was compared with the network");
-        ctx.term
-            .detail("run `rad sync <rid> --fetch` for each repository before you write to it");
+        ctx.term.warn(&format!(
+            "{}, so nothing was compared with the network",
+            crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+        ));
+        ctx.term.detail(
+            "install rad. Before you write, clone each repository into a new, empty RAD_HOME \
+                 to check what the network holds",
+        );
         return Ok(nothing_compared(restored, NetworkCheck::Wanted));
     }
     let mut standings = Reconciled::default();
@@ -1073,8 +1092,8 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
         Ok(baseline) => Some(baseline),
         Err(e) => {
             ctx.term.warn(&format!(
-                "what the node already knew could not be read, so nothing here will be \
-                 reported as work to push: {e}"
+                "rad-backup could not read what your node recorded before the restore ({e}). \
+                 It will not list any repository as holding work to announce."
             ));
             None
         }
@@ -1093,7 +1112,7 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
         false
     } else {
         ctx.term
-            .step("starting the node, to compare what was restored with the network");
+            .step("starting the node to compare the restored repositories with the network");
         // Reported, never propagated. Everything from here on happens after the identity,
         // the repositories and the policies are on disk, and an error escaping would take the
         // report of what did not come back with it.
@@ -1108,8 +1127,10 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
         if !started || !wait_for_node(ctx) {
             ctx.term
                 .warn("the node would not start, so nothing was compared with the network");
-            ctx.term
-                .detail("run `rad node start`, then `rad sync <rid> --fetch` before you write");
+            ctx.term.detail(
+                "before you write, clone each repository into a new, empty RAD_HOME to check \
+                     what the network holds",
+            );
             return Ok(nothing_compared(restored, NetworkCheck::Wanted));
         }
         true
@@ -1131,7 +1152,7 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
         // caller, and a stop that failed must not stand in front of them.
         if !matches!(rad.stop_node(), Ok(true)) {
             ctx.term
-                .warn("the node was started to run this check and would not stop again");
+                .warn("the node started for this check would not stop");
             ctx.term
                 .detail("stop it with `rad node stop` if you meant it to stay down");
         }
@@ -1372,7 +1393,7 @@ const GOSSIP_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
 /// a run that says twenty and waits thirty.
 fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSet<String>>> {
     ctx.term.step(&format!(
-        "waiting {} seconds for other nodes to say what they hold of these refs",
+        "waiting {} seconds for other nodes to report what they hold",
         GOSSIP_WINDOW.as_secs()
     ));
     std::thread::sleep(GOSSIP_WINDOW);
@@ -1398,8 +1419,8 @@ fn read_what_others_hold(
         // side of this went wrong once; nothing guarded heartwood's side.
         Ok(held) if !held.is_empty() && !held.keys().any(|repo| repo.starts_with(RID_PREFIX)) => {
             term.warn(
-                "the node spells repository ids in a way this build does not recognise, so \
-                 nothing was compared",
+                "the node's database spells repository ids in a way this rad-backup does not \
+                 recognise, so nothing was compared",
             );
             None
         }
@@ -1409,13 +1430,15 @@ fn read_what_others_hold(
         // because any other reader's drift would otherwise discard a record that was read
         // perfectly. `main` prints which table moved.
         Ok(_) if crate::db::saw_schema_drift_in(node_db, "sync status table") => {
-            term.warn("this build cannot read part of the node's schema, so nothing was compared");
+            term.warn(
+                "this rad-backup cannot read part of the node's database, so nothing was compared",
+            );
             None
         }
         Ok(held) => Some(held),
         Err(e) => {
             term.warn(&format!(
-                "the node's record of what other nodes hold could not be read: {e}"
+                "what other nodes reported holding could not be read: {e}"
             ));
             None
         }
@@ -1672,8 +1695,10 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     // already on disk, and exit 4 here would say that nothing was written.
     let rad = Rad::new(ctx.home.path());
     if !rad.is_available() {
-        ctx.term
-            .warn("rad went away mid-restore, so no policy was replayed");
+        ctx.term.warn(&format!(
+            "{}, so no policy was replayed",
+            crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+        ));
         return Ok(policies.identifiers());
     }
     ctx.term.step("replaying policies through rad");
@@ -1706,10 +1731,20 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     }
 
     if !skipped.is_empty() {
+        let (count, ids, them) = match skipped.len() {
+            1 => (
+                "1 policy was".to_string(),
+                "Its id looks like a command-line flag",
+                "it",
+            ),
+            n => (
+                format!("{n} policies were"),
+                "Their ids look like command-line flags",
+                "them",
+            ),
+        };
         ctx.term.warn(&format!(
-            "{} skipped, because the archive spells an identifier in a way `rad` would read \
-             as a flag: {}. Seed or follow those by hand",
-            crate::term::count(skipped.len(), "policy row", "policy rows"),
+            "{count} skipped. {ids}: {}. Seed or follow {them} by hand",
             crate::term::shortlist(&skipped)
         ));
     }
@@ -1718,8 +1753,8 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
         // 0, so a restore that put back every repository and none of the seeding policies read
         // as a clean one.
         ctx.term.warn(&format!(
-            "`rad` refused {}: {}. Those decisions are not in place",
-            crate::term::count(failed.len(), "policy row", "policy rows"),
+            "`rad` refused {}: {}. Those were not restored",
+            crate::term::count(failed.len(), "policy", "policies"),
             crate::term::shortlist(&failed)
         ));
     }
@@ -1878,16 +1913,14 @@ fn report(
         // would not open used to take all three with it.
         match crate::db::read_policies(&ctx.home.policies_db()) {
             Ok(installed) => term.hint(&format!(
-                "{}, {} seeding and {} following policies",
+                "{}, {} seeded and {} followed policies",
                 term::count(restored.len(), "repository", "repositories"),
                 installed.seeded().count(),
                 installed.followed().count()
             )),
             Err(e) => {
                 term.hint(&term::count(restored.len(), "repository", "repositories"));
-                term.warn(&format!(
-                    "the policies that came back could not be counted: {e}"
-                ));
+                term.warn(&format!("the restored policies could not be counted: {e}"));
             }
         }
         // Under `--no-reconcile` the one line `run` printed is the whole story: the user asked
@@ -1906,14 +1939,15 @@ fn report(
             // database this build could not read are not, and telling somebody to re-run the
             // command that has just run is how the schema check used to send people to start a
             // node already up.
-            term.detail("nothing came back to hold these against. Read any warning above for");
-            term.detail("why, and if a fetch failed, `rad sync <rid> --fetch` again with the");
-            term.detail("node running");
+            term.detail("the warnings above say why");
+            term.detail(
+                "before you write in them, clone each one into a new, empty RAD_HOME to check \
+                 what the network holds",
+            );
         }
         if !nothing_to_compare.is_empty() {
             term.hint(&format!(
-                "{} announced to nobody, delegated to you alone and allowed to nobody, so no \
-                 node can hold anything to compare: {}",
+                "{} private and shared with nobody, so there is nothing to compare: {}",
                 term::count(
                     nothing_to_compare.len(),
                     "repository is",
@@ -1923,8 +1957,7 @@ fn report(
             ));
         }
         if nothing_was_reported_otherwise {
-            term.detail("no other node has reported holding signed refs of yours missing here");
-            term.detail("that is not proof there are none: a fetch never brings your own back");
+            term.detail("no other node reported work of yours that is not in the archive");
         }
         if !ahead_of_a_stale_record.is_empty() {
             // The fact without the instruction. The only node on record was behind when the
@@ -1932,15 +1965,6 @@ fn report(
             // a peer that still agrees, so that row is as likely to be as stale as the
             // archive as it is to be current. `rad sync --announce` on a copy the network has
             // moved past is the command that publishes the fork.
-            term.warn(&format!(
-                "{} hold work no node had when the archive was taken: {}",
-                term::count(
-                    ahead_of_a_stale_record.len(),
-                    "repository is thought to",
-                    "repositories are thought to"
-                ),
-                term::shortlist(&ahead_of_a_stale_record)
-            ));
             // The archive's own date rather than a figure standing in for it. How stale that
             // record might be is exactly the age of the backup, and somebody deciding whether
             // to announce is deciding on which month it was taken.
@@ -1948,64 +1972,71 @@ fn report(
                 .created
                 .get(..10)
                 .unwrap_or(manifest.created.as_str());
-            term.detail(&format!(
-                "no node has spoken since, so that may be as old as the archive, {taken}:"
+            term.warn(&format!(
+                "{} work no other node had on {taken}: {}",
+                term::count(
+                    ahead_of_a_stale_record.len(),
+                    "repository holds",
+                    "repositories hold"
+                ),
+                term::shortlist(&ahead_of_a_stale_record)
             ));
-            term.detail("fetch, and look at what the network holds under your peer id, before");
-            term.detail("you announce");
+            term.detail(&format!(
+                "{taken} is when the archive was taken. No node has reported since, so the \
+                 network may have moved on"
+            ));
+            term.detail(
+                "before you announce, clone each one into a new, empty RAD_HOME to see what the \
+                 network holds",
+            );
         }
         if !ahead.is_empty() {
             term.warn(&format!(
-                "{} work no node that answered has; push them first",
-                term::count(ahead.len(), "repository holds", "repositories hold")
+                "{} work the nodes that answered do not have. Announce {} with the command below",
+                term::count(ahead.len(), "repository holds", "repositories hold"),
+                if ahead.len() == 1 { "it" } else { "each one" }
             ));
             for rid in &ahead {
-                term.hint(&format!("rad sync {rid} --announce"));
+                term.detail(&format!("rad sync {rid} --announce"));
             }
         }
         if !dropped.is_empty() {
             term.blank();
             term.fail(&format!(
-                "{} the archive carried could not be restored:",
+                "{} from the archive could not be restored:",
                 term::count(dropped.len(), "repository", "repositories")
             ));
             for rid in dropped {
                 term.detail(rid);
             }
-            term.detail("the archive still holds them; nothing about it was changed");
+            term.detail("the archive still has them, and it was not changed");
         }
         if !at_risk.is_empty() {
             term.blank();
-            term.fail("another node holds signed refs of yours that these copies do not have:");
+            term.fail("another node holds work of yours missing from these restored repositories:");
             for rid in &at_risk {
                 term.detail(rid);
             }
             term.blank();
-            term.fail("do not commit or push in them until this is resolved");
-            term.detail("a fetch cannot bring your own signed refs back: to a node that already");
-            term.detail("has the repository, `rad sync --fetch` is a pull, and a pull ignores");
-            term.detail("your own key. Clone the repository into an empty home to see what the");
-            term.detail("network has under your peer id before you write anything here");
+            term.fail("do not commit or push in these repositories yet");
+            term.detail("committing or pushing in them would fork your own history");
+            term.detail(
+                "a fetch cannot fix this. It never updates your own work in a repository you \
+                 already have",
+            );
+            term.detail("to see what the network holds, clone each one into a new, empty RAD_HOME");
         }
         term.blank();
-        if manifest.node.was_running {
-            match &manifest.node.why_running_is_unknown {
-                // Said as a possibility, because that is what it is: the run that wrote this
-                // archive could not reach the socket and wrote the cautious answer.
-                Some(doubt) => term.warn(&format!(
-                    "the machine this archive came from may have had a node running: \
-                     the run that took it could not tell ({doubt})"
-                )),
-                None => term.warn(
-                    "the machine this archive came from had a node running when it was taken",
-                ),
-            }
-            // Only a fact about the moment of the backup: nothing here knows whether that
-            // machine still exists, so the advice is conditional on it.
-            term.detail("if that machine still has this key, stop its node before you start");
-            term.detail("this one: two nodes must never run with one key");
+        // One line either way. The archive only knows a node ran when it was taken, and nothing
+        // here knows whether that machine still exists, so the warning is conditional on it.
+        // Two nodes running one key fork its history, which is why it comes before the start.
+        match manifest.node.was_running {
+            true => term.warn(
+                "if the machine this archive came from still runs its node, stop it before you \
+                 run `rad node start`",
+            ),
+            false => term.detail("start the node with `rad node start`"),
         }
-        term.detail("start the node with `rad node start`");
     }
 
     // A repository this run meant to compare and could not is a failed check too. The fork
@@ -2078,7 +2109,7 @@ mod tests {
         let (warning, detail) =
             bundle_check_notice(Some(false)).expect("a git that does not check says so");
         assert!(
-            warning.contains("does not check the objects inside a bundle"),
+            warning.contains("cannot check the archived repositories"),
             "{warning}"
         );
         let detail = detail.expect("the version that would fix it is named");
@@ -2836,11 +2867,11 @@ mod tests {
     fn a_standing_says_what_it_means_in_words_a_person_can_act_on() {
         assert_eq!(
             Standing::NothingSaysOtherwise.as_str(),
-            "no other node has reported holding anything else"
+            "no other node reported work of yours missing from the restored repository"
         );
         assert_eq!(
             Standing::PeerHoldsOther.as_str(),
-            "another node holds signed refs this copy does not have"
+            "another node holds work of yours missing from the restored repository"
         );
     }
 

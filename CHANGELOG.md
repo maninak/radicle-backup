@@ -4,12 +4,35 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Upgrading
+
+- If you already used `rad backup schedule`, run it again with the same flags, then take a backup. The timer it set up may not have found `rad`. Its backups then left out your private repositories, and with `--keep` they may have deleted the older archives that still had them.
+- If a script matches text in `--json` output, check it. Much of the wording in `doctor`, `restore` and `verify` changed. Three `doctor` checks are renamed: `delegate quorum` is now `sole delegate`, `other seeds` is now `public repositories`, and `signed refs propagation` is now `unshared work`. In `restore --json`, read the `atRisk`, `ahead` and `notChecked` lists instead of the `standing` text.
+
+### Changed
+
+- Output across commands is reworded into plainer, more immediately understandable sentences. The summary after a backup labels each line.
+- `doctor` shows a check as skipped when there is nothing to check yet, such as before your first backup. It used to count those as "could not be checked". `--json` has a new `skipped` verdict and count.
+- `doctor` warns that you are the only delegate of a repository only when rad-backup knows of no backup of your key.
+- A backup with the node running no longer shows a warning. It notes that a repository syncing during the backup may be saved slightly behind.
+
 ### Fixed
 
-- `doctor` and other commands no longer show a confusing warning about a helper file next to the node's database. SQLite creates that file, it is harmless, and the warning wrongly said the command had just created it, on every run.
+- A backup of private repositories that cannot find `rad` now exits `3`. Without `rad` it cannot tell which repositories are private, so it saves none of them. It used to exit `0`, so a scheduled run looked successful.
+- A timer set up by `rad backup schedule` now finds `rad`, even in `~/.radicle/bin`. A timer does not see your shell's PATH, so `schedule` now saves where `rad` is. When `schedule` cannot find `rad`, it sets up no timer.
+- `schedule` now refuses a path that systemd would misread, such as one with a backslash or a line break. The crontab line it prints for a machine without systemd now works when a path contains `%`.
+- When `restore` could not compare a repository, it now tells you to clone it into a new, empty `RAD_HOME` before you write. It used to suggest `rad sync --fetch`, which cannot show that another node has newer work of yours.
+- `restore` now says to stop the old machine's node, if it still runs, before you start the node on the new machine. It used to talk about "the other" node as if one were running.
 - `restore --no-reconcile` no longer warns that repositories could not be compared. You turned the comparison off, so there is nothing to warn about.
-- `restore` no longer tells you to stop "the other" node as if one were still running. It now says: if the old machine still has your key, stop its node first.
-- `prune` in a script without `--yes` now tells you to add `--yes`. It used to tell you to drop `--dry-run`, which you had not passed.
+- `diff` now compares which repositories you seed and block, and which peers you follow and block. It used to compare only how many, so swapping one for another showed no change. This starts after your next backup or restore. `diff --json` lists the changes in a new `policies` field, which is `null` until then.
+- `diff` no longer lists a new repository twice.
+- `doctor` and other commands no longer warn about a helper file next to the node's database. SQLite creates that file, and it is harmless.
+- Several `doctor` findings are corrected. It no longer warns about a recent backup sent to standard output, or claims a machine was never restored. It now says when your node holds no public repositories. When your private repositories are in a different archive from the one it found, it names that archive. On a first run it suggests a full path for `--output`.
+- A backup no longer prints the same warning twice, or says the node is running when it could not tell.
+- `show` now lists an archive's old warnings under "noted when this archive was taken". They used to look like current warnings.
+- In a script, `prune`, `rad backup move` and `restore --words` now tell you which flag to add when they cannot ask you. They used to give advice that did not fit, such as dropping a `--dry-run` you had not passed.
+- An empty passphrase no longer suggests `--plaintext`. That flag only matters when you create an archive.
+- When `RAD` is set to a program that cannot be run, commands now say so. They used to say `rad` was not on PATH.
 
 ## [0.3.0] - 2026-09-11
 

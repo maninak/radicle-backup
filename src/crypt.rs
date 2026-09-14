@@ -150,14 +150,21 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         // Reached only once `looks_encrypted` has seen the age magic, so a header age
         // cannot parse is damage rather than a plaintext archive. age's own parse error names
         // internals nobody can act on, so this names the stream instead.
-        Err(_) => return Err(Error::Age("not an age-encrypted stream".to_string())),
+        Err(_) => {
+            return Err(Error::Age(
+                "the archive's encryption header is damaged".to_string(),
+            ));
+        }
     };
 
     if decryptor.is_scrypt() {
         let passphrase = archive_passphrase.ok_or_else(|| {
             Error::refused(
-                "this archive is passphrase-protected",
-                format!("re-run and enter the passphrase, or set {ARCHIVE_PASSPHRASE_ENV}"),
+                "this archive is protected by a passphrase, and none was given",
+                format!(
+                    "run again and type the passphrase, pass --passphrase-file <path>, or set \
+                     {ARCHIVE_PASSPHRASE_ENV}"
+                ),
             )
         })?;
         let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
@@ -172,8 +179,8 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
 
     if identities.files.is_empty() {
         return Err(Error::refused(
-            "this archive is encrypted to a key, not a passphrase",
-            "pass --identity <file> with the age or ssh private key it was encrypted to",
+            "this archive is encrypted to a public key, not to a passphrase",
+            "pass --identity <file> with the matching age or ssh private key",
         ));
     }
     let offered = OfferedKeys::read(identities)?;
@@ -205,7 +212,7 @@ impl<R: Read> Read for AuthenticatingReader<R> {
         self.0.read(buffer).map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("{e}: this archive did not authenticate, so it is damaged"),
+                format!("{e}. The archive is damaged or was changed after it was written"),
             )
         })
     }
@@ -330,18 +337,30 @@ impl Protects {
         }
     }
 
-    /// What to do about an empty passphrase. `--plaintext` turns off the ARCHIVE's encryption
-    /// and has nothing to do with a key's own passphrase, so offering it on a key path sent
-    /// the reader after a flag that would not have helped.
-    fn remedy_for_empty(self) -> &'static str {
+    /// Which passphrase this is, in the words a refusal uses.
+    fn named(self) -> &'static str {
         match self {
-            Self::Archive => {
-                "give a passphrase, or pass --plaintext if you really want no encryption"
+            Self::Archive => "the archive passphrase",
+            Self::IdentityKey => "the passphrase for the --identity key",
+            Self::RadicleKey => "the passphrase for your Radicle key",
+        }
+    }
+
+    /// What to do about an empty passphrase. `--plaintext` turns off the ARCHIVE's encryption
+    /// when one is being written, and has nothing to do with opening an archive or with a
+    /// key's own passphrase, so it is offered on that one path alone.
+    fn remedy_for_empty(self, purpose: Purpose) -> &'static str {
+        match (self, purpose) {
+            (Self::Archive, Purpose::Sealing) => {
+                "use a passphrase that is not empty, or pass --plaintext to create an archive \
+                 without encryption"
             }
-            Self::IdentityKey => "give the passphrase that unlocks that key",
-            Self::RadicleKey => {
-                "give a passphrase: it is the only thing protecting this key on disk"
+            (Self::Archive, Purpose::Opening) => "give the passphrase the archive was created with",
+            (Self::IdentityKey, _) => "give the passphrase that unlocks the --identity key",
+            (Self::RadicleKey, Purpose::Sealing) => {
+                "choose a passphrase that is not empty. It protects your key on disk"
             }
+            (Self::RadicleKey, Purpose::Opening) => "give the passphrase for your Radicle key",
         }
     }
 }
@@ -355,7 +374,7 @@ pub fn read_passphrase(
     is_interactive: bool,
 ) -> Result<Zeroizing<String>> {
     let variable = protects.env();
-    let remedy = protects.remedy_for_empty();
+    let remedy = protects.remedy_for_empty(purpose);
     if let Some(path) = file {
         // Zeroizing before the trim, not after: the untrimmed copy holds the passphrase too.
         let untrimmed =
@@ -379,7 +398,10 @@ pub fn read_passphrase(
             None => String::new(),
         };
         return Err(Error::refused(
-            "a passphrase is needed and there is nobody to ask",
+            format!(
+                "{} is needed, but there is no terminal to ask for it",
+                protects.named()
+            ),
             format!("set {variable}{file_instead}"),
         ));
     }
@@ -396,7 +418,7 @@ pub fn read_passphrase(
         if *first != *again {
             return Err(Error::refused(
                 "the two passphrases do not match",
-                "run again",
+                "run the command again and type the same passphrase twice",
             ));
         }
     }
@@ -414,7 +436,7 @@ fn refuse_if_empty(
 ) -> Result<Zeroizing<String>> {
     if passphrase.is_empty() {
         return Err(Error::refused(
-            format!("an empty passphrase protects nothing: {because}"),
+            format!("{because}. The passphrase cannot be empty"),
             remedy,
         ));
     }
@@ -434,7 +456,7 @@ fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {
             continue;
         }
         return Err(Error::refused(
-            format!("{spec} is not a recipient this tool understands"),
+            format!("`{spec}` is not a public key rad-backup can encrypt to"),
             "pass an age public key (age1...) or an ssh public key (ssh-ed25519 AAAA...)",
         ));
     }
@@ -497,7 +519,10 @@ impl OfferedKeys {
         // matched". With one usable key left, the skipped ones are a footnote, not a wall.
         if parsed.is_empty() && !skipped.is_empty() {
             return Err(Error::refused(
-                format!("no key age can use was given: {}", skipped.join("; ")),
+                format!(
+                    "none of the --identity keys can be used. {}",
+                    skipped.join(". ")
+                ),
                 "pass --identity with an ssh-ed25519, ssh-rsa or age key",
             ));
         }
@@ -514,7 +539,7 @@ impl OfferedKeys {
     fn explain(&self, failure: age::DecryptError) -> Error {
         let footnote = match self.skipped.is_empty() {
             true => String::new(),
-            false => format!(" ({} was skipped)", self.skipped.join("; ")),
+            false => format!(". Skipped: {}", self.skipped.join(". ")),
         };
         match failure {
             // Not "the passphrase was wrong", however much it looks like it. age returns this
@@ -530,20 +555,21 @@ impl OfferedKeys {
                 let named = culprit
                     .as_ref()
                     .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "a key given here".to_string());
+                    .unwrap_or_else(|| "one of the --identity keys".to_string());
                 let untried = self.after(culprit.as_deref());
                 let rest = match untried.is_empty() {
                     true => String::new(),
                     false => format!(
-                        "; age stops at the first key it cannot use, so {untried} went untried"
+                        ". age stops at the first key it cannot use, so these keys were not \
+                         tried: {untried}"
                     ),
                 };
                 Error::KeyNotUsable {
                     what: format!(
-                        "{named} could not be used with the passphrase given: either that \
-                         passphrase is wrong, or age cannot use a key of that type{rest}{footnote}"
+                        "could not unlock {named} with the passphrase given. Either the \
+                         passphrase is wrong, or age cannot use this type of key{rest}{footnote}"
                     ),
-                    remedy: "check the passphrase, or pass --identity with only the key this \
+                    remedy: "check the passphrase. Or pass --identity with only the key the \
                              archive was encrypted to"
                         .to_string(),
                 }
@@ -551,27 +577,27 @@ impl OfferedKeys {
             age::DecryptError::NoMatchingKeys if !self.passphrases.locked().is_empty() => {
                 Error::KeysStayedLocked {
                     what: format!(
-                        "this archive was never tried against {}, which stayed locked{footnote}",
+                        "the archive could not be tried with a key that stayed locked: \
+                         {}{footnote}",
                         self.passphrases.locked()
                     ),
                     remedy: format!(
-                        "pass --identity-passphrase-file PATH, or set \
-                         {IDENTITY_PASSPHRASE_ENV}, or re-run with stdin and stderr both on a \
-                         terminal"
+                        "pass --identity-passphrase-file <path> or set \
+                         {IDENTITY_PASSPHRASE_ENV}. Or run the command in a terminal to type \
+                         the passphrase"
                     ),
                 }
             }
             age::DecryptError::NoMatchingKeys => Error::refused(
-                format!("none of the identities given open this archive{footnote}"),
-                "pass --identity with the age or ssh private key it was encrypted to",
+                format!("none of the --identity keys opens this archive{footnote}"),
+                "pass --identity with the private key the archive was encrypted to",
             ),
             // Every remaining variant means the ciphertext did not authenticate. Said flatly,
             // not through the blanket conversion, which hedges on "if the passphrase was
             // right": on this path no archive passphrase was ever asked for, so that sentence
             // sends the reader after a secret that does not exist.
             other => Error::Age(format!(
-                "{other}: this archive did not authenticate, so the \
-                 bytes changed after it was written"
+                "{other}. The archive is damaged or was changed after it was written"
             )),
         }
     }
@@ -588,7 +614,7 @@ impl OfferedKeys {
             .skip(1)
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
-            .join("; ")
+            .join(", ")
     }
 }
 
@@ -604,20 +630,22 @@ impl std::fmt::Display for WhyUnsupported<'_> {
         match self.0 {
             age::ssh::UnsupportedKey::EncryptedPem => write!(
                 f,
-                "an encrypted PEM key, which age cannot read; `ssh-keygen -p -m RFC4716` \
-                 rewrites it in a format it can"
+                "an encrypted PEM key, which age cannot read. Run `ssh-keygen -p -m RFC4716` \
+                 on it to convert it"
             ),
             age::ssh::UnsupportedKey::EncryptedSsh(cipher) => write!(
                 f,
-                "encrypted with {cipher}, which age cannot read; `ssh-keygen -p` re-encrypts \
-                 it with one it can"
+                "encrypted with {cipher}, which age cannot read. Run `ssh-keygen -p` on it to \
+                 re-encrypt it"
             ),
-            age::ssh::UnsupportedKey::Hardware(kind) => write!(
-                f,
-                "a {kind} key, which lives on a hardware token age has no way to drive"
-            ),
+            age::ssh::UnsupportedKey::Hardware(kind) => {
+                write!(f, "a {kind} key on a hardware token, which age cannot use")
+            }
             age::ssh::UnsupportedKey::Type(kind) => {
-                write!(f, "a {kind} key; age reads ssh-ed25519 and ssh-rsa")
+                write!(
+                    f,
+                    "a {kind} key. age can only use ssh-ed25519 and ssh-rsa keys"
+                )
             }
         }
     }
@@ -683,7 +711,7 @@ impl KeyPassphrases {
                 describe(asked).map(|suffix| format!("{}{suffix}", path.display()))
             })
             .collect::<Vec<_>>()
-            .join("; ")
+            .join(", ")
     }
 }
 
@@ -861,6 +889,10 @@ mod tests {
 
     use crate::key::tests::TestScratch;
 
+    /// What the refusal for a key that is simply not a recipient says, so that the other
+    /// failures can be told apart from it by what they do not say.
+    const NO_KEY_OPENS_IT: &str = "none of the --identity keys opens this archive";
+
     fn scratch_path(scratch: &TestScratch, name: &str) -> PathBuf {
         scratch.path_of(&format!("{name}.age"))
     }
@@ -988,10 +1020,10 @@ mod tests {
 
         let said = failure.one_line();
         assert!(said.contains(&key.display().to_string()), "{said}");
-        assert!(said.contains("that passphrase is wrong"), "{said}");
+        assert!(matches!(failure, Error::KeyNotUsable { .. }), "{said}");
         // Never as a key that is not a recipient, which is what age itself reports and what
         // sends someone holding the right key off to look for another one.
-        assert!(!said.contains("none of the identities"), "{said}");
+        assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
     }
 
     /// The bug in the first version of this message: it named every key a passphrase had been
@@ -1034,7 +1066,7 @@ mod tests {
         assert!(said.contains("stayed locked"), "{said}");
         assert!(said.contains(&key.display().to_string()), "{said}");
         assert!(said.contains(IDENTITY_PASSPHRASE_ENV), "{said}");
-        assert!(!said.contains("none of the identities"), "{said}");
+        assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
     }
 
     #[test]
@@ -1052,7 +1084,7 @@ mod tests {
             .expect_err("a key that is not a recipient opens nothing");
 
         let said = failure.one_line();
-        assert!(said.contains("none of the identities"), "{said}");
+        assert!(said.contains(NO_KEY_OPENS_IT), "{said}");
         assert!(!said.contains("stayed locked"), "{said}");
     }
 
@@ -1092,7 +1124,7 @@ mod tests {
 
         let said = failure.one_line();
         assert!(said.contains(&key.display().to_string()), "{said}");
-        assert!(!said.contains("none of the identities"), "{said}");
+        assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
         // In this tool's words, not age's: age writes a multi-line block with a rule through
         // it that recommends `rage`, which is not the program the reader just ran.
         assert!(!said.contains("rage"), "{said}");
@@ -1134,7 +1166,8 @@ mod tests {
             .expect_err("nothing usable was offered");
 
         let said = failure.one_line();
-        assert!(said.contains("no key age can use"), "{said}");
+        assert!(said.contains("can be used"), "{said}");
+        assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
         assert!(said.contains(&legacy.display().to_string()), "{said}");
     }
 
