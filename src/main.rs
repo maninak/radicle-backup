@@ -101,24 +101,16 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
 
     let outcome = dispatch(&ctx, cli);
 
-    // Every verb, not just `backup`. Reading a node database beside a write-ahead log leaves
-    // a file in the home, and only `backup` was draining that list, so `doctor`, `verify`,
-    // `diff` and `restore` all wrote into a home they said they would only read and said
-    // nothing. `backup` drains it first, to put the same fact in the manifest.
+    // Every verb, not just `backup`: drift is a fact about the run rather than about the verb,
+    // and a reader who is told "the routing table is empty" has to be told that the table this
+    // build asks for is not the one that is there, or they go and start a node that is already
+    // running. `backup` drains it first, to put the same fact in the manifest.
     // Set off by a blank line, because this lands after whatever the verb printed last. Under
-    // `doctor` that is the tally, and a `!` line flush against it reads as one more check the
+    // `doctor` that is the tally, and a line flush against it reads as one more check the
     // tally forgot to count rather than as a note about the run.
-    let touched = db::drain_touched();
-    // Drift belongs with the touched files: both are facts about the run rather than about the
-    // verb, and a reader who is told "the routing table is empty" has to be told that the
-    // table this build asks for is not the one that is there, or they go and start a node that
-    // is already running.
     let drift = db::drain_schema_drift();
-    if !touched.is_empty() || !drift.is_empty() {
+    if !drift.is_empty() {
         ctx.term.blank();
-    }
-    for path in touched {
-        ctx.term.warn(&db::touched_warning(&path));
     }
     for drift in &drift {
         ctx.term.warn(&db::schema_drift_warning(drift));

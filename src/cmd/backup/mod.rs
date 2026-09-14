@@ -296,17 +296,9 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         SCRIPT_MODE,
     )?;
 
-    // Drained here rather than at each read, because a file created inside the home is a fact
-    // about the whole run and the archive should carry it: a reader of this manifest deserves
-    // to know that taking it wrote into a home this tool says it only reads.
-    for path in crate::db::drain_touched() {
-        let warning = crate::db::touched_warning(&path);
-        ctx.term.warn(&warning);
-        warnings.push(warning);
-    }
     // A count this archive records as zero because the table it came from has been renamed is
-    // a number a restore would otherwise take at face value. Carried in the manifest for the
-    // same reason as the line above: the reader of an archive is not the person who took it.
+    // a number a restore would otherwise take at face value. Carried in the manifest because
+    // the reader of an archive is not the person who took it.
     for drift in crate::db::drain_schema_drift() {
         let warning = crate::db::schema_drift_warning(&drift);
         ctx.term.warn(&warning);

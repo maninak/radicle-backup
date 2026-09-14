@@ -114,7 +114,7 @@ pub struct Manifest {
     #[serde(default)]
     pub policies: PolicySummary,
     /// Things the user should know that did not stop the run: a skipped repository, a
-    /// database whose reading left an `-shm` index beside it, a node that was running.
+    /// node that was running.
     #[serde(default)]
     pub warnings: Vec<String>,
 }

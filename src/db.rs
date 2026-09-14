@@ -252,9 +252,9 @@ pub fn read_alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
 ///
 /// A database with a write-ahead log cannot be read at all without the `-shm` index beside it,
 /// and SQLite makes that file even through a read-only connection: the flag stops writes to
-/// the database, not to the directory holding it. The file appears in the home whatever this
-/// function promises, so it is recorded here and reported by the caller, rather than found
-/// afterwards by the person whose home it is.
+/// the database, not to the directory holding it. The file is harmless and not reported: the
+/// node uses the same file, and deleting it could corrupt the database if the node opened it
+/// in between.
 ///
 /// No fallback to a writable connection, because one cannot help: `open_with_flags` is lazy,
 /// so a read-only open succeeds even when the log cannot be indexed and the first query is
@@ -264,12 +264,6 @@ pub fn read_alias_book(node_db: &Path) -> Result<BTreeMap<String, String>> {
 fn open_read_only(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
     let db = Connection::open_with_flags(path, flags).map_err(Error::Sqlite)?;
-    // After the open, because the open is what creates the file. An open that failed left
-    // nothing behind, and warning about it would send somebody looking for a file that is
-    // not there.
-    if has_write_ahead_log(path) {
-        record_touched(path);
-    }
     // Opening reads nothing, so this is the first call that actually goes through the log.
     // Asked here so a database that cannot be read says which one it is, instead of surfacing
     // later as a bare "unable to open database file" from whichever query happened to run.
@@ -279,47 +273,6 @@ fn open_read_only(path: &Path) -> Result<Connection> {
             reason: format!("this database could not be read: {e}"),
         })?;
     Ok(db)
-}
-
-/// Whether a write-ahead log sits beside this database, which is what makes reading it write.
-fn has_write_ahead_log(path: &Path) -> bool {
-    let mut log = path.as_os_str().to_os_string();
-    log.push("-wal");
-    Path::new(&log).exists()
-}
-
-/// Files this run created inside a home it promised only to read.
-///
-/// Process-wide rather than threaded back through four return types, because that is the shape
-/// of the fact: somewhere in this run, reading left something behind. The command layer drains
-/// this once and says so.
-static TOUCHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-
-fn record_touched(path: &Path) {
-    if let Ok(mut touched) = TOUCHED.lock()
-        && !touched.iter().any(|seen| seen == path)
-    {
-        touched.push(path.to_path_buf());
-    }
-}
-
-/// Take the list of such databases, leaving it empty.
-pub fn drain_touched() -> Vec<PathBuf> {
-    TOUCHED
-        .lock()
-        .map(|mut touched| std::mem::take(&mut *touched))
-        .unwrap_or_default()
-}
-
-/// The warning for a database that reading touched. In one place because it is both printed
-/// by the run and recorded in the manifest of a backup, and those two must not drift apart.
-pub fn touched_warning(path: &Path) -> String {
-    format!(
-        "reading {} created the `-shm` index beside it: a database with a write-ahead log \
-         cannot be read without one, and read-only stops writes to the database, not to the \
-         directory it sits in",
-        path.display()
-    )
 }
 
 /// Prepare a statement that reads heartwood's schema, or `None` when this schema does not
@@ -365,10 +318,9 @@ pub struct SchemaDrift {
 
 /// Tables and columns this run went looking for and this schema did not have.
 ///
-/// Process-wide for the same reason `TOUCHED` is: the readers hand back maps that four
-/// callers pass on as maps, and an empty one cannot say whether the node has never run or
-/// heartwood renamed the table. The command layer drains this once and says so, beside the
-/// touched databases.
+/// Process-wide because the readers hand back maps that four callers pass on as maps, and an
+/// empty one cannot say whether the node has never run or heartwood renamed the table. The
+/// command layer drains this once and says so.
 static SCHEMA_DRIFT: Mutex<Vec<SchemaDrift>> = Mutex::new(Vec::new());
 
 fn record_schema_drift(path: &Path, wanted: &'static str, e: &rusqlite::Error) {
@@ -421,19 +373,6 @@ pub fn drain_schema_drift() -> Vec<SchemaDrift> {
         .unwrap_or_default()
 }
 
-/// Held by every test that reads or drains the touched list.
-///
-/// Same shape as `while_reading_drift` below and for the same reason: `drain_touched` empties
-/// a process-wide list for everybody, so one test draining between another's read and its
-/// assertion turns a database that was touched into one that was not.
-#[cfg(test)]
-pub(crate) fn while_reading_touched() -> std::sync::MutexGuard<'static, ()> {
-    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
-    ONE_AT_A_TIME
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Held by every test that reads or drains the drift list.
 ///
 /// The list is process-wide, a test binary is one process, and `drain_schema_drift` empties it
@@ -447,9 +386,8 @@ pub(crate) fn while_reading_drift() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The warning for a table or column this schema did not have. In one place for the same
-/// reason `touched_warning` is: printed by the run and recorded in a manifest, and the two
-/// must not drift apart.
+/// The warning for a table or column this schema did not have. In one place because it is
+/// both printed by the run and recorded in a manifest, and the two must not drift apart.
 pub fn schema_drift_warning(drift: &SchemaDrift) -> String {
     format!(
         "{} does not have the {} this tool reads ({}): the node's schema has moved on, so \
@@ -514,50 +452,6 @@ mod tests {
              insert into following values ('z6MkCCC', null, 'allow');",
         )
         .expect("fixture schema applies");
-    }
-
-    #[test]
-    fn reading_a_database_with_a_log_beside_it_is_recorded_as_touching_the_home() {
-        let dir = std::env::temp_dir().join(format!("rad-backup-wal-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
-
-        let quiet = dir.join("quiet.db");
-        Connection::open(&quiet)
-            .expect("a database is creatable")
-            .execute("create table t (a)", [])
-            .expect("a table is creatable");
-
-        // Held open, because closing checkpoints the log away and takes the `-wal` with it.
-        let noisy = dir.join("noisy.db");
-        let live = Connection::open(&noisy).expect("a database is creatable");
-        live.pragma_update(None, "journal_mode", "wal")
-            .expect("the journal mode is settable");
-        live.execute("create table t (a)", [])
-            .expect("a table is creatable");
-        assert!(
-            noisy.with_extension("db-wal").exists(),
-            "the log must be hot"
-        );
-
-        let _reading_touched = while_reading_touched();
-        let _ = drain_touched();
-        open_read_only(&quiet).expect("a database with no log reads");
-        open_read_only(&noisy).expect("a database with a log reads");
-        let touched = drain_touched();
-
-        // Reading the one with a log creates its `-shm` in the home. That happened before and
-        // was reported as nothing at all, because the recording sat behind a fallback that a
-        // write-ahead log never reaches.
-        assert!(touched.contains(&noisy), "{touched:?}");
-        assert!(!touched.contains(&quiet), "{touched:?}");
-        assert!(
-            touched_warning(&noisy).contains("-shm"),
-            "the warning has to name what appeared"
-        );
-
-        drop(live);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -632,7 +526,6 @@ mod tests {
             "the log must be hot or this test proves nothing"
         );
 
-        let _reading_touched = while_reading_touched();
         snapshot(&source, &destination).expect("snapshot succeeds");
         std::fs::copy(&source, &by_hand).expect("the source file is copyable");
 

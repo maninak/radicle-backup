@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html). The archive format has its own version, tracked in `ARCHIVE-FORMAT.md`.
 
+## [Unreleased]
+
+### Fixed
+
+- `doctor` and other commands no longer show a confusing warning about a helper file next to the node's database. SQLite creates that file, it is harmless, and the warning wrongly said the command had just created it, on every run.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added

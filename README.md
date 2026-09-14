@@ -114,7 +114,7 @@ rad backup prune --keep 7               # delete the older ones, keeping the new
 
 **`verify` and `show` can be given no archive**, and then act on the newest archive of this identity they can find, saying on stderr which one that was. They look in `RAD_BACKUP_DIR`, then wherever the last archive actually went, then the working directory. Naming a path is always allowed and always wins. `restore` is the exception and always wants an explicit path, because restoring the wrong archive is not a mistake to default into.
 
-`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception announces itself: reading a node database that has a write-ahead log beside it leaves a `-shm` index file next to it in your home, and the run says which file.
+`doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception is standard SQLite behaviour: reading the node's database, as `rad` itself does, can leave a small, harmless helper file beside it.
 
 Every knob that is not a one-off is an environment variable, so a run is configured the way `rad` itself is. They are listed under [Configuration](#configuration).
 
@@ -147,7 +147,7 @@ The two private repositories were carried; the two public ones are on other node
 | `3` | Checks failed: `verify` found the archive incomplete, `doctor` has a failing line, `diff` found drift, `backup` could not carry a repository, `restore` did not get one back or found one another node holds signed refs for. |
 | `4` | Refused. Everything is intact and nothing was written, because doing it would have been unsafe. |
 
-Codes `3` and `4` are the ones worth scripting against: `rad backup diff || rad backup` takes an archive only when something changed.
+Codes `3` and `4` are the ones worth scripting against: `rad-backup diff || rad-backup` takes an archive only when something changed. Script against `rad-backup` itself, since `rad backup` turns every code but `0` into `1` and adds its own `✗ Error: rad-backup exited with an error.` line. That line follows every exit other than `0`, including a `doctor` report with a failing check or a `diff` that found changes, and adds nothing to what was printed above it.
 
 ## What gets backed up
 
@@ -315,7 +315,7 @@ Nine checks. The left of each line names what was looked at and the right says w
 Answers "is the newest archive still current?" without a passphrase and without opening it, by comparing this tool's own record of what it wrote with what is in the home now.
 
 ```sh
-rad backup diff || rad backup      # take a new archive only when something changed
+rad-backup diff || rad-backup      # take a new archive only when something changed
 ```
 
 It exits `0` when nothing has moved and `3` when something has: a new repository, one that is gone, one whose signed refs have moved on, or a policy change.
