@@ -417,8 +417,8 @@ fn check_key_protection(secret: &SecretKey, key_path: &std::path::Path) -> Check
 
 /// The newest archive there is evidence of, and what that evidence was.
 struct Newest {
-    /// Its age in whole days. `None` when the stamp it carries does not parse, which is not a
-    /// failure: the archive is there, its own claim about when just cannot be read.
+    /// Its age in whole days. `None` when the record's stamp does not parse, which is not a
+    /// failure: the archive was taken, its own claim about when just cannot be read.
     days: Option<i64>,
     /// What the age was read off, so the sentence names something the reader can go and look
     /// at rather than an age from nowhere.
@@ -479,16 +479,15 @@ fn not_listed_here(path: &str) -> String {
 
 /// The record's own archive, when it is newer than the file found on this disk.
 ///
-/// Both ages are needed, so a record or a file whose stamp does not parse produces nothing:
+/// Both ages are needed, so a record whose stamp does not parse produces nothing:
 /// there is no comparison to report, and inventing one from a missing half is how a report
 /// starts saying more than it knows.
 fn newer_elsewhere(
     record: Option<&state::Record>,
-    here: Option<i64>,
+    here: i64,
     now: jiff::Timestamp,
 ) -> Option<Aside> {
     let record = record?;
-    let here = here?;
     let recorded = record.age_in_days(now)?;
     (recorded < here).then(|| {
         Aside::SomethingNewerElsewhere(format!(
@@ -527,9 +526,9 @@ fn check_backup_freshness(
     // archive carried off to another disk is still an archive that was taken.
     let judged = match (newest, record) {
         (Some(archive), _) => {
-            let here = archive.taken.map(|taken| term::days_between(taken, now));
+            let here = term::days_between(archive.taken, now);
             Newest {
-                days: here,
+                days: Some(here),
                 named: format!("{} in {looked_in}", archive.name()),
                 // A nightly `rad backup --stdout` to another disk records an archive this
                 // directory never receives. Reading only the file here, the report called a
@@ -1379,7 +1378,7 @@ mod tests {
                 "/nowhere/radicle-z6MkAAAAAAAA-20260813T120000Z.tar.zst",
             ),
             bytes: 4096,
-            taken: Some(when.parse().expect("a valid instant")),
+            taken: when.parse().expect("a valid instant"),
             encrypted: Some(false),
         }
     }
@@ -1696,7 +1695,7 @@ mod tests {
 
         crate::archives::Archive {
             bytes: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
-            taken: None,
+            taken: "2026-08-13T12:00:00Z".parse().expect("a valid instant"),
             encrypted: Some(!matches!(encryption, crate::crypt::Encryption::Plaintext)),
             path,
         }
@@ -2119,7 +2118,7 @@ mod tests {
         let found = crate::archives::Archive {
             path: std::path::PathBuf::from("/backups/one.tar.zst.age"),
             bytes: 1,
-            taken: None,
+            taken: "2026-08-13T12:00:00Z".parse().expect("a valid instant"),
             encrypted: Some(true),
         };
         let check = check_private_coverage(&inventory, Some(&record), Some(&found), false);

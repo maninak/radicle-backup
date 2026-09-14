@@ -18,13 +18,16 @@ const SUFFIXES: [&str; 2] = [".tar.zst.age", ".tar.zst"];
 /// machine cannot collide, short enough to leave a file name readable.
 pub const SHORT_NODE_ID_LEN: usize = 12;
 
+/// The stamp in an archive name, `20260814T165609Z`, and how many bytes it always spells.
+const STAMP_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+const STAMP_LEN: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Archive {
     pub path: PathBuf,
     pub bytes: u64,
-    /// When the name says it was taken. `None` when the stamp does not parse, which is not an
-    /// error: the file is still an archive, it just cannot be sorted by its own claim.
-    pub taken: Option<jiff::Timestamp>,
+    /// When the name says it was taken.
+    pub taken: jiff::Timestamp,
     /// Whether the file begins with an age header. `None` when it could not be read to look,
     /// which `ls` prints as unknown.
     ///
@@ -254,7 +257,6 @@ impl Archive {
 /// count or picks by it goes through `in_dir`, which refuses an incomplete listing.
 pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Error>)> {
     let short: String = node_id.chars().take(SHORT_NODE_ID_LEN).collect();
-    let marker = format!("-{short}-");
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         // A directory that is not there holds no archives, which is an answer, not a failure.
@@ -267,7 +269,10 @@ pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Err
     for entry in entries {
         let entry = entry.map_err(|e| Error::io(directory, e))?;
         let path = entry.path();
-        let Some(stamp) = stamp_of(&path, &marker) else {
+        let Some(taken) = path
+            .file_name()
+            .and_then(|name| taken_by_name(&name.to_string_lossy(), &short))
+        else {
             continue;
         };
         // `metadata`, which follows a symlink, and not `file_type`, which does not: an archive
@@ -286,7 +291,7 @@ pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Err
         };
         archives.push(Archive {
             bytes,
-            taken: parse_stamp(&stamp),
+            taken,
             // One short read per archive in a directory listing, which is cheaper than being
             // wrong about whether somebody's key is readable.
             encrypted: crate::crypt::looks_encrypted(&path).ok(),
@@ -296,24 +301,38 @@ pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Err
 
     // By the stamp, never by the file name: the name begins with the alias, so sorting by it
     // would order archives by what the identity was called rather than by when they were
-    // taken. One whose stamp did not parse sorts last, and ties break by name so the order is
-    // total and the same on every run.
+    // taken. Ties break by name so the order is total and the same on every run.
     archives.sort_by(|a, b| b.taken.cmp(&a.taken).then_with(|| b.name().cmp(&a.name())));
     unexamined.sort_by_key(|e| e.to_string());
     Ok((archives, unexamined))
 }
 
-/// The stamp in a file name that this tool wrote for this identity, or `None` for any other
-/// file.
-fn stamp_of(path: &Path, marker: &str) -> Option<String> {
-    let name = path.file_name()?.to_string_lossy().into_owned();
-    let suffix = SUFFIXES.iter().find(|suffix| name.ends_with(**suffix))?;
-    Some(
-        name.split_once(marker)?
-            .1
-            .strip_suffix(*suffix)?
-            .to_string(),
-    )
+/// When a file name says its archive was taken, if it is exactly a name `archive_name` writes
+/// for the node id that `short` begins, and `None` for any other file.
+///
+/// Anchored at both ends and read from the right, because the alias may itself hold `-`, a
+/// stamp-like run or another identity's short id. A name that only contains the short id is
+/// not this identity's archive, and `prune` deletes whatever this accepts.
+fn taken_by_name(name: &str, short: &str) -> Option<jiff::Timestamp> {
+    let stem = SUFFIXES
+        .iter()
+        .find_map(|suffix| name.strip_suffix(*suffix))?;
+    let split = stem.len().checked_sub(STAMP_LEN)?;
+    let (rest, stamp) = (stem.get(..split)?, stem.get(split..)?);
+    let alias = rest
+        .strip_suffix('-')?
+        .strip_suffix(short)?
+        .strip_suffix('-')?;
+    if alias.is_empty() || sanitise(alias) != alias {
+        return None;
+    }
+    let taken = jiff::civil::DateTime::strptime(STAMP_FORMAT, stamp)
+        .ok()?
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .ok()?
+        .timestamp();
+    // Only the spelling `file_stamp` writes, so a lenient parse cannot widen the match.
+    (file_stamp(taken) == stamp).then_some(taken)
 }
 
 /// Every archive of this identity in `directory`, newest first, or a failure when one of them
@@ -334,15 +353,6 @@ pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
 /// The newest archive of this identity in `directory`, if there is one.
 pub fn newest(directory: &Path, node_id: &str) -> Result<Option<Archive>> {
     Ok(in_dir(directory, node_id)?.into_iter().next())
-}
-
-/// The stamp `archive_name` writes, read back.
-fn parse_stamp(stamp: &str) -> Option<jiff::Timestamp> {
-    jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", stamp)
-        .ok()?
-        .to_zoned(jiff::tz::TimeZone::UTC)
-        .ok()
-        .map(|zoned| zoned.timestamp())
 }
 
 /// The name an archive gets: identity first, then when it was taken, so that a directory of
@@ -369,7 +379,7 @@ pub fn sidecar_path(archive: &Path) -> PathBuf {
 
 /// A UTC timestamp for a file name: sortable, no punctuation a shell would mind.
 pub fn file_stamp(now: jiff::Timestamp) -> String {
-    now.strftime("%Y%m%dT%H%M%SZ").to_string()
+    now.strftime(STAMP_FORMAT).to_string()
 }
 
 /// Keep the characters a file name can hold everywhere, and drop the rest.
@@ -438,6 +448,17 @@ mod tests {
         // Somebody else's identity, and a file this tool never wrote.
         touch(&dir, "other-z6MkvAFBkdph-20260814T130000Z.tar.zst.age");
         touch(&dir, "holiday-photos.tar.zst");
+        // Named with the short id and a suffix, and still not a name this tool writes.
+        touch(&dir, "holiday-z6MkiTBz1ymu-photos.tar.zst");
+        touch(
+            &dir,
+            "maninak-z6MkiTBz1ymu-20260902T000000Z.bak.tar.zst.age",
+        );
+        // Somebody else's archive, whose alias holds this identity's short id.
+        touch(
+            &dir,
+            &archive_name(Some("a-z6MkiTBz1ymu-b"), OTHER, "20260814T140000Z", false),
+        );
         touch(
             &dir,
             "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst.age.README.txt",
@@ -460,8 +481,13 @@ mod tests {
         assert_eq!(
             in_dir(&dir, OTHER)
                 .expect("the directory is readable")
-                .len(),
-            1,
+                .iter()
+                .map(Archive::name)
+                .collect::<Vec<_>>(),
+            [
+                "a-z6MkiTBz1ymu-b-z6MkvAFBkdph-20260814T140000Z.tar.zst",
+                "other-z6MkvAFBkdph-20260814T130000Z.tar.zst.age",
+            ],
             "one identity's listing must never include another's"
         );
 
@@ -474,7 +500,7 @@ mod tests {
         touch(&dir, "maninak-z6MkiTBz1ymu-20260814T165609Z.tar.zst.age");
 
         let found = in_dir(&dir, NODE).expect("the directory is readable");
-        let taken = found[0].taken.expect("the stamp parses");
+        let taken = found[0].taken;
         assert_eq!(
             taken.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
             "2026-08-14T16:56:09Z"

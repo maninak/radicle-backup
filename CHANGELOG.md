@@ -24,6 +24,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - A backup of private repositories that cannot find `rad` now exits `3`. Without `rad` it cannot tell which repositories are private, so it saves none of them. It used to exit `0`, so a scheduled run looked successful.
 - `--keep` and `prune` no longer delete your last complete archive when the newer ones are missing repositories.
+- Commands that look for your archives now skip a file that is only named like one, such as a renamed copy. `prune` and `--keep` used to delete such a file first.
 - A timer set up by `rad backup schedule` now finds `rad`, even in `~/.radicle/bin`. A timer does not see your shell's PATH, so `schedule` now saves where `rad` is. When `schedule` cannot find `rad`, it sets up no timer.
 - `schedule` now refuses a path that systemd would misread, such as one with a backslash or a line break. The crontab line it prints for a machine without systemd now works when a path contains `%`.
 - When `restore` could not compare a repository, it now tells you to clone it into a new, empty `RAD_HOME` before you write. It used to suggest `rad sync --fetch`, which cannot show that another node has newer work of yours.

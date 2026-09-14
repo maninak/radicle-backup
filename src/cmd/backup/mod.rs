@@ -723,8 +723,10 @@ fn write_sidecar(
             ("MANUAL", &manual),
         ],
     );
-    let path = sidecar_path(archive);
-    std::fs::write(&path, text).map_err(|e| Error::io(&path, e))
+    // Staged and renamed over the path, never written through it: a symlink planted at the
+    // note's name would otherwise truncate whatever it points at. Owner-only, like the archive
+    // beside it.
+    crate::perms::write_atomically(&sidecar_path(archive), text.as_bytes(), MODE_SECRET)
 }
 
 /// Delete older archives of the same identity, keeping the newest `keep` of them and the

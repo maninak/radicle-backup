@@ -1011,6 +1011,47 @@ fn a_state_archive_carries_the_paperwork_but_not_the_repositories() {
     assert!(repos[0]["bundle"].is_null());
 }
 
+/// Anyone who can write to the backup directory can plant a link at the name the note will
+/// get. Written through it, the note truncated whatever the link pointed at.
+#[cfg(unix)]
+#[test]
+fn the_note_beside_an_archive_replaces_a_symlink_at_its_name_and_not_its_target() {
+    let fixture = Fixture::create("note-symlink");
+    let backups = fixture.path("backups");
+    create_private_dir(&backups).expect("the backup directory is creatable");
+    let archive = backups.join("named.tar.zst");
+    let victim = fixture.path("victim");
+    std::fs::write(&victim, b"not the note").expect("the victim is writable");
+    std::os::unix::fs::symlink(&victim, backups.join("named.tar.zst.README.txt"))
+        .expect("a symlink is creatable");
+
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "identity",
+            "--plaintext",
+            "--output",
+            &archive.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "a backup beside a planted symlink");
+
+    assert_eq!(
+        std::fs::read_to_string(&victim).expect("the victim is readable"),
+        "not the note"
+    );
+    let note = backups.join("named.tar.zst.README.txt");
+    assert!(
+        !std::fs::symlink_metadata(&note)
+            .expect("the note is there")
+            .is_symlink()
+    );
+    let written = std::fs::read_to_string(&note).expect("the note is readable");
+    assert!(written.contains("named.tar.zst"), "{written}");
+}
+
 #[test]
 fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     let fixture = Fixture::create("occupied");
@@ -1549,7 +1590,8 @@ fn a_move_whose_note_cannot_be_written_still_says_where_the_key_went() {
         said.contains("radicle.retired"),
         "the run must say where the key went: {said}"
     );
-    let note = fixture.home().join("keys/RETIRED.txt");
+    // Joined per component: Windows prints `keys/RETIRED.txt` with its slash unconverted.
+    let note = fixture.home().join("keys").join("RETIRED.txt");
     assert!(
         said.contains(&format!("could not read {}", note.display())),
         "a note that could not be read must be said out loud: {said}"

@@ -41,7 +41,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
                 serde_json::json!({
                     "path": archive.path.display().to_string(),
                     "bytes": archive.bytes,
-                    "taken": archive.taken.map(crate::cmd::rfc3339_stamp),
+                    "taken": crate::cmd::rfc3339_stamp(archive.taken),
                     "encrypted": archive.encrypted,
                     "recorded": is_recorded(archive, record),
                 })
@@ -72,10 +72,7 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     ctx.term.blank();
     let now = jiff::Timestamp::now();
     for archive in &present {
-        let age = archive
-            .taken
-            .map(|taken| term::days_ago(term::days_between(taken, now)))
-            .unwrap_or_else(|| "at an unreadable time".to_string());
+        let age = term::days_ago(term::days_between(archive.taken, now));
         let mark = if is_recorded(archive, record) {
             "*"
         } else {
