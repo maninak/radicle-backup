@@ -67,6 +67,10 @@ pub enum PrivateSight {
     /// A private selection with no `rad` to read visibility, over a storage that holds
     /// repositories. The selection resolves to nothing, and that is never what was meant.
     Blind,
+    /// A `mine` or `private` selection built on a partial judgement of which repositories are
+    /// yours: no `rad` for `mine`, a `rad` listing that failed, or a repository that could not
+    /// be checked. It can miss a repository.
+    Guessed,
 }
 
 /// Whether the caller is choosing repositories for an archive it is about to write.
@@ -118,7 +122,7 @@ pub fn collect_with_sight(
         ));
     }
 
-    let mine = own_repository_ids(home, rad, node_id, &stored, &mut warnings)?;
+    let (mine, own_sight) = own_repository_ids(home, rad, node_id, &stored, &mut warnings)?;
     let stored_ids: BTreeSet<&str> = stored.iter().map(String::as_str).collect();
     let selected: BTreeSet<String> = match selection {
         RepoSelection::None => BTreeSet::new(),
@@ -169,13 +173,16 @@ pub fn collect_with_sight(
     // repository looks public, so a private selection resolves to nothing. That is the state
     // tier's default, which the shipped systemd timer runs nightly. Not a refusal, because the
     // archive still holds the identity. It is exit 3 instead, through `PrivateSight`.
-    let blind = purpose == Purpose::Archive
-        && rad.is_none()
-        && selection == RepoSelection::Private
-        && !stored.is_empty();
-    let sight = match blind {
-        true => PrivateSight::Blind,
-        false => PrivateSight::Seen,
+    let unaided = purpose == Purpose::Archive && rad.is_none() && !stored.is_empty();
+    // Both selections start from `mine`: `mine` carries it, and `private` describes only it.
+    let partly_judged = purpose == Purpose::Archive
+        && own_sight == OwnSight::Partial
+        && matches!(selection, RepoSelection::Mine | RepoSelection::Private);
+    let sight = match (unaided, selection) {
+        (true, RepoSelection::Private) => PrivateSight::Blind,
+        (true, RepoSelection::Mine) => PrivateSight::Guessed,
+        _ if partly_judged => PrivateSight::Guessed,
+        _ => PrivateSight::Seen,
     };
     // Said only where `rad` changes what an archive holds. `mine` falls back to refs alone,
     // which can miss a repository `rad` would have listed. The other selections do not ask it.
@@ -190,7 +197,7 @@ pub fn collect_with_sight(
                     n => format!("none of the {n} on this machine are in the archive."),
                 }
             )),
-            PrivateSight::Seen if selection == RepoSelection::Mine && !stored.is_empty() => {
+            PrivateSight::Guessed => {
                 warnings.push(format!(
                     "{missing}. rad-backup may miss some of your repositories."
                 ));
@@ -312,8 +319,9 @@ fn own_repository_ids(
     node_id: &str,
     stored: &[String],
     warnings: &mut Vec<String>,
-) -> Result<BTreeSet<String>> {
+) -> Result<(BTreeSet<String>, OwnSight)> {
     let mut mine = BTreeSet::new();
+    let mut sight = OwnSight::Whole;
 
     // No `rad` is said by `collect`, which knows whether this run is blind to private ones.
     if let Some(rad) = rad {
@@ -322,11 +330,14 @@ fn own_repository_ids(
                 Listed::Ids(ids) => mine.extend(ids),
                 // A listing that failed is not a listing that came back empty, and the
                 // difference decides whether a repository is in the archive at all.
-                Listed::Unavailable { why } => warnings.push(format!(
-                    "`rad {}` failed, so repositories it would have named were judged by \
-                     their refs alone: {why}",
-                    listing.spelling()
-                )),
+                Listed::Unavailable { why } => {
+                    sight = OwnSight::Partial;
+                    warnings.push(format!(
+                        "`rad {}` failed, so repositories it would have named were judged by \
+                         their refs alone: {why}",
+                        listing.spelling()
+                    ));
+                }
             }
         }
     }
@@ -340,11 +351,17 @@ fn own_repository_ids(
                 mine.insert(rid.clone());
             }
             Ok(false) => {}
-            Err(e) => warnings.push(format!(
-                "{rid} could not be checked for refs of this identity, so it was left out: \
-                 {}",
-                e.one_line()
-            )),
+            Err(e) => {
+                // A listing that already named it has decided it is yours.
+                if !mine.contains(rid) {
+                    sight = OwnSight::Partial;
+                }
+                warnings.push(format!(
+                    "{rid} could not be checked for refs of this identity, so it was left out: \
+                     {}",
+                    e.one_line()
+                ));
+            }
         }
     }
     // A listing can name a repository that is no longer in storage; the archive can only carry
@@ -352,7 +369,15 @@ fn own_repository_ids(
     // this is a membership test per repository.
     let stored_ids: BTreeSet<&str> = stored.iter().map(String::as_str).collect();
     mine.retain(|rid| stored_ids.contains(rid.as_str()));
-    Ok(mine)
+    Ok((mine, sight))
+}
+
+/// Whether [`own_repository_ids`] could judge every stored repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnSight {
+    Whole,
+    /// A `rad` listing failed, or a repository could not be checked and was left out.
+    Partial,
 }
 
 fn describe(

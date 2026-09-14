@@ -34,6 +34,203 @@ pub struct Archive {
     pub encrypted: Option<bool>,
 }
 
+/// What a run knows it left out of the archive it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// Every repository the settings selected reached the archive.
+    Nothing,
+    /// A repository could not be bundled, or the selection could not be worked out in full.
+    Repositories,
+}
+
+impl Missing {
+    /// The value of the note's `missing` row. Its first word is what [`Completeness::in_note`]
+    /// reads, so that word is part of the format and the rest may be reworded.
+    pub fn note_value(self) -> &'static str {
+        match self {
+            Self::Nothing => "none",
+            Self::Repositories => "some selected repositories",
+        }
+    }
+}
+
+/// The `--tier` and `--repos` an archive was taken with, as the note beside it spells them.
+///
+/// Compared only for equality. A complete archive stands in for an older one only when both
+/// were asked for the same thing: a complete `--repos none` archive holds none of the
+/// repositories an older `--repos private` one does.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Settings(String);
+
+impl Settings {
+    pub fn new(tier: &str, repos: &str) -> Self {
+        Self(format!("--tier {tier} --repos {repos}"))
+    }
+
+    pub fn note_value(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Whether an archive holds every repository its settings selected.
+///
+/// Read from the plaintext note beside the archive and not from the manifest, because the
+/// manifest is inside an archive that is usually encrypted, and deciding what to delete must
+/// not need a passphrase. Not from the file name either, because every reader of a name,
+/// older releases of this tool among them, parses the stamp up to the suffix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Completeness {
+    Complete(Settings),
+    Incomplete(Settings),
+    /// No note, or a note that does not say, such as one written before the note carried it.
+    Unknown,
+}
+
+/// The rows of the note that carry [`Completeness`], up to their values. Indented as the
+/// note's other rows are, so neither a prose line nor a recipient key can be read as one.
+const SETTINGS_ROW: &str = "  settings ";
+const MISSING_ROW: &str = "  missing ";
+
+/// The most of a note that is read. A note is a page of text.
+const NOTE_LIMIT: u64 = 64 * 1024;
+
+impl Completeness {
+    /// What a note says. Anything it does not say plainly is `Unknown`, which [`fates`] keeps
+    /// rather than deletes.
+    pub fn in_note(note: &str) -> Self {
+        let (Some(settings), Some(missing)) =
+            (only_row(note, SETTINGS_ROW), only_row(note, MISSING_ROW))
+        else {
+            return Self::Unknown;
+        };
+        let settings = settings.split_whitespace().collect::<Vec<_>>().join(" ");
+        if settings.is_empty() {
+            return Self::Unknown;
+        }
+        match missing.split_whitespace().next() {
+            Some("none") => Self::Complete(Settings(settings)),
+            Some("some") => Self::Incomplete(Settings(settings)),
+            _ => Self::Unknown,
+        }
+    }
+
+    fn settings(&self) -> Option<&Settings> {
+        match self {
+            Self::Complete(settings) | Self::Incomplete(settings) => Some(settings),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// The value of the one row that starts with `prefix`. Two such rows are believed as little
+/// as none, because a value filled into the note, such as an alias with a line break, can add
+/// one.
+fn only_row<'a>(note: &'a str, prefix: &str) -> Option<&'a str> {
+    let mut rows = note.lines().filter_map(|line| line.strip_prefix(prefix));
+    match (rows.next(), rows.next()) {
+        (Some(value), None) => Some(value),
+        _ => None,
+    }
+}
+
+/// What the note beside each archive says, in the listing's order, and each note that is there
+/// and could not be read.
+///
+/// A missing note is `Unknown` and nothing more, because an archive from an older version or
+/// one copied without its note has none. An unreadable one is `Unknown` too, and is handed
+/// back so the caller can say so.
+pub fn completeness(archives: &[Archive]) -> (Vec<Completeness>, Vec<Error>) {
+    let mut notes = Vec::with_capacity(archives.len());
+    let mut unreadable = Vec::new();
+    for archive in archives {
+        let note = sidecar_path(&archive.path);
+        match read_note(&note) {
+            Ok(Some(text)) => notes.push(Completeness::in_note(&text)),
+            Ok(None) => notes.push(Completeness::Unknown),
+            Err(e) => {
+                unreadable.push(Error::io(&note, e));
+                notes.push(Completeness::Unknown);
+            }
+        }
+    }
+    (notes, unreadable)
+}
+
+/// The start of a note, or `None` when there is no note.
+fn read_note(note: &Path) -> std::io::Result<Option<String>> {
+    use std::io::Read as _;
+    match std::fs::metadata(note) {
+        // Only a regular file: a fifo named like a note would block the read.
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(std::io::Error::other("it is not a regular file")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    // Lossy, because a cut inside a character or a hand edit that is not UTF-8 must not cost
+    // the rows at the top.
+    let mut bytes = Vec::new();
+    std::fs::File::open(note)?
+        .take(NOTE_LIMIT)
+        .read_to_end(&mut bytes)?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// What a retention of `keep` does to one archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fate {
+    /// Among the newest `keep`.
+    Kept,
+    /// Past `keep`, and possibly the newest archive that holds every selected repository.
+    Spared,
+    /// Past `keep`, and not possibly that archive.
+    Deleted,
+}
+
+/// The fate of each archive, given what each note says, newest first, and how many to keep.
+///
+/// The newest `keep` stay. So does every archive that may be the newest complete one for any
+/// settings found in the listing: for each, every unknown archive down to and including the
+/// first archive complete for those settings. An incomplete run then deletes as much as a
+/// complete one, and never the archive that holds what it lacks. `Unknown` counts as possibly
+/// complete for any settings, so a note that went missing costs disk and not an archive. A
+/// note that falsely says `none` is believed.
+pub fn fates(completeness: &[Completeness], keep: usize) -> Vec<Fate> {
+    let mut decided: Vec<Fate> = (0..completeness.len())
+        .map(|at| match at < keep {
+            true => Fate::Kept,
+            false => Fate::Deleted,
+        })
+        .collect();
+    let mut searches: Vec<Option<&Settings>> = completeness
+        .iter()
+        .filter_map(Completeness::settings)
+        .map(Some)
+        .collect();
+    searches.sort();
+    searches.dedup();
+    // With no settings known at all, every unknown archive may be the complete one.
+    if searches.is_empty() {
+        searches.push(None);
+    }
+    for wanted in searches {
+        for (at, note) in completeness.iter().enumerate() {
+            let is_the_one = match note {
+                Completeness::Complete(settings) => Some(settings) == wanted,
+                Completeness::Incomplete(_) => false,
+                Completeness::Unknown => false,
+            };
+            let may_be_the_one = is_the_one || *note == Completeness::Unknown;
+            if may_be_the_one && decided[at] == Fate::Deleted {
+                decided[at] = Fate::Spared;
+            }
+            if is_the_one {
+                break;
+            }
+        }
+    }
+    decided
+}
+
 impl Archive {
     pub fn name(&self) -> String {
         self.path
@@ -423,6 +620,90 @@ mod tests {
             newest_one.is_err(),
             "the newest of an incomplete listing may be the one that could not be seen"
         );
+    }
+
+    /// Deletion is by count, except for the archive that holds what newer ones may lack. Each
+    /// row is one way that archive could be deleted by mistake.
+    #[test]
+    fn retention_never_deletes_what_may_be_the_newest_complete_archive() {
+        use Fate::{Deleted as D, Kept as K, Spared as S};
+
+        let private = Settings::new("state", "private");
+        let bare = Settings::new("state", "none");
+        let c = || Completeness::Complete(private.clone());
+        let i = || Completeness::Incomplete(private.clone());
+        let u = || Completeness::Unknown;
+        let c_bare = || Completeness::Complete(bare.clone());
+
+        let cases: [(Vec<Completeness>, usize, &[Fate]); 9] = [
+            // Every run complete: by count alone.
+            (vec![c(), c(), c(), c()], 2, &[K, K, D, D]),
+            // A timer that lost `rad`: the newest complete archive outlives the count.
+            (vec![i(), i(), i(), c(), c()], 2, &[K, K, D, S, D]),
+            // The newest complete archive is within the count, so nothing past it is needed.
+            (vec![i(), c(), i(), c()], 2, &[K, K, D, D]),
+            // A complete archive of other settings holds nothing these settings need.
+            (vec![i(), c_bare(), i(), c(), c_bare()], 1, &[K, S, D, S, D]),
+            // An unknown newer than the newest complete one may itself be complete.
+            (vec![i(), u(), i(), u(), c(), u()], 1, &[K, S, D, S, S, D]),
+            // Settings with no complete archive at all: every unknown may be theirs.
+            (vec![i(), u(), i(), u()], 1, &[K, S, D, S]),
+            // No settings known at all.
+            (vec![u(), u(), u()], 1, &[K, S, S]),
+            // An unknown within the count does not stop the search.
+            (vec![u(), c(), i()], 1, &[K, S, D]),
+            // Fewer archives than the count.
+            (vec![i(), i()], 5, &[K, K]),
+        ];
+        for (completeness, keep, expected) in cases {
+            assert_eq!(
+                fates(&completeness, keep),
+                expected,
+                "{completeness:?} keeping {keep}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_note_says_complete_or_incomplete_only_in_rows_it_holds_once() {
+        let settings = Settings::new("state", "private");
+        let note = |missing: &str| {
+            format!(
+                "rad-backup archive\n\n  settings {}\n  missing {missing}\n",
+                settings.note_value()
+            )
+        };
+        assert_eq!(
+            Completeness::in_note(&note(Missing::Nothing.note_value())),
+            Completeness::Complete(settings.clone())
+        );
+        assert_eq!(
+            Completeness::in_note(&note(Missing::Repositories.note_value())),
+            Completeness::Incomplete(settings.clone())
+        );
+        // Each of these reads as not known, which keeps the archive while it may matter. The
+        // second and third are values filled into the note that carry a row of their own.
+        let injected_missing = format!(
+            "  missing none\n{}",
+            note(Missing::Repositories.note_value())
+        );
+        let injected_settings = format!(
+            "  settings --tier full --repos all\n{}",
+            note(Missing::Nothing.note_value())
+        );
+        for unsaid in [
+            note("perhaps"),
+            injected_missing,
+            injected_settings,
+            "  missing none\n".to_string(),
+            "  settings \n  missing none\n".to_string(),
+        ] {
+            assert_eq!(
+                Completeness::in_note(&unsaid),
+                Completeness::Unknown,
+                "{unsaid:?}"
+            );
+        }
     }
 
     #[test]

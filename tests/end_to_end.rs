@@ -1797,6 +1797,58 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
 }
 
 #[test]
+#[cfg(unix)]
+fn keep_deletes_archives_missing_repositories_but_never_the_newest_complete_one() {
+    let fixture = Fixture::create("keep-incomplete");
+    let backups = fixture.path("backups");
+    let dir = backups.to_string_lossy().into_owned();
+    let archives = || -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&backups)
+            .expect("the backup directory is readable")
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".age"))
+            .collect();
+        names.sort();
+        names
+    };
+
+    // With `rad`, the default private selection carries the private repository.
+    fixture.stub_rad("private");
+    let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
+    assert_success(&ran, "taking the complete archive");
+    let complete = archives();
+    std::fs::remove_file(fixture.path("bin/rad")).expect("the stub is removable");
+
+    // Without it, the same selection cannot tell which repositories are private and carries
+    // none of them. Two such runs: the first proves the complete archive outlives `--keep 1`,
+    // the second that an archive missing repositories does not.
+    let mut newest = Vec::new();
+    for _ in 0..2 {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let before = archives();
+        let ran = fixture.run(&["--keep", "1", "--output", &dir, "--yes"], &fixture.home());
+        assert_eq!(ran.status.code(), Some(3), "{}", stderr(&ran));
+        newest = archives()
+            .into_iter()
+            .filter(|name| !before.contains(name))
+            .collect();
+    }
+
+    let mut expected = [complete, newest].concat();
+    expected.sort();
+    assert_eq!(archives(), expected);
+
+    // `prune` agrees, and its stdout, which a script may feed to `rm`, names nothing it keeps.
+    let ran = fixture.run(
+        &["prune", "--keep", "1", "--dir", &dir, "--dry-run"],
+        &fixture.home(),
+    );
+    assert_success(&ran, "a dry-run prune");
+    assert_eq!(stdout(&ran), "", "{}", stderr(&ran));
+}
+
+#[test]
 fn a_dry_run_reports_what_it_would_carry_and_writes_nothing() {
     let fixture = Fixture::create("dry-run");
     let backups = fixture.path("backups");

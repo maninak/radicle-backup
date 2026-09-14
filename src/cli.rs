@@ -320,7 +320,8 @@ pub struct Create {
     pub with_node_db: bool,
 
     /// After writing, delete older archives of your identity in the output directory, keeping
-    /// the newest N.
+    /// the newest N. The newest archive with every repository it was asked to save is always
+    /// kept too.
     #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: Option<usize>,
 
@@ -344,7 +345,8 @@ pub struct Ls {
 
 #[derive(Parser, Debug, Clone)]
 pub struct Prune {
-    /// How many of the newest archives to keep.
+    /// How many of the newest archives to keep. The newest archive with every repository it
+    /// was asked to save is always kept too.
     #[arg(long, value_name = "N", env = "RAD_BACKUP_KEEP")]
     pub keep: usize,
 

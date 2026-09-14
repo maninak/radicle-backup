@@ -334,7 +334,7 @@ rad backup prune --keep 7           # delete the rest, after showing you what go
 rad backup prune --keep 7 --dry-run # ...or just show it
 ```
 
-Only files this tool named, for this identity, in that one directory are ever considered. Another identity's archives and anything else in the folder are not candidates for deletion, whatever `--keep` says. `--keep` on a backup run applies the same rule at the same moment the new archive lands.
+`prune` deletes only archives of your identity in that directory. Nothing else in the folder is touched. `rad backup --keep 7` does the same right after each backup.
 
 ## Moving to another machine
 

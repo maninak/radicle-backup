@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
-use crate::archives::sidecar_path;
+use crate::archives::{self, Fate, Missing, Settings, sidecar_path};
 use crate::cli::Create;
 use crate::cmd::{Ctx, Scratch, fill, rfc3339_stamp};
 use crate::container::{MODE_DOC, MODE_SECRET, Writer};
@@ -309,16 +309,33 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     writer.finish(&mut manifest)?;
     let path = destination.commit(&ctx.term)?;
 
-    // Past this point the archive exists and is complete, so nothing below may fail the
+    // A private selection that could not see which repositories are private carried none
+    // of them, and a timer reading only the exit status has to hear about it.
+    let is_incomplete = dropped > 0 || sight == inventory::PrivateSight::Blind;
+    // Stricter than the exit status: a selection judged by refs alone exits 0, and its archive
+    // still must not stand in for an older one that was judged in full.
+    let missing = match dropped > 0 || sight != inventory::PrivateSight::Seen {
+        true => Missing::Repositories,
+        false => Missing::Nothing,
+    };
+
+    // Past this point the archive is committed, so nothing below may fail the
     // run: a full disk that stopped the sidecar being written used to exit 1 over a good
     // archive, and skip both the state record and the report that names it. The same
     // reasoning `remember` states for itself, applied to everything after the commit.
+    // The note goes first, because pruning reads it to tell which archives it may delete.
     if let Some(path) = &path
-        && let Err(e) = write_sidecar(path, &manifest, &encryption, archived)
+        && let Err(e) = write_sidecar(path, &manifest, &encryption, archived, missing)
     {
         ctx.term.warn(&format!(
             "the archive is written, but its note beside it is not: {e}"
         ));
+        // A note an earlier archive left at this path would describe this one wrongly.
+        let stale = sidecar_path(path);
+        if let Some(e) = crate::cmd::prune::unremoved_sidecar(&stale) {
+            ctx.term
+                .warn(&format!("{} could not be removed: {e}", stale.display()));
+        }
     }
     node.restart();
     if let (Some(path), Some(keep)) = (&path, args.keep)
@@ -348,9 +365,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     )?;
     Ok(Outcome {
         path,
-        // A private selection that could not see which repositories are private carried none
-        // of them, and a timer reading only the exit status has to hear about it.
-        is_incomplete: dropped > 0 || sight == inventory::PrivateSight::Blind,
+        is_incomplete,
     })
 }
 
@@ -675,7 +690,9 @@ fn write_sidecar(
     manifest: &Manifest,
     encryption: &Encryption,
     archived: usize,
+    missing: Missing,
 ) -> Result<()> {
+    let settings = Settings::new(manifest.tier.as_str(), manifest.repo_selection.as_str());
     let file_name = archive
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -700,6 +717,8 @@ fn write_sidecar(
             ("CREATED", &manifest.created),
             ("SUMMARY", &summary),
             ("ENCRYPTION", encryption.label()),
+            ("SETTINGS", settings.note_value()),
+            ("MISSING_REPOS", missing.note_value()),
             ("OPENING", &opening),
             ("MANUAL", &manual),
         ],
@@ -708,7 +727,8 @@ fn write_sidecar(
     std::fs::write(&path, text).map_err(|e| Error::io(&path, e))
 }
 
-/// Delete older archives of the same identity, keeping the newest `keep` of them.
+/// Delete older archives of the same identity, keeping the newest `keep` of them and the
+/// newest one that holds every selected repository.
 ///
 /// The same rule `rad backup prune` applies, from the same listing, so a retention policy
 /// cannot mean two different things depending on which command enforced it.
@@ -716,9 +736,24 @@ fn prune(ctx: &Ctx, current: &Path, manifest: &Manifest, keep: usize) -> Result<
     let Some(directory) = current.parent() else {
         return Ok(());
     };
-    let archives = crate::archives::in_dir(directory, &manifest.identity.node_id)?;
-    for archive in archives.iter().skip(keep) {
-        if archive.path == current {
+    let present = archives::in_dir(directory, &manifest.identity.node_id)?;
+    let (completeness, unreadable) = archives::completeness(&present);
+    for e in &unreadable {
+        ctx.term.warn(&format!(
+            "could not read {e}. rad-backup cannot tell whether the archive beside that note \
+             is missing repositories"
+        ));
+    }
+    for (archive, fate) in present.iter().zip(archives::fates(&completeness, keep)) {
+        if archive.path == current || fate == Fate::Kept {
+            continue;
+        }
+        if fate == Fate::Spared {
+            ctx.term.step(&format!(
+                "kept the older archive {}. No newer archive is known to have everything it \
+                 may have",
+                archive.name()
+            ));
             continue;
         }
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;

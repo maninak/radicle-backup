@@ -5,7 +5,7 @@
 //! full and wants to see what would go before it goes.
 
 use crate::archives::sidecar_path;
-use crate::archives::{self, Archive};
+use crate::archives::{self, Archive, Completeness, Fate};
 use crate::cli::Prune;
 use crate::cmd::{Ctx, archive_dir_from_env, refuse_keep_zero};
 use crate::error::{Error, Result};
@@ -35,7 +35,29 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     let directory = archive_dir_from_env(args.dir.as_deref(), stored.record());
     let present = archives::in_dir(&directory, &identity.node_id())?;
 
-    let doomed: Vec<&Archive> = present.iter().skip(args.keep).collect();
+    let (completeness, unreadable) = archives::completeness(&present);
+    for e in &unreadable {
+        ctx.term.warn(&format!(
+            "could not read {e}. rad-backup cannot tell whether the archive beside that note \
+             is missing repositories"
+        ));
+    }
+    let fates = archives::fates(&completeness, args.keep);
+    let with_fate = |wanted: Fate| -> Vec<(&Archive, &Completeness)> {
+        present
+            .iter()
+            .zip(&completeness)
+            .zip(&fates)
+            .filter(|(_, fate)| **fate == wanted)
+            .map(|(pair, _)| pair)
+            .collect()
+    };
+    let doomed = with_fate(Fate::Deleted);
+    let spared: Vec<&Archive> = with_fate(Fate::Spared)
+        .into_iter()
+        .map(|(archive, _)| archive)
+        .collect();
+
     if doomed.is_empty() {
         ctx.term.ok(&format!(
             "nothing to delete. {} holds {} of your identity, and --keep is {}",
@@ -43,6 +65,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
             term::count(present.len(), "archive", "archives"),
             args.keep
         ));
+        say_spared(ctx, &spared);
         return Ok(());
     }
 
@@ -51,15 +74,20 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         term::count(doomed.len(), "archive", "archives"),
         args.keep
     ));
-    for archive in &doomed {
+    for (archive, note) in &doomed {
         ctx.term.print(&format!(
-            "  {}  {}",
+            "  {}  {}{}",
             archive.name(),
-            term::human_bytes(archive.bytes)
+            term::human_bytes(archive.bytes),
+            match note {
+                Completeness::Incomplete(_) => "  may be missing repositories",
+                Completeness::Complete(_) | Completeness::Unknown => "",
+            }
         ))?;
     }
-    let freed: u64 = doomed.iter().map(|archive| archive.bytes).sum();
+    let freed: u64 = doomed.iter().map(|(archive, _)| archive.bytes).sum();
     ctx.term.blank();
+    say_spared(ctx, &spared);
 
     if args.dry_run {
         ctx.term.hint(&format!(
@@ -80,7 +108,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         };
         return Err(Error::refused("nothing was deleted", remedy));
     }
-    for archive in &doomed {
+    for (archive, _) in &doomed {
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
         let sidecar = sidecar_path(&archive.path);
         if let Some(e) = unremoved_sidecar(&sidecar) {
@@ -96,6 +124,27 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         term::human_bytes(freed)
     ));
     Ok(())
+}
+
+/// Name the older archives kept past `--keep`, so a count that does not add up says why.
+fn say_spared(ctx: &Ctx, spared: &[&Archive]) {
+    if spared.is_empty() {
+        return;
+    }
+    ctx.term.detail(&format!(
+        "also keeping {}. No newer archive is known to have everything they may have",
+        term::count(spared.len(), "older archive", "older archives")
+    ));
+    // On stderr, never through `print`: stdout lists only what is deleted, and a script may
+    // delete whatever it lists. Not dropped by `--quiet`, which every scheduled run passes.
+    for archive in spared {
+        ctx.term.detail(&format!(
+            "  {}  {}",
+            archive.name(),
+            term::human_bytes(archive.bytes)
+        ));
+    }
+    ctx.term.blank();
 }
 
 #[cfg(test)]
