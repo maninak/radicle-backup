@@ -43,7 +43,7 @@ ssh-key = { version = "0.6.7", features = ["encryption", "ed25519", "getrandom"]
 tar = "0.4.46"
 thiserror = "2.0.20"
 zeroize = "1.9.0"
-zstd = "0.13.3"
+zstd = "0.14.0"
 
 [profile.release]
 opt-level = 3
@@ -65,7 +65,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.151"
 # The hygiene test opens a plaintext archive without this tool's own reader, so that what it
 # checks is the bytes on disk rather than this tool's opinion of them.
-zstd = "0.13.3"
+zstd = "0.14.0"
 
 # Debian packaging. `just deb` builds it; the release workflow builds and signs the apt
 # repository from the same metadata, so what CI ships is what a local build produces.
