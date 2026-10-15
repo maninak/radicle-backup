@@ -13,14 +13,16 @@
 A Radicle key cannot be reissued: lose it and nothing on the network can give back the ability to sign as yourself, push to your own repositories, or govern a repository you are the only delegate of. This tool writes that key, and everything around it that the network cannot restore, into one encrypted file.
 
 ```sh
-rad backup                      # one encrypted archive of everything the network cannot replace
 rad backup doctor               # what would you lose right now, and what fixes it
-rad backup restore <archive>    # put it all back, on this machine or another one
+rad backup                      # one encrypted archive of what the network cannot replace
+rad backup restore <archive>    # put it all back, here or on another machine
+rad backup move <output-path>   # move everything to a new computer, so only that one runs your key
 ```
 
 Beyond copying files:
 
-- The default archive carries what the network will not hand back and skips what it will: a public repository is on other nodes, a private one is by default nowhere else at all.
+- The default archive carries what the network will not hand back and skips what it will: a public repository is on other nodes, a private one is by default nowhere else at all. A default archive is usually KiBs to MiBs. Large private repositories make it bigger.
+- Already running borg or restic? `rad backup --stdout` writes the archive to their stdin.
 - `restore` compares every restored repository with the network before handing control back, because pushing on top of stale signed refs forks your own peer history.
 - An archive is `tar` inside `zstd` inside optional `age`, with recovery instructions and a shell script inside it: `tar`, `zstd` and (when encrypted) `age` open it, and `git` and a POSIX shell put it back, without this tool.
 - `doctor` reports what would be lost right now and names the command that fixes each failing line.
