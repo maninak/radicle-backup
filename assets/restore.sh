@@ -196,9 +196,17 @@ if [ -f node/policies.db ]; then
 else
 	echo "restored the identity and $counted; this archive carried no policies"
 fi
+if [ "$restored" -gt 0 ]; then
+	echo
+	echo "to see your issues and patches again, run this once:"
+	echo "    RAD_HOME='$RAD_HOME' rad cob migrate"
+	echo "and then this for each repository:"
+	echo "    RAD_HOME='$RAD_HOME' rad issue cache --repo <rid>"
+	echo "    RAD_HOME='$RAD_HOME' rad patch cache --repo <rid>"
+fi
 echo
 echo "before writing to any restored repository, fetch what the network has:"
-echo "    rad sync <rid> --fetch"
+echo "    RAD_HOME='$RAD_HOME' rad sync <rid> --fetch"
 echo "writing on top of refs the network has already moved past forks your own history."
 echo
 echo "and never run two nodes with this key at once."

@@ -133,6 +133,46 @@ impl Rad {
     pub fn block_peer(&self, nid: &str) -> Result<bool> {
         self.tool.passthrough(&["block", nid])
     }
+
+    /// Creates or upgrades the collaborative object database, which `rad issue cache` needs.
+    /// `None` when it worked, else what `rad` said.
+    pub fn migrate_cobs(&self) -> Result<Option<String>> {
+        self.tool.refused(&["cob", "migrate"])
+    }
+
+    /// Rebuilds the cache `rad issue list` or `rad patch list` reads, for one repository.
+    /// `None` when it worked, else what `rad` said.
+    ///
+    /// Never `--storage`: rad 1.10.3 still demands a working copy in the current directory.
+    pub fn recache(&self, kind: Cached, rid: &str) -> Result<Option<String>> {
+        self.tool
+            .refused(&[kind.subcommand(), "cache", &format!("--repo={rid}")])
+    }
+}
+
+/// A kind of collaborative object `rad` keeps a cache of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cached {
+    Issues,
+    Patches,
+}
+
+impl Cached {
+    pub const ALL: [Self; 2] = [Self::Issues, Self::Patches];
+
+    fn subcommand(self) -> &'static str {
+        match self {
+            Self::Issues => "issue",
+            Self::Patches => "patch",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::Issues => "issues",
+            Self::Patches => "patches",
+        }
+    }
 }
 
 /// The parts of an identity document this tool reads.

@@ -243,12 +243,15 @@ impl Fixture {
     /// the given `visibility`.
     ///
     /// The stub prints `STUB-RAD-UNSTUBBED` on stderr and fails on any call it was not taught.
+    /// It appends every `cob`, `issue` and `patch` call to `rad-calls`.
     #[cfg(unix)]
     fn stub_rad(&self, visibility: &str) {
         use std::os::unix::fs::PermissionsExt as _;
 
         let bin = self.path("bin");
         std::fs::create_dir_all(&bin).expect("the stub directory is creatable");
+        let calls = self.path("rad-calls");
+        let calls = calls.display();
         let private_listing = match visibility {
             "private" => format!("echo 'rad:{RID}  stub  a stub repository'"),
             _ => "true".to_string(),
@@ -268,6 +271,7 @@ inspect)
 	printf '%s
 ' '{{"payload":{{"xyz.radicle.project":{{"name":"stub"}}}},"delegates":["did:key:{DID}"],"visibility":{{"type":"{visibility}"}}}}'
 	;;
+cob|issue|patch) echo "$*" >> '{calls}' ;;
 *)
 	echo "STUB-RAD-UNSTUBBED: $*" >&2
 	exit 1
@@ -759,6 +763,46 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
     assert!(
         checks.iter().any(|check| check["checkId"] == "public-key"),
         "the other deep checks still ran: {report}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_restore_rebuilds_the_lists_of_issues_and_patches_that_rad_reads() {
+    let fixture = Fixture::create("recache");
+    let backups = fixture.path("backups");
+    fixture.stub_rad("private");
+    let ran = fixture.run(
+        &[
+            "--tier",
+            "full",
+            "--output",
+            &backups.to_string_lossy(),
+            "--yes",
+        ],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking a full backup");
+
+    let archive = only_archive(&backups);
+    let ran = fixture.run(
+        &[
+            "restore",
+            "--yes",
+            "--no-reconcile",
+            &archive.to_string_lossy(),
+        ],
+        &fixture.path("restored"),
+    );
+    assert_success(&ran, "restoring the archive");
+
+    // `rad issue cache` refuses a home with no cob database until `rad cob migrate` makes one
+    let calls = std::fs::read_to_string(fixture.path("rad-calls")).expect("the stub was called");
+    assert_eq!(
+        calls,
+        format!("cob migrate\nissue cache --repo=rad:{RID}\npatch cache --repo=rad:{RID}\n"),
+        "{}",
+        stderr(&ran)
     );
 }
 

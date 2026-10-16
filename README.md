@@ -16,7 +16,7 @@ A Radicle key cannot be reissued: lose it and nothing on the network can give ba
 rad backup doctor               # what would you lose right now, and what fixes it
 rad backup                      # one encrypted archive of what the network cannot replace
 rad backup restore <archive>    # put it all back, here or on another machine
-rad backup move <output-path>   # move everything to a new computer, so only that one runs your key
+rad backup move <output-path>   # move everything to a new computer, with nothing to fix by hand after
 ```
 
 Beyond copying files:
@@ -229,6 +229,7 @@ rad backup restore ~/backups/alice-z6Mk<nid>-20260814T165609Z.tar.zst.age
 ✓ the archive holds alice (did:key:z6Mk<nid>)
 ✓ installed the identity into ~/.radicle
 · restoring 2 repositories
+· rebuilding the lists of issues and patches of 2 repositories
 · starting the node to compare the restored repositories with the network
 · comparing 2 repositories with the network
 · waiting 20 seconds for other nodes to report what they hold

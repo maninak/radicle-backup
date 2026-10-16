@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html). The archive format has its own version, tracked in `ARCHIVE-FORMAT.md`.
 
+## [Unreleased]
+
+### Fixed
+
+- A restored home now automatically lists its issues and patches. `rad issue list` and `rad patch list` used to show nothing after a restore, until their cache was rebuilt by manually running `rad cob migrate`, then `rad issue cache --repo <rid>` and `rad patch cache --repo <rid>` for each repository.
+
 ## [0.4.0] - 2026-09-14
 
 ### Upgrading

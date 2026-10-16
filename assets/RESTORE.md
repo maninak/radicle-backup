@@ -119,6 +119,13 @@ done
 
 `restore.sh`, next to this file, is the same procedure with error handling, and it additionally refuses a bundle whose name is not a repository id, a `HEAD` that does not name a ref, and a home with a symlink anywhere it writes: the identity, its public key, `config.json`, a node database, one of the `keys`, `node` and `storage` directories, or a repository's own directory inside `storage`. It takes the target home as its argument (`sh restore.sh ~/.radicle`), falling back to `$RAD_HOME` and then `$HOME/.radicle`, and refuses to run against a home that already holds a key.
 
+`rad issue list` and `rad patch list` read a cache that is not in the archive, so they show nothing until you rebuild it. Run `rad cob migrate` once, then this for each restored repository:
+
+```sh
+rad issue cache --repo <rid>
+rad patch cache --repo <rid>
+```
+
 ## 4. Before you write anything to a restored repository
 
 Read this part. It is the one way a restore can cost you something.

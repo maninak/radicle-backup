@@ -15,7 +15,7 @@ use crate::home::{Home, is_a_link};
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{Manifest, RepoRecord};
 use crate::perms::{copy_doc, copy_secret, set_dir_owner_only};
-use crate::rad::Rad;
+use crate::rad::{Cached, Rad};
 use crate::state;
 use crate::term;
 
@@ -331,6 +331,7 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
 
     install(ctx, &staging, &settled)?;
     let restored = restore_repositories(ctx, &staging, &manifest, &settled)?;
+    rebuild_caches(ctx, &restored.repos);
 
     let policies_missed = if args.replay_policies {
         replay_policies(ctx, &staging)?
@@ -683,6 +684,56 @@ fn allowed_config(listed: &str) -> AllowedConfig {
     dropped.sort();
     dropped.dedup();
     AllowedConfig { kept, dropped }
+}
+
+/// Rebuild the cache `rad issue list` and `rad patch list` read, for every restored
+/// repository. Failures only warn, because every repository is already on disk.
+fn rebuild_caches(ctx: &Ctx, restored: &[RepoRecord]) {
+    if restored.is_empty() {
+        return;
+    }
+    let home = format!("RAD_HOME='{}'", ctx.home.path().display());
+    let by_hand = &format!(
+        "run `{home} rad cob migrate`, then `{home} rad issue cache --repo <rid>` and \
+         `{home} rad patch cache --repo <rid>` for each repository"
+    );
+    let rad = Rad::new(ctx.home.path());
+    if !rad.is_available() {
+        ctx.term.warn(&format!(
+            "{}, so your issues and patches will not show yet",
+            crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+        ));
+        ctx.term.detail(by_hand);
+        return;
+    }
+    ctx.term.step(&format!(
+        "rebuilding the lists of issues and patches of {}",
+        term::count(restored.len(), "repository", "repositories")
+    ));
+    if let Some(why) = rad.migrate_cobs().unwrap_or_else(|e| Some(e.one_line())) {
+        ctx.term.warn("your issues and patches will not show yet");
+        ctx.term.detail(&format!("`rad cob migrate` failed: {why}"));
+        ctx.term.detail(by_hand);
+        return;
+    }
+    let mut failed = Vec::new();
+    for repo in restored {
+        for kind in Cached::ALL {
+            if let Some(why) = rad
+                .recache(kind, &repo.rid)
+                .unwrap_or_else(|e| Some(e.one_line()))
+            {
+                failed.push(format!("{}, {}: {why}", repo.display_name(), kind.noun()));
+            }
+        }
+    }
+    if !failed.is_empty() {
+        ctx.term.warn("some issues or patches will not show yet");
+        for line in &failed {
+            ctx.term.detail(line);
+        }
+        ctx.term.detail(by_hand);
+    }
 }
 
 /// What came back out of the bundles, and what did not.

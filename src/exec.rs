@@ -143,8 +143,9 @@ impl Tool {
 
     /// Runs a command whose failure is not the run's failure, and returns why it failed.
     ///
-    /// Returns `None` on success. Otherwise it returns the program's stderr, or a sentence
-    /// naming the exit code when stderr is empty, so the report is never blank.
+    /// Returns `None` on success. Otherwise it returns the program's stderr, else the last
+    /// line of its stdout (rad 1.10.3 prints some errors there), else a sentence naming the
+    /// exit code, so the report is never blank.
     pub fn refused<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
         let finished = self.raw(args)?;
         if finished.status.success() {
@@ -153,6 +154,11 @@ impl Tool {
         let said = String::from_utf8_lossy(&finished.stderr).trim().to_string();
         if !said.is_empty() {
             return Ok(Some(said));
+        }
+        // Only the last line of stdout, because the lines before it are progress
+        let stdout = String::from_utf8_lossy(&finished.stdout);
+        if let Some(last) = stdout.lines().rev().find(|line| !line.trim().is_empty()) {
+            return Ok(Some(last.trim().to_string()));
         }
         Ok(Some(match finished.status.code() {
             Some(code) => format!(
