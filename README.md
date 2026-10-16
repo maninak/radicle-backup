@@ -59,7 +59,7 @@ radicle-backup/packaging/release/verify.sh <the directory you downloaded into>
 cargo install radicle-backup
 ```
 
-`git` on `PATH` is required at runtime; `rad` is optional and only makes the archive better informed. The Rust floor is `rust-version` in `Cargo.toml`, and `cargo` says so if yours is older.
+`git` and `rad` on `PATH` are required at runtime. Without `rad`, a backup cannot tell which repositories are private and may leave them out, and `restore` can neither compare anything with the network nor rebuild the lists of issues and patches. The Rust floor is `rust-version` in `Cargo.toml`, and `cargo` says so if yours is older.
 
 ### As a `rad` subcommand
 
@@ -114,7 +114,7 @@ rad backup paper                        # a printable recovery sheet, for the dr
 rad backup prune --keep 7               # delete the older ones, keeping the newest 7
 ```
 
-**`verify` and `show` can be given no archive**, and then act on the newest archive of this identity they can find, saying on stderr which one that was. They look in `RAD_BACKUP_DIR`, then wherever the last archive actually went, then the working directory. Naming a path is always allowed and always wins. `restore` is the exception and always wants an explicit path, because restoring the wrong archive is not a mistake to default into.
+**`verify` and `show` can be given no archive**, and then act on the newest archive of this identity they can find, saying on stderr which one that was. They look in `RAD_BACKUP_DIR` when it is set, else in the directory the last archive went to, else in the working directory. Naming a path is always allowed and always wins. `restore` is the exception and always wants an explicit path, because restoring the wrong archive is not a mistake to default into.
 
 `doctor`, `diff`, `ls`, `show`, `verify` and `--dry-run` are the read-only verbs: none of them writes to your home, and none of them needs the node stopped. The one exception is standard SQLite behaviour: reading the node's database, as `rad` itself does, can leave a small, harmless helper file beside it.
 
