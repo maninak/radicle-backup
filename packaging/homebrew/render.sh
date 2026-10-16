@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 
-# shellcheck disable=SC2006 # every backtick below is inside the Ruby formula this writes, in
-# prose a `brew info` reader sees, and none of them is a command substitution.
+# shellcheck disable=SC2006 # every backtick below is prose inside the Ruby formula this
+# writes, and none of them is a command substitution
 #
-# Render the Homebrew formula for a released version.
+# Render the Homebrew formula for a released version, with checksums from its sha256sums.txt.
 #
 #   ./packaging/homebrew/render.sh 0.1.0 > rad-backup.rb
-#
-# The checksums come from the release's own sha256sums.txt, so the formula cannot claim a
-# digest that no published artifact has.
 set -euo pipefail
 
 VERSION="${1:?usage: render.sh <version>}"

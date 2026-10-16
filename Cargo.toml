@@ -13,23 +13,21 @@ keywords = ["radicle", "backup", "restore", "git", "identity"]
 categories = ["command-line-utilities"]
 exclude = ["/.github", "/ci", "/packaging", "/tests/fixtures"]
 
-# The crate is `radicle-backup`, matching the repository and the rest of the Radicle crates,
-# but the binary must be `rad-backup`: `rad backup` works by exec'ing NAME-SUBCOMMAND, so the
-# file on PATH has to be spelled that way for the subcommand to exist at all.
+# The binary must be `rad-backup`, because `rad backup` execs `rad-backup` from PATH
 [[bin]]
 name = "rad-backup"
 path = "src/main.rs"
 
 [dependencies]
 age = { version = "0.12.1", features = ["ssh"] }
-# `zeroize`, so the mnemonic wipes itself: those 24 words ARE the key, and without the feature
-# bip39's own buffers are dropped intact.
+# `zeroize` wipes the mnemonic, because its 24 words are the key and bip39's buffers are
+# otherwise dropped intact
 bip39 = { version = "2.2.2", features = ["zeroize"] }
 bs58 = "0.5.1"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 clap_complete = "4.6.6"
-# `env`, because clap_mangen 0.3 moved environment-variable rendering behind a feature.
-# Without it the man page silently loses the `RAD_BACKUP_*` lines every 0.2 release wrote.
+# `env` makes clap_mangen 0.3 render environment variables, or the man page silently loses
+# its `RAD_BACKUP_*` lines
 clap_mangen = { version = "0.3.2", features = ["env"] }
 hex = "0.4.3"
 jiff = "0.2.35"
@@ -48,8 +46,7 @@ zstd = "0.13.3"
 [profile.release]
 opt-level = 3
 lto = "fat"
-# One codegen unit is not only smaller and faster: parallel codegen units are scheduled
-# nondeterministically, so a reproducible binary needs exactly one.
+# Parallel codegen units are scheduled nondeterministically, so a reproducible binary needs one
 codegen-units = 1
 strip = true
 
@@ -63,17 +60,15 @@ unwrap_used = "deny"
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.151"
-# The hygiene test opens a plaintext archive without this tool's own reader, so that what it
-# checks is the bytes on disk rather than this tool's opinion of them.
+# The hygiene test decodes a plaintext archive itself, so it checks the bytes on disk
 zstd = "0.13.3"
 
-# Debian packaging. `just deb` builds it; the release workflow builds and signs the apt
-# repository from the same metadata, so what CI ships is what a local build produces.
+# Debian packaging, used by `just deb` and by the release workflow alike
 [package.metadata.deb]
 maintainer = "Konstantinos Maninakis <info@radicle.tools>"
 copyright = "2026, Konstantinos Maninakis"
-# A DEP-5 file of our own, because a generated one inlines the Apache text where Debian
-# wants a reference to /usr/share/common-licenses/Apache-2.0.
+# A hand-written DEP-5 file, because a generated one inlines the Apache text where Debian
+# wants a reference to /usr/share/common-licenses/Apache-2.0
 license-file = ["packaging/debian/copyright", "0"]
 changelog = "packaging/generated/changelog.Debian"
 section = "utils"
@@ -95,7 +90,7 @@ recommends = "age"
 suggests = "radicle-node"
 assets = [
     ["target/release/rad-backup", "usr/bin/", "755"],
-    # A symlink, so `rad restore` is the same 6 MB binary rather than a second copy of it.
+    # A symlink, so `rad restore` runs the same 6 MB binary with no second copy
     ["packaging/generated/rad-restore", "usr/bin/rad-restore", "777"],
     ["README.md", "usr/share/doc/radicle-backup/README.md", "644"],
     ["ARCHIVE-FORMAT.md", "usr/share/doc/radicle-backup/ARCHIVE-FORMAT.md", "644"],
@@ -107,10 +102,9 @@ assets = [
     ["packaging/generated/rad-backup.bash", "usr/share/bash-completion/completions/rad-backup", "644"],
     ["packaging/generated/rad-backup.fish", "usr/share/fish/vendor_completions.d/rad-backup.fish", "644"],
     ["packaging/generated/_rad-backup", "usr/share/zsh/vendor-completions/", "644"],
-    # User units, installed and left alone. `cargo-deb`'s systemd-units integration is for
-    # system units and would generate maintainer scripts that enable them; a package that
-    # starts copying a private key the moment it lands is a package that surprises people.
-    # The user turns it on with `systemctl --user enable --now rad-backup.timer`.
+    # User units, installed and left disabled, because a package must not start copying a
+    # private key the moment it lands. The `cargo-deb` systemd-units integration enables
+    # system units. The user runs `systemctl --user enable --now rad-backup.timer`.
     ["packaging/systemd/rad-backup.service", "usr/lib/systemd/user/", "644"],
     ["packaging/systemd/rad-backup.timer", "usr/lib/systemd/user/", "644"],
 ]

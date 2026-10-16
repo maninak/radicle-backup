@@ -1,24 +1,17 @@
-//! Naming the archives of one identity, and finding them again on disk.
-//!
-//! Every command that reads an archive, except `restore`, can be given none and mean the
-//! newest one. (`restore` asks for the path, because putting the wrong archive back is not
-//! something a default should be able to do.) Defaulting is only safe if "the newest one" is
-//! decided the same way everywhere, and if the set it is chosen from can never include a file
-//! this tool did not write: a retention rule or a default argument that could reach anything
-//! else is a deletion bug waiting for a bad path.
+//! Naming the archives of one identity and finding them again on disk.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-/// The suffixes this tool writes. A file that ends in neither was not written here.
+/// The archive suffixes this tool writes.
 const SUFFIXES: [&str; 2] = [".tar.zst.age", ".tar.zst"];
 
-/// How much of a node id an archive name carries. Long enough that two identities on one
-/// machine cannot collide, short enough to leave a file name readable.
+/// The number of node id characters an archive name carries, enough to keep two identities
+/// on one machine apart.
 pub const SHORT_NODE_ID_LEN: usize = 12;
 
-/// The stamp in an archive name, `20260814T165609Z`, and how many bytes it always spells.
+// The stamp in an archive name (`20260814T165609Z`) and its fixed length in bytes
 const STAMP_FORMAT: &str = "%Y%m%dT%H%M%SZ";
 const STAMP_LEN: usize = 16;
 
@@ -26,14 +19,12 @@ const STAMP_LEN: usize = 16;
 pub struct Archive {
     pub path: PathBuf,
     pub bytes: u64,
-    /// When the name says it was taken.
+    /// When the archive was taken, read from its name.
     pub taken: jiff::Timestamp,
-    /// Whether the file begins with an age header. `None` when it could not be read to look,
-    /// which `ls` prints as unknown.
+    /// Whether the file begins with an age header, or `None` when it could not be read.
     ///
-    /// Read off the bytes, never off the `.age` suffix. `rad backup --stdout > name.tar.zst`
-    /// writes an encrypted archive under a name that says otherwise, and `ls` printed "(not
-    /// encrypted)" beside it: a claim about who can read a file, made from its name.
+    /// The value comes from the bytes and never from the `.age` suffix, because
+    /// `rad backup --stdout > name.tar.zst` writes an encrypted archive under a plain name.
     pub encrypted: Option<bool>,
 }
 
@@ -47,8 +38,9 @@ pub enum Missing {
 }
 
 impl Missing {
-    /// The value of the note's `missing` row. Its first word is what [`Completeness::in_note`]
-    /// reads, so that word is part of the format and the rest may be reworded.
+    /// The value of the note's `missing` row.
+    ///
+    /// [`Completeness::in_note`] reads its first word, so that word is part of the format.
     pub fn note_value(self) -> &'static str {
         match self {
             Self::Nothing => "none",
@@ -59,9 +51,8 @@ impl Missing {
 
 /// The `--tier` and `--repos` an archive was taken with, as the note beside it spells them.
 ///
-/// Compared only for equality. A complete archive stands in for an older one only when both
-/// were asked for the same thing: a complete `--repos none` archive holds none of the
-/// repositories an older `--repos private` one does.
+/// A complete archive stands in for an older one only when their settings are equal, because
+/// a complete `--repos none` archive holds none of a `--repos private` one's repositories.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Settings(String);
 
@@ -77,29 +68,29 @@ impl Settings {
 
 /// Whether an archive holds every repository its settings selected.
 ///
-/// Read from the plaintext note beside the archive and not from the manifest, because the
-/// manifest is inside an archive that is usually encrypted, and deciding what to delete must
-/// not need a passphrase. Not from the file name either, because every reader of a name,
-/// older releases of this tool among them, parses the stamp up to the suffix.
+/// The answer comes from the plaintext note beside the archive, because deciding what to
+/// delete must not need a passphrase. The file name must not carry it, because older
+/// releases parse a name's stamp up to the suffix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completeness {
     Complete(Settings),
     Incomplete(Settings),
-    /// No note, or a note that does not say, such as one written before the note carried it.
+    /// No note, or a note that does not say.
     Unknown,
 }
 
-/// The rows of the note that carry [`Completeness`], up to their values. Indented as the
-/// note's other rows are, so neither a prose line nor a recipient key can be read as one.
+// The note rows that carry `Completeness`, indented like the note's other rows so no prose
+// line or recipient key reads as one
 const SETTINGS_ROW: &str = "  settings ";
 const MISSING_ROW: &str = "  missing ";
 
-/// The most of a note that is read. A note is a page of text.
+/// The number of bytes of a note that are read.
 const NOTE_LIMIT: u64 = 64 * 1024;
 
 impl Completeness {
-    /// What a note says. Anything it does not say plainly is `Unknown`, which [`fates`] keeps
-    /// rather than deletes.
+    /// Reads the completeness a note states.
+    ///
+    /// Anything the note does not state plainly is `Unknown`, which [`fates`] keeps.
     pub fn in_note(note: &str) -> Self {
         let (Some(settings), Some(missing)) =
             (only_row(note, SETTINGS_ROW), only_row(note, MISSING_ROW))
@@ -125,9 +116,9 @@ impl Completeness {
     }
 }
 
-/// The value of the one row that starts with `prefix`. Two such rows are believed as little
-/// as none, because a value filled into the note, such as an alias with a line break, can add
-/// one.
+/// The value of the one row starting with `prefix`, or `None` when there are none or several.
+///
+/// A value filled into the note, such as an alias with a line break, can add a second row.
 fn only_row<'a>(note: &'a str, prefix: &str) -> Option<&'a str> {
     let mut rows = note.lines().filter_map(|line| line.strip_prefix(prefix));
     match (rows.next(), rows.next()) {
@@ -136,12 +127,11 @@ fn only_row<'a>(note: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
-/// What the note beside each archive says, in the listing's order, and each note that is there
-/// and could not be read.
+/// The completeness each archive's note states, in the listing's order, and the errors of
+/// notes that exist and could not be read.
 ///
-/// A missing note is `Unknown` and nothing more, because an archive from an older version or
-/// one copied without its note has none. An unreadable one is `Unknown` too, and is handed
-/// back so the caller can say so.
+/// A missing or unreadable note is `Unknown`. An archive from an older version, or one copied
+/// without its note, has none.
 pub fn completeness(archives: &[Archive]) -> (Vec<Completeness>, Vec<Error>) {
     let mut notes = Vec::with_capacity(archives.len());
     let mut unreadable = Vec::new();
@@ -163,14 +153,14 @@ pub fn completeness(archives: &[Archive]) -> (Vec<Completeness>, Vec<Error>) {
 fn read_note(note: &Path) -> std::io::Result<Option<String>> {
     use std::io::Read as _;
     match std::fs::metadata(note) {
-        // Only a regular file: a fifo named like a note would block the read.
+        // A fifo named like a note would block the read
         Ok(meta) if meta.is_file() => {}
         Ok(_) => return Err(std::io::Error::other("it is not a regular file")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     }
-    // Lossy, because a cut inside a character or a hand edit that is not UTF-8 must not cost
-    // the rows at the top.
+    // The decode is lossy, so a cut inside a character or a non-UTF-8 hand edit keeps the rows
+    // at the top
     let mut bytes = Vec::new();
     std::fs::File::open(note)?
         .take(NOTE_LIMIT)
@@ -189,14 +179,11 @@ pub enum Fate {
     Deleted,
 }
 
-/// The fate of each archive, given what each note says, newest first, and how many to keep.
+/// Decides each archive's fate under a retention of `keep`, given its notes newest first.
 ///
-/// The newest `keep` stay. So does every archive that may be the newest complete one for any
-/// settings found in the listing: for each, every unknown archive down to and including the
-/// first archive complete for those settings. An incomplete run then deletes as much as a
-/// complete one, and never the archive that holds what it lacks. `Unknown` counts as possibly
-/// complete for any settings, so a note that went missing costs disk and not an archive. A
-/// note that falsely says `none` is believed.
+/// The newest `keep` stay. For each settings in the listing, every `Unknown` down to the first
+/// archive complete for those settings stays too, and so does that archive. A note that
+/// falsely says `none` is believed.
 pub fn fates(completeness: &[Completeness], keep: usize) -> Vec<Fate> {
     let mut decided: Vec<Fate> = (0..completeness.len())
         .map(|at| match at < keep {
@@ -211,7 +198,7 @@ pub fn fates(completeness: &[Completeness], keep: usize) -> Vec<Fate> {
         .collect();
     searches.sort();
     searches.dedup();
-    // With no settings known at all, every unknown archive may be the complete one.
+    // With no settings known, every unknown archive may be the complete one
     if searches.is_empty() {
         searches.push(None);
     }
@@ -243,23 +230,16 @@ impl Archive {
     }
 }
 
-/// Every archive of this identity in `directory`, newest first, and those that could not be
-/// examined.
+/// Lists every archive of this identity in `directory`, newest first, with an error for each
+/// file named like one that could not be examined.
 ///
-/// The alias is deliberately not part of the match. An identity that renames itself keeps the
-/// same node id, and archives taken under the old name are still that identity's archives.
-///
-/// The second list is every file named like one of this identity's archives that could not be
-/// examined, each with why, in the shape `Home::read_inventory` hands back what it could not
-/// read. Left out of the first list instead, one used to vanish: `prune` reported "freeing
-/// 0 B", never deleted it and never counted it against `--keep`, and `newest` could name the
-/// file beside it. A caller that can say so and carry on prints these; one that acts on the
-/// count or picks by it goes through `in_dir`, which refuses an incomplete listing.
+/// The match ignores the alias, because a renamed identity keeps its node id. A caller that
+/// acts on the count or picks by position uses [`in_dir`], which refuses a partial listing.
 pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Error>)> {
     let short: String = node_id.chars().take(SHORT_NODE_ID_LEN).collect();
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
-        // A directory that is not there holds no archives, which is an answer, not a failure.
+        // A directory that is not there holds no archives
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
         Err(e) => return Err(Error::io(directory, e)),
     };
@@ -275,14 +255,12 @@ pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Err
         else {
             continue;
         };
-        // `metadata`, which follows a symlink, and not `file_type`, which does not: an archive
-        // kept elsewhere and linked into the directory is still an archive of this identity,
-        // and it used to be dropped as "not a file".
+        // `metadata` follows a symlink, so an archive linked in from elsewhere is still listed
         let bytes = match std::fs::metadata(&path) {
             Ok(meta) if meta.is_file() => meta.len(),
-            // A directory named like an archive is not one.
+            // A directory named like an archive is not one
             Ok(_) => continue,
-            // Gone between the listing and the look, which is an answer.
+            // The file vanished between the listing and the look
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
                 unexamined.push(Error::io(&path, e));
@@ -292,27 +270,23 @@ pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Err
         archives.push(Archive {
             bytes,
             taken,
-            // One short read per archive in a directory listing, which is cheaper than being
-            // wrong about whether somebody's key is readable.
             encrypted: crate::crypt::looks_encrypted(&path).ok(),
             path,
         });
     }
 
-    // By the stamp, never by the file name: the name begins with the alias, so sorting by it
-    // would order archives by what the identity was called rather than by when they were
-    // taken. Ties break by name so the order is total and the same on every run.
+    // The sort is by stamp, because the name begins with the alias. Ties break by name, so the
+    // order is total and the same on every run.
     archives.sort_by(|a, b| b.taken.cmp(&a.taken).then_with(|| b.name().cmp(&a.name())));
     unexamined.sort_by_key(|e| e.to_string());
     Ok((archives, unexamined))
 }
 
-/// When a file name says its archive was taken, if it is exactly a name `archive_name` writes
-/// for the node id that `short` begins, and `None` for any other file.
+/// When the archive named `name` was taken, if `name` is exactly what [`archive_name`] writes
+/// for a node id starting with `short`.
 ///
-/// Anchored at both ends and read from the right, because the alias may itself hold `-`, a
-/// stamp-like run or another identity's short id. A name that only contains the short id is
-/// not this identity's archive, and `prune` deletes whatever this accepts.
+/// `prune` deletes whatever this accepts. The parse is anchored at both ends and reads from
+/// the right, because an alias may hold `-`, a stamp-like run or another identity's short id.
 fn taken_by_name(name: &str, short: &str) -> Option<jiff::Timestamp> {
     let stem = SUFFIXES
         .iter()
@@ -331,17 +305,15 @@ fn taken_by_name(name: &str, short: &str) -> Option<jiff::Timestamp> {
         .to_zoned(jiff::tz::TimeZone::UTC)
         .ok()?
         .timestamp();
-    // Only the spelling `file_stamp` writes, so a lenient parse cannot widen the match.
+    // The stamp must round-trip through `file_stamp`, so a lenient parse cannot widen a match
     (file_stamp(taken) == stamp).then_some(taken)
 }
 
-/// Every archive of this identity in `directory`, newest first, or a failure when one of them
-/// could not be examined.
+/// Lists every archive of this identity in `directory`, newest first, failing when any could
+/// not be examined.
 ///
-/// Fails closed rather than listing what it could see, because every caller of this acts on
-/// the list as if it were the whole of it: `prune` deletes by count, `--keep` keeps by count,
-/// and `newest` names a file to read. An archive that is there and could not be examined is
-/// news, not absence. Revisit when every caller goes through `listing` and says so itself.
+/// Callers delete by count and pick the newest by position, so a gap in the list must stop
+/// them. Revisit when every caller goes through [`listing`] and reports the gap itself.
 pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
     let (archives, unexamined) = listing(directory, node_id)?;
     match unexamined.into_iter().next() {
@@ -355,8 +327,8 @@ pub fn newest(directory: &Path, node_id: &str) -> Result<Option<Archive>> {
     Ok(in_dir(directory, node_id)?.into_iter().next())
 }
 
-/// The name an archive gets: identity first, then when it was taken, so that a directory of
-/// them sorts by identity and then chronologically.
+/// The file name of an archive, identity first and stamp second, so a directory of them
+/// sorts by identity and then by time.
 pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: bool) -> String {
     let alias = alias
         .map(sanitise)
@@ -367,7 +339,7 @@ pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: 
     format!("{alias}-{short}-{stamp}.{extension}")
 }
 
-/// The note written beside an archive, in plain text, whatever the archive itself is.
+/// The path of the plaintext note written beside an archive.
 pub fn sidecar_path(archive: &Path) -> PathBuf {
     let mut name = archive
         .file_name()
@@ -377,12 +349,13 @@ pub fn sidecar_path(archive: &Path) -> PathBuf {
     archive.with_file_name(name)
 }
 
-/// A UTC timestamp for a file name: sortable, no punctuation a shell would mind.
+/// Formats a UTC timestamp for a file name, sortable and free of shell punctuation.
 pub fn file_stamp(now: jiff::Timestamp) -> String {
     now.strftime(STAMP_FORMAT).to_string()
 }
 
-/// Keep the characters a file name can hold everywhere, and drop the rest.
+/// Replaces each character a file name cannot hold on every platform with `-`, then trims
+/// `-` from both ends.
 fn sanitise(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -412,8 +385,7 @@ mod tests {
         dir
     }
 
-    /// A file with an age header in it, so `in_dir` reads it as encrypted the way it reads a
-    /// real archive: from the bytes rather than from the name.
+    /// Writes a file that begins with an age header.
     fn touch_encrypted(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"age-encryption.org/v1\n").expect("fixture is writable");
     }
@@ -422,9 +394,6 @@ mod tests {
         std::fs::write(dir.join(name), b"x").expect("the fixture file is writable");
     }
 
-    /// The bug: `encrypted` was set from the `.age` suffix, and `ls` printed "(not encrypted)"
-    /// from it. `rad backup --stdout > name.tar.zst` writes an encrypted archive under a name
-    /// that says otherwise, and the listing told its owner it could be read by anyone.
     #[test]
     fn whether_an_archive_is_encrypted_is_read_from_it_and_not_from_its_name() {
         let dir = scratch_dir("header");
@@ -443,18 +412,18 @@ mod tests {
         let dir = scratch_dir("listing");
         touch(&dir, "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst.age");
         touch(&dir, "maninak-z6MkiTBz1ymu-20260814T120000Z.tar.zst.age");
-        // The same identity after a rename: same node id, so still its archive.
+        // The same identity after a rename keeps its node id, so this is still its archive
         touch(&dir, "kostis-z6MkiTBz1ymu-20260301T000000Z.tar.zst");
-        // Somebody else's identity, and a file this tool never wrote.
+        // Another identity's archive, and a file this tool never wrote
         touch(&dir, "other-z6MkvAFBkdph-20260814T130000Z.tar.zst.age");
         touch(&dir, "holiday-photos.tar.zst");
-        // Named with the short id and a suffix, and still not a name this tool writes.
+        // Names with the short id and a suffix that this tool never writes
         touch(&dir, "holiday-z6MkiTBz1ymu-photos.tar.zst");
         touch(
             &dir,
             "maninak-z6MkiTBz1ymu-20260902T000000Z.bak.tar.zst.age",
         );
-        // Somebody else's archive, whose alias holds this identity's short id.
+        // Another identity's archive whose alias holds this identity's short id
         touch(
             &dir,
             &archive_name(Some("a-z6MkiTBz1ymu-b"), OTHER, "20260814T140000Z", false),
@@ -475,8 +444,7 @@ mod tests {
             ]
         );
         assert_eq!(found[1].encrypted, Some(false), "no age header in it");
-        // The name says `.age` and the bytes do not, and the bytes win. A name is not
-        // evidence about who can read a file.
+        // The name says `.age` and the bytes do not, and the bytes win
         assert_eq!(found[0].encrypted, Some(false), "a name is not a header");
         assert_eq!(
             in_dir(&dir, OTHER)
@@ -553,19 +521,14 @@ mod tests {
         let name = crate::archives::archive_name(Some("fixture"), NODE, "20260101T000000Z", true);
         touch(&dir, &name);
 
-        // The writer used to spell the length of the short node id by hand while this reader
-        // matched on SHORT_NODE_ID_LEN. They agreed only by coincidence, and moving the
-        // constant would have made every new archive invisible to `ls`, `prune` and `--keep`
-        // at once.
+        // A writer and reader that disagree on the short id length hide every new archive
+        // from `ls`, `prune` and `--keep`
         let found = in_dir(&dir, NODE).expect("the directory is readable");
         assert_eq!(found.iter().map(Archive::name).collect::<Vec<_>>(), [name]);
 
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The bug: the listing kept only what `file_type` called a file, and `file_type` does not
-    /// follow a symlink. An archive kept on another disk and linked into the directory was
-    /// invisible to `ls`, `prune` and `--keep`, and its size was never read.
     #[cfg(unix)]
     #[test]
     fn a_symlinked_archive_is_listed_with_the_size_of_what_it_points_at() {
@@ -587,10 +550,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
-    /// The bug: an archive whose metadata could not be read was listed with `bytes: 0`, and
-    /// one whose kind could not be read was not listed at all. `prune` then reported "freeing
-    /// 0 B", never deleted it and never counted it against `--keep`, and `newest` could name
-    /// the file beside it.
     #[cfg(unix)]
     #[test]
     fn an_archive_that_cannot_be_examined_is_reported_rather_than_dropped() {
@@ -602,15 +561,14 @@ mod tests {
         let seen = "maninak-z6MkiTBz1ymu-20260101T000000Z.tar.zst";
         touch(&locked, hidden);
         touch(&dir, seen);
-        // A link into a directory this process may not enter, so the archive is there and
-        // cannot be examined.
+        // A link into a directory this process may not enter makes an archive that exists
+        // and cannot be examined
         std::os::unix::fs::symlink(locked.join(hidden), dir.join(hidden))
             .expect("a symlink is creatable");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
             .expect("mode is settable");
-        // Root and anything holding CAP_DAC_OVERRIDE walks straight through mode 000, so
-        // there is nothing it could fail to examine. Probed here rather than guessed from a
-        // user name, because the probe is the condition itself.
+        // Root and anything holding CAP_DAC_OVERRIDE walks through mode 000, so the test
+        // probes for that and has nothing to check when it holds
         let walks_through_any_mode = std::fs::metadata(dir.join(hidden)).is_ok();
 
         let listed = listing(&dir, NODE);
@@ -636,8 +594,7 @@ mod tests {
             complaints[0].contains(hidden),
             "the complaint names the archive: {complaints:?}"
         );
-        // The callers that delete by count or pick by name must not act on a listing with a
-        // hole in it.
+        // Callers that delete by count or pick by position must not act on a partial listing
         assert!(
             matches!(refused, Err(Error::Io { ref path, .. }) if path.ends_with(hidden)),
             "an incomplete listing is not a listing: {refused:?}"
@@ -648,8 +605,7 @@ mod tests {
         );
     }
 
-    /// Deletion is by count, except for the archive that holds what newer ones may lack. Each
-    /// row is one way that archive could be deleted by mistake.
+    /// Each case is one way the archive holding what newer ones lack could be deleted.
     #[test]
     fn retention_never_deletes_what_may_be_the_newest_complete_archive() {
         use Fate::{Deleted as D, Kept as K, Spared as S};
@@ -662,23 +618,23 @@ mod tests {
         let c_bare = || Completeness::Complete(bare.clone());
 
         let cases: [(Vec<Completeness>, usize, &[Fate]); 9] = [
-            // Every run complete: by count alone.
+            // Every run complete, so the count alone decides
             (vec![c(), c(), c(), c()], 2, &[K, K, D, D]),
-            // A timer that lost `rad`: the newest complete archive outlives the count.
+            // Recent runs that lost `rad`, so the newest complete archive outlives the count
             (vec![i(), i(), i(), c(), c()], 2, &[K, K, D, S, D]),
-            // The newest complete archive is within the count, so nothing past it is needed.
+            // The newest complete archive is within the count, so nothing past it is needed
             (vec![i(), c(), i(), c()], 2, &[K, K, D, D]),
-            // A complete archive of other settings holds nothing these settings need.
+            // A complete archive of other settings holds nothing these settings need
             (vec![i(), c_bare(), i(), c(), c_bare()], 1, &[K, S, D, S, D]),
-            // An unknown newer than the newest complete one may itself be complete.
+            // An unknown newer than the newest complete one may itself be complete
             (vec![i(), u(), i(), u(), c(), u()], 1, &[K, S, D, S, S, D]),
-            // Settings with no complete archive at all: every unknown may be theirs.
+            // Settings with no complete archive, so every unknown may be theirs
             (vec![i(), u(), i(), u()], 1, &[K, S, D, S]),
-            // No settings known at all.
+            // No settings known
             (vec![u(), u(), u()], 1, &[K, S, S]),
-            // An unknown within the count does not stop the search.
+            // An unknown within the count does not stop the search
             (vec![u(), c(), i()], 1, &[K, S, D]),
-            // Fewer archives than the count.
+            // Fewer archives than the count
             (vec![i(), i()], 5, &[K, K]),
         ];
         for (completeness, keep, expected) in cases {
@@ -707,8 +663,8 @@ mod tests {
             Completeness::in_note(&note(Missing::Repositories.note_value())),
             Completeness::Incomplete(settings.clone())
         );
-        // Each of these reads as not known, which keeps the archive while it may matter. The
-        // second and third are values filled into the note that carry a row of their own.
+        // Each of these reads as unknown, which keeps the archive. The second and third inject
+        // a row through a value filled into the note.
         let injected_missing = format!(
             "  missing none\n{}",
             note(Missing::Repositories.note_value())

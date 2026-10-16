@@ -1,8 +1,4 @@
 //! The git operations a backup needs, and nothing more.
-//!
-//! Repositories are archived as bundles rather than as directory copies, because a bundle is
-//! a single file whose object graph git itself checks on the way in and on the way out. A
-//! directory copy would also carry unreachable objects and could be silently truncated.
 
 use std::path::Path;
 
@@ -39,9 +35,8 @@ impl Git {
         Ok(self.tool.output(&["--version"])?.trim().to_string())
     }
 
-    /// Whether this git checks the objects in a bundle it is fetching from, which is what the
-    /// `fetch.fsckObjects` in `unbundle` below asks for and what older gits accept and ignore.
-    /// `None` when the version could not be read, which is a different sentence from "no".
+    /// Whether this git checks the objects in a bundle it fetches from, which `unbundle` asks
+    /// for and older gits accept and ignore. `None` when the version could not be read.
     pub fn fsck_reaches_a_bundle(&self) -> Option<bool> {
         version_checks_a_bundle(&self.version().ok()?)
     }
@@ -78,17 +73,10 @@ impl Git {
         Ok(printed.map(|target| target.trim().to_string()))
     }
 
-    /// Whether `ancestor` is reachable from `descendant`.
+    /// Whether `ancestor` is reachable from `descendant`, or that git could not say.
     ///
-    /// This is the fork test. `restore` asks it with a head some other node announced it holds
-    /// of our signed refs as the `ancestor` and the archived head as the `descendant`: a yes
-    /// means that node is simply behind us, a no means it is holding work signed under this
-    /// key that the restored copy does not have, and the third answer means `git` could not
-    /// say, which is a fact about this machine and not about that node.
-    ///
-    /// Three answers, not two. `git merge-base` exits 128 over an oid it cannot resolve or an
-    /// object it cannot read, and folded into "not an ancestor" that became the loudest thing
-    /// this tool says, told to somebody on the strength of an error nobody read.
+    /// `git merge-base` exits 128 over an oid it cannot resolve or an object it cannot read.
+    /// Never fold that into "no", because a no here reports the user's own history as forked.
     pub fn is_ancestor(
         &self,
         git_dir: &Path,
@@ -105,16 +93,10 @@ impl Git {
         ])
     }
 
-    /// Whether this copy actually holds the object `oid` names.
+    /// Whether this copy holds the object `oid` names.
     ///
-    /// `restore` asks this only after `merge-base` has failed, to read that failure. A peer's
-    /// sigrefs commit that is genuinely not on this disk is the fork hazard, because our own
-    /// namespace is the one thing a pull never brings back; a `merge-base` that failed for any
-    /// other reason is a fact about this machine and must not be reported as one about a peer.
-    ///
-    /// `cat-file -e` without a `^{commit}` peel, which turns a missing object into the same
-    /// exit 128 an unreadable repository gives and so answers nothing. Bare, it exits 1 for
-    /// absent and keeps 128 for a repository it could not open.
+    /// Never peel the oid with `^{commit}`, because a peel turns a missing object into the
+    /// exit 128 an unreadable repository gives. Bare, `cat-file -e` exits 1 for absent.
     pub fn holds_object(&self, git_dir: &Path, oid: &str) -> Result<crate::exec::Answer> {
         self.tool.answers(&[
             "--git-dir".as_ref(),
@@ -125,10 +107,10 @@ impl Git {
         ])
     }
 
-    /// Write every ref in the repository, namespaces included, into one bundle file.
+    /// Writes every ref in the repository, namespaces included, into one bundle file.
     ///
     /// `--all` covers `refs/*` and `HEAD`, which on a Radicle repository means every peer's
-    /// namespace and their `rad/sigrefs`.
+    /// namespace and its `rad/sigrefs`.
     pub fn bundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
         self.tool.output(&[
             "--git-dir".as_ref(),
@@ -142,8 +124,8 @@ impl Git {
         Ok(())
     }
 
-    /// The refs a bundle carries. Reading them is also how a bundle is checked for being
-    /// well formed without a repository to check its prerequisites against.
+    /// The refs a bundle carries. Reading them also checks that the bundle is well formed,
+    /// with no repository needed.
     pub fn bundle_refs(&self, bundle: &Path) -> Result<Vec<Ref>> {
         let printed =
             self.tool
@@ -168,16 +150,11 @@ impl Git {
         Ok(())
     }
 
-    /// Everything a config file says, through git's own parser: `name\nvalue\0` per setting.
-    ///
-    /// `None` for a file git will not read at all, which is any malformed one, and the caller
-    /// is expected to carry on: the config an archive carried is not the repository.
-    ///
-    /// `--no-includes` is passed rather than relied on. It is already git's default for a
-    /// `--file` read, and an `include.path` followed out of a file nobody vouched for would be
-    /// a second config, from a path the archive chose, read as if this one had said it. Saying
-    /// it costs a word and does not depend on a default staying where it is.
+    /// Everything a config file says, through git's own parser, as `name\nvalue\0` per
+    /// setting. `None` for a file git will not read, which is any malformed one.
     pub fn config_listing(&self, file: &Path) -> Result<Option<String>> {
+        // `--no-includes` is git's default for `--file` and is spelled out anyway, because an
+        // `include.path` in an unvouched archive would read a config from a path it chose
         self.tool.answer(&[
             "config".as_ref(),
             "--no-includes".as_ref(),
@@ -188,14 +165,10 @@ impl Git {
         ])
     }
 
-    /// Write one setting into a repository's own config, and say whether git took it.
+    /// Writes one setting into a repository's own config, returning git's words if it refused.
     ///
-    /// Through git rather than by writing the line, so the value is quoted and escaped the way
-    /// git's own reader expects. A value written by hand that git then cannot parse is not one
-    /// bad setting: it is a config file every later git command in that repository refuses.
-    /// What git said when it would not, rather than a bare no: the caller is about to tell
-    /// somebody mid-recovery that a setting did not come back, and git's own sentence is the
-    /// difference between that being actionable and being a shrug.
+    /// git quotes and escapes the value for its own reader. A hand-written value git cannot
+    /// parse breaks every later git command in that repository.
     pub fn set_config(&self, git_dir: &Path, name: &str, value: &str) -> Result<Option<String>> {
         self.tool.refused(&[
             "--git-dir".as_ref(),
@@ -206,31 +179,20 @@ impl Git {
         ])
     }
 
-    /// Pull every ref out of a bundle and into a repository, keeping ref names as they were.
+    /// Pulls every ref out of a bundle into a repository, keeping ref names as they were.
     ///
-    /// With `fetch.fsckObjects`, because the bundle is the one part of an archive nothing else
-    /// validates: the digests only prove it is the bundle the archive author shipped. Git's
-    /// default is off, which would write a tree entry named `.git`, or a `..` component,
-    /// straight into storage for the next checkout to materialise.
-    ///
-    /// It reaches a bundle only from git `FSCK_ON_A_BUNDLE_SINCE`. Older gits read the setting
-    /// and never consult it on this path, so the objects land unchecked and nothing says so:
-    /// `fsck_reaches_a_bundle` is what the restore asks in order to say it out loud.
+    /// `fetch.fsckObjects` is on, because the archive's digests only prove which bundle was
+    /// shipped, and a `.git` or `..` tree entry would reach storage unchecked. Gits older
+    /// than `FSCK_ON_A_BUNDLE_SINCE` skip it silently, which `fsck_reaches_a_bundle` detects.
     pub fn unbundle(&self, git_dir: &Path, bundle: &Path) -> Result<()> {
         self.tool.output(&unbundle_args(git_dir, bundle))?;
         Ok(())
     }
 
-    /// Point `HEAD` at a ref.
+    /// Points `HEAD` at a ref, refusing a target that does not name one.
     ///
-    /// The target is refused unless it names a ref, because it comes out of a manifest nobody
-    /// has vouched for and `symbolic-ref` accepts no `--` to fence a value off from its own
-    /// flags. A manifest saying `head: "-d"` would otherwise reach git as a flag rather than
-    /// as the branch this repository is supposed to point at.
-    ///
-    /// Kept as an error for a caller that has nothing better to do with it, but a caller
-    /// restoring a repository is expected to ask `names_a_ref` first and carry on without the
-    /// pointer, which is what the shipped script does.
+    /// `symbolic-ref` takes no `--`, so an unvouched manifest's `head: "-d"` would otherwise
+    /// reach git as a flag.
     pub fn set_head(&self, git_dir: &Path, target: &str) -> Result<()> {
         if !names_a_ref(target) {
             return Err(Error::refused(
@@ -249,16 +211,10 @@ impl Git {
     }
 }
 
-/// Whether a `HEAD` out of a manifest names a ref.
+/// Whether a `HEAD` out of a manifest names a ref, by roughly git's own refname rules.
 ///
-/// Separate from `set_head` so that refusing the value and losing the repository are separate
-/// decisions. The refs are the repository and `HEAD` is only a pointer into them, so a caller
-/// that has already unbundled the history should keep it and drop the pointer.
-///
-/// The `refs/` prefix alone is not enough. `git symbolic-ref` writes whatever it is given
-/// without validating it, so `refs/../../evil` is accepted and the next update of that ref
-/// writes a file outside the repository, in a Radicle home directly into `storage`. What is
-/// left is roughly git's own refname rules, which is what a real archive carries anyway.
+/// `git symbolic-ref` writes whatever it is given, so `refs/../../evil` is accepted and the
+/// next update of that ref writes a file outside the repository, straight into `storage`.
 pub fn names_a_ref(target: &str) -> bool {
     let Some(rest) = target.strip_prefix("refs/") else {
         return false;
@@ -266,7 +222,7 @@ pub fn names_a_ref(target: &str) -> bool {
     !rest.is_empty()
         && rest.split('/').all(|part| {
             !part.is_empty()
-                // Covers `.` and `..`, so no component can climb out of the repository.
+                // A leading dot covers `.` and `..`, so no component leaves the repository
                 && !part.starts_with('.')
                 && !part.ends_with(".lock")
                 && part
@@ -275,12 +231,10 @@ pub fn names_a_ref(target: &str) -> bool {
         })
 }
 
-/// What `unbundle` runs, apart from the name of git itself.
+/// The arguments `unbundle` passes to git.
 ///
-/// A function of its own so that the object check can be asserted on any machine. Read off a
-/// real fetch it can only be seen where git honours it, which is to say on nobody's Ubuntu
-/// 22.04, and a test that passes whether or not the flag is there is the shape of test this
-/// one exists to not be.
+/// These live in a function of their own so a test can assert the object check on any
+/// machine, including one whose git ignores it.
 fn unbundle_args<'a>(git_dir: &'a Path, bundle: &'a Path) -> [&'a std::ffi::OsStr; 9] {
     [
         "-c".as_ref(),
@@ -297,28 +251,26 @@ fn unbundle_args<'a>(git_dir: &'a Path, bundle: &'a Path) -> [&'a std::ffi::OsSt
 
 /// The setting that asks git to check the objects a fetch is about to write.
 ///
-/// `fetch.` and not `transfer.`, because the two are read in that order and the narrower one
-/// wins: a user who turned `transfer.fsckObjects` off for their own remotes would otherwise
-/// turn this off with it.
+/// `fetch.` is narrower than `transfer.` and wins, so a user's own `transfer.fsckObjects`
+/// setting cannot turn this check off.
 pub(crate) const FSCK_ON_FETCH: &str = "fetch.fsckObjects=true";
 
-/// The first git that runs `fsck` over a bundle it fetches from. Before it,
-/// `fetch_refs_from_bundle` never asked, so `-c fetch.fsckObjects=true` was accepted and had
-/// no effect on this one code path. Measured against git 2.34.1, where a bundle carrying a
-/// tree entry named `.git` unbundles without a word.
+/// The first git that runs `fsck` over a bundle it fetches from.
+///
+/// Older gits accept `-c fetch.fsckObjects=true` and ignore it on this path. Measured against
+/// git 2.34.1, where a bundle carrying a `.git` tree entry unbundles without a word.
 pub(crate) const FSCK_ON_A_BUNDLE_SINCE: (u32, u32) = (2, 46);
 
-/// The same question as `fsck_reaches_a_bundle`, asked of a version string rather than of the
-/// git that is installed, so that both sides of the boundary can be put to it on one machine.
+/// Whether the git that printed `said` checks a bundle it fetches from, or `None` when the
+/// version cannot be read.
 fn version_checks_a_bundle(said: &str) -> Option<bool> {
     Some(parse_version(said)? >= FSCK_ON_A_BUNDLE_SINCE)
 }
 
 /// The major and minor out of whatever `git --version` printed.
 ///
-/// Tolerant of the tails distributions add, `2.51.0.windows.1` and `2.39.5 (Apple Git-154)`
-/// among them, and `None` for anything it cannot read rather than a guess: the caller turns
-/// `None` into "could not tell", which is not the same claim as "does not check".
+/// Tolerates distribution tails such as `2.51.0.windows.1` and `2.39.5 (Apple Git-154)`.
+/// `None` for anything unreadable, because a guess would turn "could not tell" into "no".
 fn parse_version(said: &str) -> Option<(u32, u32)> {
     let numbered = said
         .split_whitespace()
@@ -329,40 +281,27 @@ fn parse_version(said: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Whether a value out of a manifest names an object git could be asked about.
+/// Whether a value out of a manifest is a full sha1 or sha256 oid in hexadecimal.
 ///
-/// The signed-ref oids in a manifest reach `git merge-base --is-ancestor <a> <b>`, which takes
-/// no `--` and reads a leading `-` as one of its own flags. The rid and the `HEAD` in the same
-/// manifest are already gated (`reject_hostile_rid`, `names_a_ref`) and these were not, so
-/// this closes the last argv position an unvouched-for archive reaches.
-///
-/// Hexadecimal and nothing else, at sha1 or sha256 length, because that is what a sigref oid
-/// is. Not a revision expression: `HEAD@{1}`, `master^`, and every other thing git resolves
-/// are values a real archive never carries, and accepting them would put a parser between an
-/// archive and a command line for no gain. Revisit if Radicle ever writes a sigref as anything
-/// but a full oid.
+/// Signed-ref oids reach `git merge-base --is-ancestor`, which takes no `--` and reads a
+/// leading `-` as a flag. A revision expression is refused, because a real archive never
+/// carries one. Revisit if Radicle ever writes a sigref as anything but a full oid.
 pub fn names_an_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Whether two oids out of the node's own records name one commit.
+/// Whether two oids out of the node's own records name one commit, in either letter case.
 ///
-/// `names_an_oid` lets either case through and git resolves either, so two spellings of one
-/// commit reach these readers as two strings. One place for the comparison, because `restore`
-/// and `doctor` read the same `repo-sync-status` column and disagreeing about equality made
-/// `doctor` report work as stranded on a disk the network had held for months.
+/// Every comparison of these oids goes through here, because two readers that disagree about
+/// case report work the network holds as stranded.
 pub fn same_oid(one: &str, other: &str) -> bool {
     one.eq_ignore_ascii_case(other)
 }
 
-/// The bundle file name for a repository inside an archive. One place, so the writer and the
-/// reader cannot disagree about it.
+/// The bundle file name for a repository inside an archive, shared by writer and reader.
 ///
-/// A `String` holding a literal `/`, not a `PathBuf`: this names a place inside a tar, and tar
-/// separates with `/` on every platform. Built as a path it came back `repos\x.bundle` on
-/// Windows while tar stored `repos/x.bundle`, so the manifest accused the archive of both
-/// losing an entry and carrying an unlisted one. Joining it onto a directory still works, so
-/// only the naming side changes.
+/// Never build this as a `PathBuf`, because tar separates with `/` on every platform and a
+/// Windows path would spell it `repos\x.bundle`, which matches no tar entry.
 pub fn bundle_entry(rid: &str) -> String {
     format!("repos/{}.bundle", rid.strip_prefix("rad:").unwrap_or(rid))
 }
@@ -388,8 +327,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// A helper that drives the real `git` to build a repository with two commits in it,
-    /// returning its `--git-dir` and the two oids, oldest first.
+    /// Builds a repository with two commits through the real `git`, returning its `--git-dir`
+    /// and the two oids, oldest first.
     pub(crate) fn two_commits(
         scratch: &crate::key::tests::TestScratch,
     ) -> (std::path::PathBuf, String, String) {
@@ -418,25 +357,22 @@ pub(crate) mod tests {
     fn a_version_git_printed_reads_as_a_number_or_as_nothing_at_all() {
         assert_eq!(parse_version("git version 2.34.1"), Some((2, 34)));
         assert_eq!(parse_version("git version 2.46.0"), Some((2, 46)));
-        // The tails distributions add, which is the reason this takes a word and not a line.
+        // Distribution tails are why the parser reads one word of the line
         assert_eq!(parse_version("git version 2.51.0.windows.1"), Some((2, 51)));
         assert_eq!(
             parse_version("git version 2.39.5 (Apple Git-154)"),
             Some((2, 39))
         );
-        // No guess out of something unreadable: the caller says "could not tell" instead.
+        // An unreadable version is `None`, which reads as "could not tell"
         assert_eq!(parse_version("git version next"), None);
         assert_eq!(parse_version(""), None);
     }
 
     /// The check `unbundle` asks for, asked of the git that is actually here.
     ///
-    /// A tree entry named `.git` is what `fsck` calls `hasDotgit`, and writing one into
-    /// storage hands the next checkout a path that overwrites the repository's own metadata.
-    /// The bundle is the one part of an archive nothing else validates, so this is the whole
-    /// of that promise, and it holds only from git 2.46: before it the setting was accepted
-    /// and never consulted on the bundle path. Asserted both ways rather than skipped on an
-    /// old git, because "the check did not fire" is the answer this test exists to pin down.
+    /// A `.git` tree entry (fsck's `hasDotgit`) in storage hands the next checkout a path that
+    /// overwrites the repository's metadata. Both outcomes are asserted, and an old git is
+    /// never skipped, because "the check did not fire" is what this test pins down.
     #[test]
     fn a_bundle_carrying_a_dotgit_tree_is_refused_by_exactly_the_gits_that_check_one() {
         let git = Git::new();
@@ -454,8 +390,8 @@ pub(crate) mod tests {
             assert!(finished.status.success(), "git {args:?}");
             String::from_utf8_lossy(&finished.stdout).trim().to_string()
         };
-        // A tree holding one entry called `.git`, committed and bundled. `mktree` writes what
-        // it is handed, which is how a hostile archive would carry one.
+        // `mktree` writes what it is handed, so it builds the `.git` entry a hostile archive
+        // would carry
         let blob = run(&["hash-object", "-w", "--stdin"]);
         let tree = {
             let mut child = std::process::Command::new("git")
@@ -500,8 +436,8 @@ pub(crate) mod tests {
                 let refusal = unbundled.expect_err(
                     "this git checks a bundle, so a `.git` tree entry must not reach storage",
                 );
-                // Named, because any error at all would satisfy a bare `is_err`, and a
-                // refusal for an unrelated reason would then read as this check firing.
+                // The error is matched by name, because a refusal for an unrelated reason
+                // would also satisfy a bare `is_err`
                 assert!(
                     refusal.to_string().contains("hasDotgit"),
                     "the refusal is meant to be fsck naming the entry: {refusal}"
@@ -518,9 +454,8 @@ pub(crate) mod tests {
 
     /// The fetch that opens a bundle asks for the object check, whatever git is installed.
     ///
-    /// The test above can only watch the check fire on a git that runs it on this path, which
-    /// leaves every developer on an older one with a green suite and no guard at all. This is
-    /// the half that holds on any machine: the flag is either in the command or it is not.
+    /// The test above sees the check fire only on a git that runs it, so this test guards the
+    /// flag on every machine.
     #[test]
     fn the_fetch_that_opens_a_bundle_asks_git_to_check_what_it_writes() {
         let args = unbundle_args(
@@ -537,12 +472,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// The version the warning turns on, pinned away from the one machine running the suite.
+    /// The version the warning turns on, pinned whatever git runs the suite.
     ///
-    /// Without this the constant is asserted by nothing: on a git older than the boundary
-    /// every wrong boundary older than that one answers identically, so `(2, 40)` and a `>`
-    /// in place of the `>=` both pass. `ci/pins.sh` holds the same number in the shipped
-    /// script to this one, so the two readers of an archive cannot drift apart either.
+    /// On a git older than the boundary, `(2, 40)` or a `>` for the `>=` passes every other
+    /// test. `ci/pins.sh` holds the shipped script to the same number.
     #[test]
     fn the_boundary_is_the_first_git_that_checks_a_bundle_and_not_the_one_before_it() {
         for (said, expected) in [
@@ -574,9 +507,8 @@ pub(crate) mod tests {
         String::from_utf8_lossy(&finished.stdout).trim().to_string()
     }
 
-    /// Damage of the kind a restore can produce: everything packed, and the pack short. The
-    /// repository still opens and every object in it stops answering, which is a state
-    /// `cat-file -e` reports as "absent" rather than as a failure.
+    /// Packs everything and cuts the pack short, which is damage a restore can produce. The
+    /// repository still opens, and `cat-file -e` reports every object in it as absent.
     pub(crate) fn truncate_the_pack(git_dir: &std::path::Path) {
         let run = |args: &[&str]| {
             let finished = std::process::Command::new("git")
@@ -594,10 +526,9 @@ pub(crate) mod tests {
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .find(|path| path.extension().is_some_and(|kind| kind == "pack"))
             .expect("repack wrote a pack");
-        // `repack` leaves the pack read only, and on Windows that is a file attribute a write
-        // will not clear for itself, so the writability goes back first. Owner-only where the
-        // platform can say that, rather than `set_readonly(false)`, which on unix hands the
-        // file to everybody. Off unix `set_mode` has no bits to set and cannot be the answer.
+        // `repack` leaves the pack read only, which blocks the write on Windows, so the pack
+        // is made writable first. Unix gets owner-only, because `set_readonly(false)` there
+        // hands the file to everybody.
         #[cfg(unix)]
         crate::perms::set_mode(&pack, crate::perms::MODE_SECRET)
             .expect("the pack's mode is settable");
@@ -606,8 +537,8 @@ pub(crate) mod tests {
             let mut permissions = std::fs::metadata(&pack)
                 .expect("the pack is readable")
                 .permissions();
-            // Clippy's objection to this is a unix one, where clearing the flag means `0o777`.
-            // Off unix it is the one attribute bit, and there is no mode to set instead.
+            // Clippy's lint is about unix, where clearing the flag means `0o777`. Off unix the
+            // flag is one attribute bit and no mode exists.
             #[expect(
                 clippy::permissions_set_readonly_false,
                 reason = "off unix this is an attribute, not a mode"
@@ -615,17 +546,15 @@ pub(crate) mod tests {
             permissions.set_readonly(false);
             std::fs::set_permissions(&pack, permissions).expect("the pack's mode is settable");
         }
-        // Truncated to whatever is there when the pack is shorter than the cut, because a
-        // slice index that panicked would report a broken test as a broken assertion.
+        // The cut clamps to the pack's length, because a panicking slice index would report a
+        // broken fixture as a broken assertion
         let whole = std::fs::read(&pack).expect("the pack is readable");
         let short = whole[..whole.len().min(60)].to_vec();
         std::fs::write(&pack, short).expect("the pack is writable");
     }
 
-    /// Three answers again, and the point is that they are not the same three. `merge-base`
-    /// gives 128 both for an object that is not here and for a repository it cannot open, so
-    /// reading its failure needs a question that separates those, and `cat-file -e` bare is
-    /// it: 1 for absent, 128 kept for the repository itself.
+    /// `merge-base` exits 128 both for an absent object and for an unopenable repository.
+    /// Bare `cat-file -e` separates them, with 1 for absent and 128 for the repository.
     #[test]
     fn an_object_that_is_absent_answers_differently_from_a_repository_that_cannot_be_opened() {
         let git = Git::new();
@@ -650,9 +579,8 @@ pub(crate) mod tests {
             "{unopenable:?}"
         );
 
-        // And the state this question cannot separate, which is why `restore` asks it twice.
-        // A store that cannot produce an object it has answers exactly as one that never had
-        // it, so "absent" is a fact about a lookup and not yet a fact about the network.
+        // A store that cannot produce an object it has answers as one that never had it, so
+        // "absent" is a fact about a lookup and not yet about the network
         truncate_the_pack(&git_dir);
         assert_eq!(
             git.holds_object(&git_dir, &second).expect("git ran"),
@@ -660,11 +588,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// Three answers, and the third is the one that matters. `git merge-base --is-ancestor`
-    /// exits 0 for yes, 1 for no, and 128 when it cannot resolve an oid at all, and that last
-    /// one used to fold into "not an ancestor". Asked both ways round, two of those became
-    /// `Unrelated`, which a restore reports as the user's own peer history having forked: the
-    /// loudest thing this tool says, on the strength of an error nobody read.
+    /// `git merge-base --is-ancestor` exits 128 when it cannot resolve an oid. Read as "not an
+    /// ancestor", that exit reports the user's own peer history as forked.
     #[test]
     fn an_oid_git_cannot_resolve_is_not_an_answer_about_ancestry() {
         let git = Git::new();
@@ -691,9 +616,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// The signed-ref oids in a manifest are the last values from an archive that reach a
-    /// command line. `merge-base` takes no `--`, so a leading `-` would be read as a flag, and
-    /// a revision expression would have git resolve something nobody vouched for.
+    /// The signed-ref oids in a manifest reach a command line. `merge-base` takes no `--`, so
+    /// a leading `-` would read as a flag, and a revision expression would resolve something
+    /// nobody vouched for.
     #[test]
     fn only_a_plain_hexadecimal_oid_out_of_a_manifest_reaches_git() {
         assert!(names_an_oid("da39a3ee5e6b4b0d3255bfef95601890afd80709"));
@@ -710,9 +635,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_head_that_does_not_name_a_ref_is_refused_before_git_is_asked() {
-        // `symbolic-ref` takes no `--`, so this is the only thing standing between a hostile
-        // manifest and git reading the value as one of its own flags. No git needed: the
-        // refusal happens before the spawn, which is the property under test.
+        // `symbolic-ref` takes no `--`, so this check keeps a hostile manifest's value from
+        // reaching git as a flag. The refusal comes before the spawn, so no git is needed.
         let git = Git::new();
         let dir = Path::new("/nonexistent/repo.git");
         assert!(git.set_head(dir, "-d").is_err());
@@ -723,9 +647,8 @@ pub(crate) mod tests {
 
     #[test]
     fn a_head_under_refs_that_climbs_out_of_the_repository_is_refused() {
-        // `git symbolic-ref` stores this without complaint, and the next update of the ref
-        // writes the file it names: `refs/../../evil` lands beside the repository, which in
-        // a Radicle home is `storage` itself. Reproduced against git 2.34.
+        // `git symbolic-ref` stores this, and the next update of the ref writes beside the
+        // repository, which in a Radicle home is `storage`. Reproduced against git 2.34.
         assert!(!names_a_ref("refs/../../evil"));
         assert!(!names_a_ref("refs/heads/../../../etc/x"));
         assert!(!names_a_ref("refs/"));
@@ -735,14 +658,13 @@ pub(crate) mod tests {
         assert!(!names_a_ref("refs/heads/x.lock"));
         assert!(!names_a_ref("refs/heads/a b"));
         assert!(!names_a_ref("refs/heads/a^b"));
-        // The names a real archive carries still pass, or the guard would cost every restore
-        // the pointer it was written to protect.
+        // Real archive names still pass, or the guard would cost every restore its pointer
         assert!(names_a_ref("refs/heads/master"));
         assert!(names_a_ref("refs/heads/feature/nested"));
         assert!(names_a_ref("refs/heads/v1.0"));
         assert!(names_a_ref("refs/namespaces/z6Mk/refs/heads/master"));
-        // Only ASCII control characters are refused, so a branch named in a language with
-        // accents keeps its HEAD.
+        // Only ASCII control characters are refused, so a branch name with accents keeps its
+        // HEAD
         assert!(names_a_ref("refs/heads/caf\u{e9}"));
     }
 }

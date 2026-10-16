@@ -1,10 +1,4 @@
-//! Which archives of this identity exist, and how old they are.
-//!
-//! Answered from file names, file sizes, and a read of the first bytes of each archive, which
-//! is what says whether it is encrypted: a `--stdout` archive is encrypted under a name that
-//! says otherwise. Nothing is decrypted and no passphrase is asked for, so this stays usable
-//! on a machine where the passphrase lives in someone's head and the archives live on a
-//! mounted disk.
+//! Lists this identity's archives and their ages.
 
 use crate::archives::{self, Archive};
 use crate::cli::Ls;
@@ -32,6 +26,8 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     }
     let record = stored.record();
     let directory = archive_dir_from_env(args.dir.as_deref(), record);
+    // Encryption is read from each archive's first bytes, because a `--stdout` archive can be
+    // encrypted under a plain name. `ls` never decrypts, so it needs no passphrase.
     let present = archives::in_dir(&directory, &identity.node_id())?;
 
     if ctx.global.json {
@@ -97,9 +93,9 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
     Ok(())
 }
 
-/// Whether this is the archive the state record points at. Compared by path, since two
-/// archives taken in the same second would otherwise both look like the recorded one.
+/// Whether `archive` is the one the state record points at.
 fn is_recorded(archive: &Archive, record: Option<&state::Record>) -> bool {
+    // The match is by path, because two archives taken in the same second share a timestamp
     record
         .and_then(|record| record.archive.as_deref())
         .is_some_and(|recorded| std::path::Path::new(recorded) == archive.path)

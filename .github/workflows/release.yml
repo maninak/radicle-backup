@@ -1,13 +1,11 @@
 name: Release
 
-# Tagging is the whole trigger. Pushing a `v*` tag builds every artifact, publishes the
-# release, refreshes the apt repository and pushes the crate. `just release <version>` writes
-# that tag; no version is named here, so this comment cannot go stale against the repository.
+# Pushing a `v*` tag builds every artifact, publishes the release, refreshes the apt
+# repository and pushes the crate. `just release <version>` writes that tag.
 on:
   push:
-    # `*` matches any character but `/`, so a bare "v*" fires a full release on
-    # "vendor-test". These say digits. The exact shape is asserted in the `version` job,
-    # because a filter pattern cannot express "and it agrees with Cargo.toml".
+    # `*` matches any character but `/`, so a bare "v*" would fire on "vendor-test". The
+    # `version` job asserts the exact shape and that it agrees with Cargo.toml.
     tags: ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-*"]
   workflow_dispatch:
     inputs:
@@ -22,27 +20,23 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# One release at a time per tag. Not cancel-in-progress: `packaging/apt/publish.sh` reads the
-# apt index out of R2, rewrites it and signs it, so two runs of one tag (a push and a
-# workflow_dispatch retry, say) can drop a package between them, and killing one halfway is
-# worse than making the second wait.
+# One release at a time per tag, never cancelled halfway. `packaging/apt/publish.sh` rewrites
+# and signs the apt index in R2, so two concurrent runs of one tag can drop a package.
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
-# Read by default. The one job that publishes asks for `contents: write` itself, so the jobs
-# that `cargo install` third-party build tools are not also holding a token that can push here.
+# The publishing job asks for `contents: write` itself, so jobs that `cargo install`
+# third-party build tools hold no token that can push here
 permissions:
   contents: read
 
 jobs:
-  # First, because every later job trusts the tag: the binaries carry its version, the release
-  # page quotes its changelog section, and crates.io cannot take a publish back.
+  # Every later job trusts the tag, and crates.io cannot take a publish back
   version:
     name: check the tag
     runs-on: ubuntu-latest
-    # The dependency sweep below spaces its requests a second apart over ~270 crates, so this
-    # job is minutes rather than seconds. Everything else waits on it, which is the point.
+    # The dependency sweep below spaces its requests a second apart over ~270 crates
     timeout-minutes: 25
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -55,8 +49,7 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          # Repeated here rather than trusted from the trigger, because workflow_dispatch takes
-          # the tag as typed and never passes through that filter at all.
+          # workflow_dispatch takes the tag as typed and skips the trigger's filter
           if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error::$TAG is not a release tag, expected vMAJOR.MINOR.PATCH[-prerelease]"
             exit 1
@@ -69,22 +62,14 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Every version in the lockfile, not just what the last commit moved. CI checks only
-      # what a push ADDS, which is right there and wrong here: a release ships the whole tree,
-      # and on a tag there is no meaningful "before" to diff against, so the incremental mode
-      # reports green having examined nothing. v0.1.0 shipped exactly that way, with fifteen
-      # crates younger than this floor and a passing check that had looked at zero of them.
-      #
-      # It gates the release rather than warning about it, because a version published days ago
-      # is the shape a compromised one arrives in, and once a tag is out the artifacts are on
-      # crates.io and in an apt repository. Dispatch with skip_dependency_age when a boring
-      # transitive crate is merely young and waiting is worse.
+      # Every version in the lockfile, because a release ships the whole tree and a tag has no
+      # "before" to diff against. A failure blocks the release. Dispatch with
+      # skip_dependency_age when a transitive crate is merely young and waiting is worse.
       - name: Dependency age
         if: ${{ !inputs.skip_dependency_age }}
         run: ./.github/check-lockfile-age.py --all
 
-  # The same jobs CI runs on every push to master, so a tag builds nothing that has not
-  # already been built. See .github/workflows/artifacts.yml.
+  # The same jobs CI runs on every push to master, so a tag builds nothing new
   artifacts:
     name: artifacts
     needs: version
@@ -116,19 +101,16 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          # From the version job, not GITHUB_REF_NAME, which on workflow_dispatch is the
-          # branch the run was started from and would quietly yield no section at all.
+          # GITHUB_REF_NAME on workflow_dispatch is the branch, which matches no section
           awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\]" { printing = 1; next }
             printing && /^## / { exit }
             printing { print }
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "See CHANGELOG.md." > notes.md
-      # The secret reaches ONLY the step that signs. A step's own `env:` is not in scope for
-      # that step's own `if:`, and the fix for that was a job-level `env:`, which handed the
-      # signing key to every step in the job including third-party actions. So the question
-      # "is there a key" is answered once, into an output, and the key itself travels no
-      # further than the one `run:` that needs it.
+      # The signing key reaches only this check and the step that signs. Never move it to a
+      # job-level `env:`, which hands it to every step. A step's `env:` is out of scope for its
+      # own `if:`, so this step answers whether a key exists into an output.
       - name: Is a signing key configured
         id: signing
         env:
@@ -140,18 +122,16 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Signed here rather than per-artifact: one signature over the checksum file covers
-      # every file it names, and it is the file a downloader has to trust anyway.
+      # One signature over the checksum file covers every file it names
       - name: Sign the checksums
         if: ${{ steps.signing.outputs.available == 'true' }}
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: ./packaging/release/sign.sh release
 
-      # `sign.sh` self-checks with `-Y check-novalidate`, which proves the signature is
-      # well-formed and says nothing about who made it. This runs the verifier a downloader
-      # runs, against `allowed_signers`, so a rotated key or a namespace typo fails the
-      # release rather than a restore.
+      # `sign.sh` self-checks only that the signature is well-formed. This runs the verifier
+      # a downloader runs against `allowed_signers`, so a rotated key or a namespace typo
+      # fails the release.
       - name: Verify the release the way a downloader does
         if: ${{ steps.signing.outputs.available == 'true' }}
         run: ./packaging/release/verify.sh release
@@ -161,9 +141,8 @@ jobs:
         run: |
           echo "::warning::RELEASE_SIGNING_KEY is not set, so this release carries no signature"
 
-      # Deliberately after the checksums are written and signed, and so covered by neither.
-      # A verifier cannot vouch for itself, and `allowed_signers` is the key you are supposed
-      # to have obtained somewhere other than here. Compare it against the one in the repo.
+      # Added after signing, so the checksums cover neither file. A verifier cannot vouch for
+      # itself, and a downloader obtains `allowed_signers` from the repository.
       - name: Include what a verifier needs
         run: cp packaging/release/allowed_signers packaging/release/verify.sh release/
 
@@ -178,7 +157,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Skipped, harmlessly, on a fork.
+    # Skipped on a fork
     if: ${{ github.repository == 'maninak/radicle-backup' }}
     env:
       APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
@@ -201,8 +180,7 @@ jobs:
       - name: Publish
         if: ${{ env.R2_ENDPOINT != '' && env.APT_GPG_PRIVATE_KEY != '' }}
         run: ./packaging/apt/publish.sh incoming
-      # A missing credential is a configuration gap, not a broken release: say which one is
-      # missing rather than failing a job whose other artifacts went out fine.
+      # A missing credential warns and passes, because the release's other artifacts went out
       - name: Say so when the apt repository is not refreshed
         if: ${{ env.R2_ENDPOINT == '' || env.APT_GPG_PRIVATE_KEY == '' }}
         run: |
@@ -224,8 +202,7 @@ jobs:
       - name: Publish
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         run: cargo publish --locked
-      # Same rule as the apt job: a credential nobody has set yet is a configuration gap, and
-      # failing the run would say the release broke when every artifact of it went out fine.
+      # A missing credential warns and passes, because the release's other artifacts went out
       - name: Say so when the crate is not published
         if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
         run: |

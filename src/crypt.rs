@@ -1,8 +1,4 @@
 //! Encryption of the archive, and where the passphrase for it comes from.
-//!
-//! An archive holds the 32 bytes that are the user's identity, so encryption is the default
-//! and plaintext is something the caller has to ask for out loud, because an unencrypted copy
-//! of a private key is the failure this tool exists to prevent.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -17,15 +13,13 @@ use crate::error::{Error, Result};
 
 /// Environment variable holding the archive passphrase, for cron jobs that cannot be asked.
 pub const ARCHIVE_PASSPHRASE_ENV: &str = "RAD_BACKUP_PASSPHRASE";
-/// Environment variable `rad` itself uses for the key passphrase, honoured for the same
-/// reason: so that a scheduled run needs no terminal to answer on.
+/// Environment variable `rad` itself reads for the key passphrase, honoured so that a
+/// scheduled run needs no terminal.
 pub const KEY_PASSPHRASE_ENV: &str = "RAD_PASSPHRASE";
 /// Environment variable holding the passphrase that unlocks a `--identity` key file.
 ///
-/// Its own name rather than a share of `ARCHIVE_PASSPHRASE_ENV`, because the two protect
-/// different things and swapping them fails silently: the archive passphrase opens the
-/// archive, this one opens the private key an archive was encrypted to. A timer that verifies
-/// its own recipient-encrypted archives needs both, and needs to say which is which.
+/// This variable stays apart from `ARCHIVE_PASSPHRASE_ENV`, because swapping the two fails
+/// silently. A timer that verifies its own recipient-encrypted archives needs both.
 pub const IDENTITY_PASSPHRASE_ENV: &str = "RAD_BACKUP_IDENTITY_PASSPHRASE";
 
 /// How an archive is protected.
@@ -36,7 +30,8 @@ pub enum Encryption {
     /// age recipients: `age1...` keys, or `ssh-ed25519 AAAA...` public keys, so an archive can
     /// be encrypted to another machine or to a friend holding escrow.
     Recipients(Vec<String>),
-    /// No encryption. Only ever chosen explicitly.
+    /// No encryption. Only ever chosen explicitly, because an archive holds the identity's
+    /// private key.
     Plaintext,
 }
 
@@ -54,18 +49,16 @@ impl Encryption {
     }
 }
 
-/// Hand-written, because `Zeroizing` derives `Debug` and hands it straight to the string it
-/// wraps: a derived `Debug` here would print the passphrase into whatever log, panic message
-/// or `dbg!` reached for it, undoing the wiping the rest of this file exists to do. Nothing
-/// formats an `Encryption` today, and this is what keeps that from mattering later.
+/// Prints only the mode label. A derived `Debug` would print the passphrase `Zeroizing` wraps
+/// into any log, panic message or `dbg!` that formats an `Encryption`.
 impl std::fmt::Debug for Encryption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Encryption::{}", self.label())
     }
 }
 
-/// The writing half of the container. Owns whichever layer sits directly on the output, so
-/// that finishing is a single call whatever the encryption mode is.
+/// The writing half of the container, owning the layer on the output so that finishing is
+/// one call whatever the encryption mode.
 pub enum Sink<'a> {
     Plaintext(Box<dyn Write + 'a>),
     Encrypted(Box<age::stream::StreamWriter<Box<dyn Write + 'a>>>),
@@ -85,15 +78,15 @@ impl<'a> Sink<'a> {
                 age::Encryptor::with_recipients(recipient_refs.into_iter())?
             }
         };
-        // Pathless on purpose: `output` is whatever sink the caller opened, and the failure
-        // here is age setting up its own stream rather than anything about a file.
+        // This error is pathless, because `output` may be any sink and the failure is age
+        // setting up its own stream
         Ok(Self::Encrypted(Box::new(
             encryptor.wrap_output(output).map_err(Error::PathlessIo)?,
         )))
     }
 
-    /// Close the encryption layer. Skipping this writes a truncated archive that will not
-    /// decrypt, so every writing path must end here.
+    /// Closes the encryption layer. Every writing path must end here, because a sink dropped
+    /// without it leaves a truncated archive that does not decrypt.
     pub fn finish(self) -> Result<()> {
         match self {
             Self::Plaintext(mut output) => output.flush().map_err(Error::PathlessIo),
@@ -124,21 +117,20 @@ impl Write for Sink<'_> {
 /// The private keys offered for an archive encrypted to a recipient, and what unlocks one that
 /// is itself passphrase-protected.
 ///
-/// An ssh key with a passphrase on it is the normal and recommended state of an ssh key, so
-/// the second half is not an extra: without it the common case of `--recipient <ssh pubkey>`
-/// writes an archive that the holder of the right key cannot open.
+/// A passphrase-protected ssh key is the common case. Without the unlocking half, an archive
+/// written with `--recipient <ssh pubkey>` cannot be opened by the holder of the right key.
 #[derive(Clone, Default)]
 pub struct Identities {
     /// The key files named by `--identity`, in the order they were given.
     pub files: Vec<PathBuf>,
     /// A file holding the passphrase for those keys, for a run with nobody at the terminal.
     pub passphrase_file: Option<PathBuf>,
-    /// Whether there is anybody to prompt. False means a locked key fails at once rather than
-    /// blocking a timer on a question that will never be answered.
+    /// Whether there is anybody to prompt. When false, a locked key fails at once, so a timer
+    /// never blocks on a question nobody answers.
     pub is_interactive: bool,
 }
 
-/// Wrap a reader so that it yields plaintext, whatever the archive was encrypted with.
+/// Wraps a reader so that it yields plaintext, whatever the archive was encrypted with.
 pub fn decrypting_reader<'a, R: Read + 'a>(
     input: R,
     archive_passphrase: Option<&Zeroizing<String>>,
@@ -147,9 +139,8 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
     let buffered = io::BufReader::new(input);
     let decryptor = match age::Decryptor::new_buffered(buffered) {
         Ok(decryptor) => decryptor,
-        // Reached only once `looks_encrypted` has seen the age magic, so a header age
-        // cannot parse is damage rather than a plaintext archive. age's own parse error names
-        // internals nobody can act on, so this names the stream instead.
+        // `looks_encrypted` has already seen the age magic, so an unparseable header is
+        // damage. age's own parse error names internals nobody can act on.
         Err(_) => {
             return Err(Error::Age(
                 "the archive's encryption header is damaged".to_string(),
@@ -170,9 +161,8 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
         let reader = decryptor
             .decrypt(std::iter::once(&identity as &dyn age::Identity))
-            // Unwrapping the file key is the only step a passphrase can be wrong at, so at
-            // this point every failure is that typo and nothing else. Errors from the payload
-            // that follows arrive later, as io errors, and keep their own wording.
+            // Unwrapping the file key is the step a passphrase can be wrong at, so every
+            // failure here is a wrong passphrase. Payload errors arrive later, as io errors.
             .map_err(|_| Error::WrongPassphrase)?;
         return Ok(Box::new(AuthenticatingReader(reader)));
     }
@@ -189,10 +179,8 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         .iter()
         .map(std::convert::AsRef::as_ref)
         .collect();
-    // Not through the blanket conversion: it reads `NoMatchingKeys` as a wrong passphrase,
-    // which is right for the scrypt path above and nonsense here, where no archive passphrase
-    // was asked for. It sent people to retype something that does not exist instead of to the
-    // key file the archive was actually encrypted to.
+    // The blanket conversion reads `NoMatchingKeys` as a wrong passphrase, which is false on
+    // this path, because no archive passphrase was asked for
     let reader = decryptor
         .decrypt(identity_refs.into_iter())
         .map_err(|failure| offered.explain(failure))?;
@@ -201,10 +189,9 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
 
 /// A reader that says what a failure in the encrypted payload means.
 ///
-/// age reports a chunk that fails authentication as a bare io error reading "decryption
-/// error", which sounds like a wrong passphrase. By the time the payload is being read the
-/// passphrase has already been proven right, so the only remaining explanation is that the
-/// bytes changed after they were written.
+/// age reports a chunk that fails authentication as a bare "decryption error", which reads as
+/// a wrong secret. The secret is already proven right once the payload is read, so the bytes
+/// changed after they were written.
 struct AuthenticatingReader<R>(R);
 
 impl<R: Read> Read for AuthenticatingReader<R> {
@@ -218,8 +205,8 @@ impl<R: Read> Read for AuthenticatingReader<R> {
     }
 }
 
-/// Whether a file begins with an age header, which is how a reader decides to decrypt without
-/// trusting the file name.
+/// Whether a file begins with an age header. A reader decides to decrypt by this, never by
+/// the file name.
 pub fn looks_encrypted(path: &Path) -> Result<bool> {
     use std::io::Read as _;
 
@@ -228,24 +215,19 @@ pub fn looks_encrypted(path: &Path) -> Result<bool> {
     let mut head = [0u8; AGE_MAGIC.len()];
     match file.read_exact(&mut head) {
         Ok(()) => Ok(head == AGE_MAGIC),
-        // A file shorter than the magic is not encrypted, and that is the only read failure
-        // that answers the question. Anything else, an unreadable directory or a disk giving
-        // EIO, is a file this could not look at, and reported as "not encrypted" it had
-        // `doctor` telling somebody an archive it never read can be read by anyone.
+        // A file shorter than the magic is not encrypted. Any other failure is a file this
+        // function could not read, and calling it unencrypted makes `doctor` claim anyone can
+        // read it.
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
         Err(e) => Err(Error::io(path, e)),
     }
 }
 
-/// Whether opening this archive will ask for a passphrase, read from the archive's own header.
+/// Whether opening this archive asks for a passphrase, read from the archive's own header.
 ///
-/// An archive encrypted to an age or ssh recipient is opened with `--identity`, not a
-/// passphrase, and every age file starts with the same magic, so `looks_encrypted` cannot tell
-/// the two kinds apart. Callers that asked for a passphrase on `looks_encrypted` alone made a
-/// recipient-encrypted archive impossible to restore unattended: the prompt had nobody to
-/// answer it. The header itself says which kind it is, so ask it rather than infer from
-/// whether `--identity` happened to be passed, which would stop prompting for a passphrase
-/// archive that someone opens with `--identity` also on the command line.
+/// Every age file starts with the same magic, so `looks_encrypted` cannot tell a passphrase
+/// archive from a recipient one, and whether `--identity` was passed cannot either. A prompt
+/// for a recipient archive blocks an unattended restore that has nobody to answer it.
 pub fn needs_passphrase(path: &Path) -> Result<bool> {
     if !looks_encrypted(path)? {
         return Ok(false);
@@ -253,21 +235,16 @@ pub fn needs_passphrase(path: &Path) -> Result<bool> {
     let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
     match age::Decryptor::new_buffered(io::BufReader::new(file)) {
         Ok(decryptor) => Ok(decryptor.is_scrypt()),
-        // A header age cannot parse is not this function's to report: no passphrase would open
-        // it either, and the open that follows says what is wrong in its own wording.
+        // No passphrase opens an unparseable header, and the open that follows reports it
         Err(_) => Ok(false),
     }
 }
 
-/// What a passphrase is being read for, which is what decides whether it is asked for twice.
-///
-/// Taken as this rather than as a `bool`, because the call sites passed a bare `true` or
-/// `false` that said nothing about which way round it went, and getting it round the wrong way
-/// is not a bug that shows up until somebody needs the archive.
+/// What a passphrase is being read for, which decides whether it is asked for twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
-    /// Locking something new. Asked for twice, because a typo here locks the only copy of an
-    /// identity away forever and nothing on earth reopens it.
+    /// Locking something new. Asked for twice, because a typo here locks the identity away for
+    /// good.
     Sealing,
     /// Opening something that already exists. Asked for once, because a typo just fails.
     Opening,
@@ -275,39 +252,34 @@ pub enum Purpose {
 
 /// Which secret a passphrase protects.
 ///
-/// They lock different things, and confusing two of them fails quietly: a scheduled run
-/// reaches for the wrong environment variable, finds nothing, and asks a person who is not
-/// there. Taken as an enum so that the variable, the flag a failure sends the reader to, and
-/// the sentence about what an empty one costs all come from one place instead of from each
-/// caller.
+/// Confusing two secrets fails quietly, because a scheduled run reads the wrong environment
+/// variable, finds nothing, and asks a person who is not there. Each variant owns its
+/// variable, its file flag and its remedy for an empty passphrase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protects {
-    /// The archive, when it is locked with a passphrase rather than to a recipient.
+    /// The archive, when it is locked with a passphrase.
     Archive,
     /// A private key given with `--identity`, which is what opens an archive encrypted to a
     /// recipient.
     IdentityKey,
-    /// The Radicle secret key in the home, which is `rad`'s own secret under `rad`'s own
-    /// variable.
+    /// The Radicle secret key in the home, under `rad`'s own variable.
     RadicleKey,
 }
 
 impl Protects {
-    /// Every secret this tool may hold, so the one place child processes are spawned scrubs
-    /// all of them by walking rather than by listing names it has to remember to extend.
+    /// Every secret this tool may hold, for scrubbing from child-process environments.
     ///
-    /// Walked through `after` rather than read out of an array, because an array is not
-    /// something the compiler can check for completeness: a new variant would leave a short
-    /// `ALL`, the scrubbing loop, and every test that iterates it all green while the new
-    /// secret leaked into every child process. `after` is a `match` with no wildcard, so the
-    /// same variant stops the build until somebody says where it goes.
+    /// Never replace this walk with an array. A short array keeps every test green while a new
+    /// secret leaks into every child process. `after` is a `match` with no wildcard, so a new
+    /// variant stops the build until its arm is written.
     pub fn all() -> impl Iterator<Item = Self> {
         std::iter::successors(Some(Self::Archive), |current| current.after())
     }
 
-    /// The next secret in the walk, or `None` at the end of it. The chain has to reach every
-    /// variant: adding one is a compile error here, and the arm that fixes it is the decision
-    /// about whether the new secret is scrubbed from child processes.
+    /// The next secret in the walk, or `None` at the end of it.
+    ///
+    /// A new variant is a compile error here, and its arm decides whether child processes get
+    /// the new secret scrubbed.
     fn after(self) -> Option<Self> {
         match self {
             Self::Archive => Some(Self::IdentityKey),
@@ -316,7 +288,7 @@ impl Protects {
         }
     }
 
-    /// The environment variable a run with nobody at the terminal sets instead.
+    /// The environment variable a run with nobody at the terminal sets.
     pub fn env(self) -> &'static str {
         match self {
             Self::Archive => ARCHIVE_PASSPHRASE_ENV,
@@ -325,10 +297,10 @@ impl Protects {
         }
     }
 
-    /// The flag naming a file that holds this passphrase, where there is one. There is none
-    /// for the Radicle key: the only place this tool asks for that one is `words`, which is
-    /// choosing a NEW passphrase, and pointing that at a file of an existing secret would hand
-    /// the restored key someone else's.
+    /// The flag naming a file that holds this passphrase, if any.
+    ///
+    /// The Radicle key has none, because `words` asks for that passphrase to choose a new one,
+    /// and a file holding an existing secret would give the restored key someone else's.
     fn passphrase_file_flag(self) -> Option<&'static str> {
         match self {
             Self::Archive => Some("--passphrase-file"),
@@ -346,9 +318,8 @@ impl Protects {
         }
     }
 
-    /// What to do about an empty passphrase. `--plaintext` turns off the ARCHIVE's encryption
-    /// when one is being written, and has nothing to do with opening an archive or with a
-    /// key's own passphrase, so it is offered on that one path alone.
+    /// What to do about an empty passphrase. `--plaintext` is offered only when an archive is
+    /// being sealed, because the flag turns off the archive's encryption and nothing else.
     fn remedy_for_empty(self, purpose: Purpose) -> &'static str {
         match (self, purpose) {
             (Self::Archive, Purpose::Sealing) => {
@@ -365,7 +336,7 @@ impl Protects {
     }
 }
 
-/// Read a passphrase from the environment, a file, or the person at the terminal.
+/// Reads a passphrase from the environment, a file, or the person at the terminal.
 pub fn read_passphrase(
     protects: Protects,
     file: Option<&Path>,
@@ -376,16 +347,15 @@ pub fn read_passphrase(
     let variable = protects.env();
     let remedy = protects.remedy_for_empty(purpose);
     if let Some(path) = file {
-        // Zeroizing before the trim, not after: the untrimmed copy holds the passphrase too.
+        // The read is zeroized before the trim, because the untrimmed copy holds it too
         let untrimmed =
             Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
         let trimmed = Zeroizing::new(untrimmed.trim_end_matches(['\n', '\r']).to_string());
         return refuse_if_empty(trimmed, &format!("{} is empty", path.display()), remedy);
     }
     if let Ok(value) = std::env::var(variable) {
-        // `std::env::var` answers Ok("") for a variable set but empty, which is what an
-        // EnvironmentFile line of `RAD_BACKUP_PASSPHRASE=` produces. Unchecked, that
-        // encrypted the identity to the empty passphrase and every report called it protected.
+        // `std::env::var` answers Ok("") for a set but empty variable, as the EnvironmentFile
+        // line `RAD_BACKUP_PASSPHRASE=` gives. Unchecked, age encrypts to the empty string.
         return refuse_if_empty(
             Zeroizing::new(value),
             &format!("{variable} is empty"),
@@ -425,10 +395,10 @@ pub fn read_passphrase(
     Ok(first)
 }
 
-/// Refuse an empty passphrase whichever source it came from.
+/// Refuses an empty passphrase whichever source it came from.
 ///
-/// age accepts one and encrypts to it, so an empty passphrase produces a file that says
-/// `.age`, reports as encrypted everywhere, and opens for anyone who presses Enter.
+/// age accepts an empty passphrase, and the file it writes reports as encrypted everywhere
+/// and opens for anyone who presses Enter.
 fn refuse_if_empty(
     passphrase: Zeroizing<String>,
     because: &str,
@@ -463,21 +433,18 @@ fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {
     Ok(recipients)
 }
 
-/// The `--identity` key files as age wants them, alongside the record of what unlocking each
-/// one produced.
+/// The `--identity` key files as age wants them, with a record of what unlocking each did.
 ///
-/// The record is what lets a failure name its cause. age answers `NoMatchingKeys` both for a
-/// key that is not a recipient of the archive and for one it could not unlock, which is the
-/// difference between "wrong key" and "right key, still locked": told the first when the
-/// second is true, someone holding the correct key gives up on it in the middle of a recovery.
+/// age answers `NoMatchingKeys` both for a key that is not a recipient and for one that stayed
+/// locked. The record tells the two apart, so the holder of the right key is not told it is
+/// the wrong one in the middle of a recovery.
 struct OfferedKeys {
     identities: Vec<Box<dyn age::Identity>>,
     /// The key file behind each entry of `identities`, in the same order age tries them.
     offered: Vec<PathBuf>,
     passphrases: KeyPassphrases,
-    /// Key files age was handed nothing for, each with why. Recorded rather than refused:
-    /// `--identity` takes several, `for k in ~/.ssh/id_*` is how people pass them, and one
-    /// ecdsa key next to the right ed25519 one must not end a recovery.
+    /// Key files age was handed nothing for, each with why. One unusable key must not end a
+    /// recovery, because `for k in ~/.ssh/id_*` passes an ecdsa key beside the ed25519 one.
     skipped: Vec<String>,
 }
 
@@ -488,8 +455,7 @@ impl OfferedKeys {
         let mut offered = Vec::with_capacity(identities.files.len());
         let mut skipped = Vec::new();
         for path in &identities.files {
-            // A private key, so the buffer it is read into is wiped when this loop ends rather
-            // than left in whatever heap page it happened to land on.
+            // The buffer holds a private key, so it is wiped at the end of this iteration
             let text =
                 Zeroizing::new(std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?);
             if let Ok(identity) = age::x25519::Identity::from_str(text.trim()) {
@@ -497,8 +463,7 @@ impl OfferedKeys {
                 offered.push(path.clone());
                 continue;
             }
-            // The file name goes in so that age's own prompt, which this replaces, and the
-            // messages below name the key a person has to go and find.
+            // The file name lets every message about this key say which file to go and find
             let key =
                 age::ssh::Identity::from_buffer(text.as_bytes(), Some(path.display().to_string()))
                     .map_err(|e| Error::Age(format!("{}: {e}", path.display())))?;
@@ -514,9 +479,8 @@ impl OfferedKeys {
             })));
             offered.push(path.clone());
         }
-        // Refused only when there is nothing left to try, because then the run has no chance
-        // of succeeding and the reason is worth stopping on rather than burying under "no key
-        // matched". With one usable key left, the skipped ones are a footnote, not a wall.
+        // The run stops here only when no key is left to try, because then it cannot succeed.
+        // With one usable key left, the skipped ones become a footnote.
         if parsed.is_empty() && !skipped.is_empty() {
             return Err(Error::refused(
                 format!(
@@ -534,22 +498,16 @@ impl OfferedKeys {
         })
     }
 
-    /// Say why the archive did not open, in terms of what the key files did rather than what
-    /// age could tell from the header alone.
+    /// Says why the archive did not open, in terms of what each key file did.
     fn explain(&self, failure: age::DecryptError) -> Error {
         let footnote = match self.skipped.is_empty() {
             true => String::new(),
             false => format!(". Skipped: {}", self.skipped.join(". ")),
         };
         match failure {
-            // Not "the passphrase was wrong", however much it looks like it. age returns this
-            // both for a passphrase that did not decrypt the key and for one that DID, over a
-            // key whose inner type age cannot use: an encrypted ecdsa or `sk-ssh-*` key parses
-            // as merely encrypted, because the envelope carries only the cipher, so the
-            // `Unsupported` check in `read` cannot see it. age also stops at the first key
-            // that fails, so the keys after it were never tried. Blaming the passphrase alone
-            // had someone retyping a correct secret while the key that opens the archive sat
-            // unread beside it.
+            // age returns this for a wrong passphrase and also for a right one over a key type
+            // it cannot use (an encrypted ecdsa or `sk-ssh-*` key passes `read` as merely
+            // encrypted). age stops at the first failing key, so later keys were never tried.
             age::DecryptError::KeyDecryptionFailed => {
                 let culprit = self.passphrases.last_answered();
                 let named = culprit
@@ -592,18 +550,15 @@ impl OfferedKeys {
                 format!("none of the --identity keys opens this archive{footnote}"),
                 "pass --identity with the private key the archive was encrypted to",
             ),
-            // Every remaining variant means the ciphertext did not authenticate. Said flatly,
-            // not through the blanket conversion, which hedges on "if the passphrase was
-            // right": on this path no archive passphrase was ever asked for, so that sentence
-            // sends the reader after a secret that does not exist.
+            // Every remaining variant means the ciphertext did not authenticate. The blanket
+            // conversion hedges on an archive passphrase, which this path never asked for.
             other => Error::Age(format!(
                 "{other}. The archive is damaged or was changed after it was written"
             )),
         }
     }
 
-    /// The key files that come after `culprit` in the order age was given them, which are the
-    /// ones it never reached. Named so that a failure cannot imply every key was tried.
+    /// The key files after `culprit` in the order age was given them, which age never reached.
     fn after(&self, culprit: Option<&Path>) -> String {
         let Some(culprit) = culprit else {
             return String::new();
@@ -618,11 +573,10 @@ impl OfferedKeys {
     }
 }
 
-/// Why age will not read a key file, in this tool's own words.
+/// Why age will not read a key file, as one clause for a one-line refusal.
 ///
-/// age explains each kind itself, down to the `ssh-keygen` line that migrates off it, but it
-/// writes a multi-line block with an ASCII rule through it, and it names `rage`, which is a
-/// tool the reader did not run. One clause is what belongs in a one-line refusal.
+/// age's own explanation is a multi-line block that names `rage`, a tool the reader did not
+/// run.
 struct WhyUnsupported<'a>(&'a age::ssh::UnsupportedKey);
 
 impl std::fmt::Display for WhyUnsupported<'_> {
@@ -653,9 +607,8 @@ impl std::fmt::Display for WhyUnsupported<'_> {
 
 /// What asking for each key file's passphrase produced, shared by every key's callbacks.
 ///
-/// Two jobs, one map. An answer is remembered so that an archive whose header holds several
-/// stanzas asks a person once rather than once per stanza, and a refusal is remembered so that
-/// `OfferedKeys::explain` can name the key that stayed locked.
+/// A remembered answer means an archive with several stanzas asks a person once. A remembered
+/// refusal lets `OfferedKeys::explain` name the key that stayed locked.
 #[derive(Clone, Default)]
 struct KeyPassphrases(Arc<Mutex<Answers>>);
 
@@ -663,8 +616,8 @@ struct KeyPassphrases(Arc<Mutex<Answers>>);
 #[derive(Default)]
 struct Answers {
     by_key: BTreeMap<PathBuf, Asked>,
-    /// The key file most recently given a passphrase, which is the one age was working on
-    /// when it stopped: it tries keys in order and gives up at the first that fails.
+    /// The key file most recently given a passphrase. age tries keys in order and gives up at
+    /// the first that fails, so this is the key age was working on when it stopped.
     last_answered: Option<PathBuf>,
 }
 
@@ -677,15 +630,16 @@ enum Asked {
 }
 
 impl KeyPassphrases {
-    /// A poisoned lock means a panic while a passphrase was being read. What is behind it is a
-    /// cache and a diary, so taking it back is right: refusing would turn one panic into a
-    /// second failure carrying less information than the first.
+    /// Locks the answers, taking them back from a poisoned lock.
+    ///
+    /// A poisoned lock means a panic while a passphrase was read. The data behind it is a
+    /// cache and a log, so a refusal would only add a second failure with less information.
     fn entries(&self) -> std::sync::MutexGuard<'_, Answers> {
         self.0.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
     /// The key files that were asked for a passphrase and did not get one, each with why.
-    /// Empty when every key that was asked was answered.
+    /// Empty when every key asked was answered.
     fn locked(&self) -> String {
         self.named(|asked| match asked {
             Asked::Refused(why) => Some(format!(" ({why})")),
@@ -693,12 +647,10 @@ impl KeyPassphrases {
         })
     }
 
-    /// The key file a passphrase was most recently supplied for.
+    /// The key file a passphrase was most recently supplied for, which is the one that failed.
     ///
-    /// Which is the one that failed: age tries keys in the order they were given and stops at
-    /// the first that errors, so the last key it asked about is the one it was asking about
-    /// when it gave up. Listing every key a passphrase was supplied for, which is what this
-    /// used to do, named keys that had unlocked perfectly well as if they were the fault.
+    /// age tries keys in order and stops at the first that errors, so every earlier key
+    /// unlocked fine and must not be named as the fault.
     fn last_answered(&self) -> Option<PathBuf> {
         self.entries().last_answered.clone()
     }
@@ -717,9 +669,8 @@ impl KeyPassphrases {
 
 /// Supplies the passphrase that unlocks one `--identity` key file, when age asks for it.
 ///
-/// age asks lazily, once it holds an encrypted key and a stanza that key might open, which is
-/// why this is a callback rather than something read up front: an unencrypted key never asks,
-/// and neither does a run that was handed a plaintext archive.
+/// age asks lazily, once it holds an encrypted key and a stanza that key might open, so an
+/// unencrypted key or a plaintext archive never prompts.
 #[derive(Clone)]
 struct KeyPassphraseSource {
     key_file: PathBuf,
@@ -729,21 +680,19 @@ struct KeyPassphraseSource {
 }
 
 impl age::Callbacks for KeyPassphraseSource {
-    /// Only plugin identities reach this, and this tool has no plugin feature enabled, so it
-    /// is here to be correct rather than to be seen. Straight to stderr rather than through
-    /// `Term`: age says this when it wants a person to go and touch a hardware key, which is
-    /// not narration `--quiet` may drop.
+    /// Prints age's message to stderr. The message bypasses `Term`, because age sends it to
+    /// ask a person to touch a hardware key, and `--quiet` must not drop that.
     fn display_message(&self, message: &str) {
         eprintln!("{message}");
     }
 
-    /// No confirmation UI, which age documents as `None` rather than as a default answer. A
-    /// silent "yes" here would be this tool guessing on a question it never showed anybody.
+    /// Answers `None`, which age documents as "no confirmation UI". A default "yes" would
+    /// answer a question nobody was shown.
     fn confirm(&self, _message: &str, _yes: &str, _no: Option<&str>) -> Option<bool> {
         None
     }
 
-    /// Only plugins ask for non-private input, and nothing this tool does needs one.
+    /// Answers `None`. Only plugins ask for non-private input, and this tool needs none.
     fn request_public_string(&self, _description: &str) -> Option<String> {
         None
     }
@@ -756,9 +705,8 @@ impl age::Callbacks for KeyPassphraseSource {
                 Asked::Refused(_) => None,
             };
         }
-        // age's own description is localised and names only the file. This asks in the tool's
-        // own voice and says which of the two passphrases it wants, because a person who has
-        // just been asked for the archive's is owed the difference.
+        // The prompt says it wants the key's passphrase, because the person may have just been
+        // asked for the archive's. age's own description names only the file.
         let answer = read_passphrase(
             Protects::IdentityKey,
             self.passphrase_file.as_deref(),
@@ -773,8 +721,7 @@ impl age::Callbacks for KeyPassphraseSource {
             }
             Err(why) => (Asked::Refused(why.one_line()), None),
         };
-        // The order matters as much as the answer: age stops at the first key that fails, so
-        // the last key it asked about is the one to name when it does.
+        // age stops at the first key that fails, so the last key answered is the one to name
         if matches!(remembered, Asked::Given(_)) {
             asked.last_answered = Some(self.key_file.clone());
         }
@@ -787,9 +734,8 @@ impl age::Callbacks for KeyPassphraseSource {
 mod tests {
     use super::*;
 
-    /// A file this tool could not read is not a file it read as plaintext. `doctor` renders
-    /// the answer as "can be read by anyone who holds it, your key file included", which is a
-    /// claim about who can open a file, and it must not come from a failed read.
+    /// `doctor` renders "not encrypted" as readable by anyone, so that claim must never come
+    /// from a failed read.
     #[test]
     fn a_file_that_could_not_be_read_is_not_reported_as_unencrypted() {
         let dir = std::env::temp_dir().join(format!("rad-backup-looks-{}", std::process::id()));
@@ -802,7 +748,7 @@ mod tests {
             "a three-byte file is not an age file"
         );
 
-        // Linux opens a directory and fails on the read, which is the shape this guards.
+        // Linux opens a directory and fails on the read, which is the shape this guards
         let refused = looks_encrypted(&dir);
         assert!(refused.is_err(), "{refused:?}");
 
@@ -870,7 +816,7 @@ mod tests {
         sink.write_all(&[7u8; 4096]).expect("plaintext is writable");
         sink.finish().expect("sink finishes");
 
-        // The last byte is inside the payload, well past the header the passphrase unwraps.
+        // The last byte is inside the payload, well past the header the passphrase unwraps
         let last = buffer.len() - 1;
         buffer[last] ^= 0xff;
 
@@ -889,16 +835,15 @@ mod tests {
 
     use crate::key::tests::TestScratch;
 
-    /// What the refusal for a key that is simply not a recipient says, so that the other
-    /// failures can be told apart from it by what they do not say.
+    /// The refusal for a key that is not a recipient, which the other failures must not say.
     const NO_KEY_OPENS_IT: &str = "none of the --identity keys opens this archive";
 
     fn scratch_path(scratch: &TestScratch, name: &str) -> PathBuf {
         scratch.path_of(&format!("{name}.age"))
     }
 
-    /// Owner-only like the other two fixtures, because an archive holds the same secret its
-    /// key unlocks, and `File::create` would have followed a symlink planted under the name.
+    /// Owner-only, because an archive holds the secret its key unlocks, and `File::create`
+    /// follows a symlink planted under the name.
     fn written_archive(scratch: &TestScratch, name: &str, encryption: &Encryption) -> PathBuf {
         let path = scratch_path(scratch, name);
         let file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
@@ -910,9 +855,8 @@ mod tests {
 
     /// A throwaway ed25519 key file and the `ssh-ed25519 AAAA...` line naming its public half.
     ///
-    /// Built through `key::openssh_from_seed`, which is the path a Radicle key restored from
-    /// words takes, so the fixture cannot drift from the keys this tool actually meets. `seed`
-    /// picks which key: two different values are two unrelated identities.
+    /// The key goes through `key::openssh_from_seed`, the path a key restored from words
+    /// takes, so the fixture matches real keys. Two `seed` values give unrelated identities.
     fn ssh_key_file(
         scratch: &TestScratch,
         name: &str,
@@ -935,9 +879,8 @@ mod tests {
         (path, recipient)
     }
 
-    /// Owner-only, like every other passphrase this tool writes. `/tmp` is shared, and a
-    /// fixture that drops a secret there at the umask default would be the one place in the
-    /// crate that does not follow what SECURITY.md says about passphrase files.
+    /// Owner-only, because `/tmp` is shared and SECURITY.md requires passphrase files to be
+    /// private.
     fn passphrase_file(scratch: &TestScratch, name: &str, passphrase: &str) -> PathBuf {
         let path = scratch_path(scratch, name);
         let mut file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
@@ -946,8 +889,8 @@ mod tests {
         path
     }
 
-    /// Open a recipient-encrypted archive the way `--identity` does, with no terminal to
-    /// prompt on: every case below is one a timer has to survive without a person.
+    /// Opens a recipient-encrypted archive the way `--identity` does, with no terminal, which
+    /// is how a timer meets every case below.
     fn opened_with(
         archive: &Path,
         key_files: &[PathBuf],
@@ -983,8 +926,8 @@ mod tests {
         assert_eq!(plaintext, b"secret");
     }
 
-    /// An empty passphrase file is a mistake, not an answer: `touch pass` and a scheduled
-    /// restore would otherwise hand age an empty string and report the key as the wrong one.
+    /// An empty passphrase file is a mistake. After `touch pass`, a scheduled restore would
+    /// otherwise hand age an empty string and report the key as the wrong one.
     #[test]
     fn an_empty_identity_passphrase_file_is_refused_rather_than_offered_to_age() {
         let scratch = TestScratch::create("crypt-empty-pass");
@@ -1021,19 +964,18 @@ mod tests {
         let said = failure.one_line();
         assert!(said.contains(&key.display().to_string()), "{said}");
         assert!(matches!(failure, Error::KeyNotUsable { .. }), "{said}");
-        // Never as a key that is not a recipient, which is what age itself reports and what
-        // sends someone holding the right key off to look for another one.
+        // age itself reports a non-recipient here, which sends the holder of the right key
+        // looking for another
         assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
     }
 
-    /// The bug in the first version of this message: it named every key a passphrase had been
-    /// supplied for, so a key that unlocked perfectly well was listed as the failure beside
-    /// the one that did not. age stops at the first key it cannot use, so exactly one is.
+    /// age stops at the first key it cannot use, so exactly one key is the failure, and a key
+    /// that unlocked must not be named beside it.
     #[test]
     fn a_key_that_unlocked_is_not_named_beside_the_one_that_did_not() {
         let scratch = TestScratch::create("crypt-two");
-        // One passphrase for both, right for the first and wrong for the second: the shape a
-        // single --identity-passphrase-file has whenever two locked keys are offered.
+        // One passphrase file, right for the first key and wrong for the second, as when two
+        // locked keys share one --identity-passphrase-file
         let (first, _) = ssh_key_file(&scratch, "two-first", 14, Some("hunter2"));
         let (second, recipient) = ssh_key_file(&scratch, "two-second", 15, Some("different"));
         let archive = written_archive(&scratch, "two", &Encryption::Recipients(vec![recipient]));
@@ -1057,8 +999,7 @@ mod tests {
             &Encryption::Recipients(vec![recipient]),
         );
 
-        // No passphrase file, no variable, nobody to prompt: the case a timer runs in, and the
-        // one that used to report a correct key as the wrong one.
+        // No passphrase file, no variable and nobody to prompt, which is how a timer runs
         let failure = opened_with(&archive, std::slice::from_ref(&key), None)
             .expect_err("a key nothing can unlock opens nothing");
 
@@ -1088,9 +1029,8 @@ mod tests {
         assert!(!said.contains("stayed locked"), "{said}");
     }
 
-    /// An encrypted key in the PEM format `ssh-keygen` wrote before OpenSSH 7.8. age can tell
-    /// what it is and cannot use it, which is a third thing from "wrong key" and "still
-    /// locked"; the body is filler because nothing gets as far as decoding it.
+    /// An encrypted key in the PEM format `ssh-keygen` wrote before OpenSSH 7.8, which age
+    /// recognises and cannot use. The body is filler, because nothing decodes that far.
     const LEGACY_PEM_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
          Proc-Type: 4,ENCRYPTED\n\
          DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\
@@ -1098,8 +1038,8 @@ mod tests {
          QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZnaGlqa2xtbm9wcXJzdHV2\n\
          -----END RSA PRIVATE KEY-----\n";
 
-    /// Owner-only although the body is filler, because a test that writes a file shaped like a
-    /// key at the umask default is the pattern a real key would be copied from.
+    /// Owner-only although the body is filler, because a key-shaped test file at the umask
+    /// default is the pattern a real key gets copied from.
     fn legacy_key_file(scratch: &TestScratch, name: &str) -> PathBuf {
         let path = scratch_path(scratch, name);
         let mut file = crate::perms::create_private_file(&path).expect("scratch key is creatable");
@@ -1125,16 +1065,13 @@ mod tests {
         let said = failure.one_line();
         assert!(said.contains(&key.display().to_string()), "{said}");
         assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
-        // In this tool's words, not age's: age writes a multi-line block with a rule through
-        // it that recommends `rage`, which is not the program the reader just ran.
+        // age's own message is a multi-line block recommending `rage`, a program the reader
+        // did not run
         assert!(!said.contains("rage"), "{said}");
     }
 
-    /// The bug: a key age cannot read ended the whole run, refusing before it had tried
-    /// anything. `--identity` takes several, `for k in ~/.ssh/id_*` is how people pass them,
-    /// and `id_ecdsa` sitting next to `id_ed25519` is the ordinary shape of an ssh directory.
-    /// Turning "one of your keys is unusable" into "you cannot restore", mid-recovery, is
-    /// worse than the vague message it was meant to improve.
+    /// `for k in ~/.ssh/id_*` passes `id_ecdsa` beside `id_ed25519`, so one unusable key must
+    /// not stop a recovery that the key beside it can finish.
     #[test]
     fn a_key_age_cannot_use_does_not_stop_the_key_beside_it_from_opening_the_archive() {
         let scratch = TestScratch::create("crypt-mixed");
@@ -1142,15 +1079,14 @@ mod tests {
         let archive = written_archive(&scratch, "mixed", &Encryption::Recipients(vec![recipient]));
         let legacy = legacy_key_file(&scratch, "mixed-legacy");
 
-        // Unusable key first, so it is not merely being reached after the archive is open.
+        // Unusable key first, so it is not merely being reached after the archive is open
         let plaintext = opened_with(&archive, &[legacy.clone(), good.clone()], None)
             .expect("a key age cannot read is not a reason to abandon the one that works");
         assert_eq!(plaintext, b"secret");
     }
 
-    /// The other side of it: when nothing usable was given, the run stops with the reason
-    /// rather than reporting that no key matched, which would send someone to look for a key
-    /// they are already holding.
+    /// With no usable key at all, the run stops with the reason. "No key matched" would send
+    /// someone to look for a key they already hold.
     #[test]
     fn a_run_with_no_usable_key_at_all_says_so_instead_of_reporting_no_match() {
         let scratch = TestScratch::create("crypt-none-usable");
@@ -1179,11 +1115,10 @@ mod tests {
             "passphrase",
             &Encryption::Passphrase(Zeroizing::new("open sesame".to_string())),
         );
-        // The one case that must ask, and the only one.
         assert!(needs_passphrase(&passphrase).expect("header is readable"));
 
-        // A recipient archive is opened with its private key. Asking for a passphrase here was
-        // the bug: an escrow-key restore on a machine with no terminal had nothing to answer.
+        // A recipient archive opens with its private key, so an escrow-key restore with no
+        // terminal has no passphrase prompt to answer
         let recipient = age::x25519::Identity::generate().to_public().to_string();
         let keyed = written_archive(
             &scratch,
@@ -1192,7 +1127,7 @@ mod tests {
         );
         assert!(!needs_passphrase(&keyed).expect("header is readable"));
 
-        // A plaintext archive holds its secret in the clear and has nothing to unlock.
+        // A plaintext archive holds its secret in the clear and has nothing to unlock
         let plain = written_archive(&scratch, "plain", &Encryption::Plaintext);
         assert!(!needs_passphrase(&plain).expect("header is readable"));
     }

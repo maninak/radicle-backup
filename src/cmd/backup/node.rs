@@ -1,8 +1,4 @@
-//! Stopping the node for the length of a backup, and putting it back.
-//!
-//! Separate from the archiving itself because it is the one part of a backup that changes the
-//! machine: everything else reads. A guard type keeps the restart on the unwinding path, which
-//! is where it has to be when `run` can fail anywhere between the stop and the finish.
+//! Stopping the node for the length of a backup and starting it again.
 
 use std::time::{Duration, Instant};
 
@@ -11,44 +7,37 @@ use crate::cmd::Ctx;
 use crate::error::{Error, Result};
 use crate::rad::Rad;
 
-/// How long to wait for a node to let go of its control socket after being asked to stop.
+// How long to wait, and how often to poll, for a stopping node to release its control socket
 const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const NODE_STOP_POLL: Duration = Duration::from_millis(200);
 
-/// A node this run may have stopped, and the promise to put it back.
+/// A node this run may have stopped, started again on drop.
 ///
-/// The promise is kept on a return and on a panic, and on neither when a signal kills the
-/// process: Ctrl-C during a long `--stop-node` backup leaves the node down with nothing said.
-/// The scheduled unit this tool writes never passes `--stop-node`, so a killed timer run
-/// cannot strand a seed, and the person who pressed Ctrl-C is by definition at the keyboard.
-/// Revisit if `--stop-node` ever becomes something a machine turns on by itself.
-///
-/// A guard rather than a pair of booleans and a call at the end, because every `?` in `run`
-/// between the stop and the restart (a repository that changes size mid-read, a full disk)
-/// used to unwind past the restart and leave a seed offline until somebody noticed. `Drop`
-/// runs on all of them.
+/// `Drop` restarts the node on every `?` between the stop and the finish, and on a panic. A
+/// signal kills the process without it, so Ctrl-C during `--stop-node` leaves the node down.
+/// The scheduled unit never passes `--stop-node`. Revisit if a machine ever turns it on.
 pub(super) struct NodeGuard<'a> {
     ctx: &'a Ctx,
     rad: Option<&'a Rad>,
     pub(super) was_running: bool,
-    /// The error the control socket gave, when it gave one. `was_running` above is then a
-    /// precaution rather than a reading, and the manifest carries this so the far end can say
-    /// "may have had a node running" instead of asserting it.
+    /// The control socket's error, when the probe got one.
+    ///
+    /// `was_running` is then a precaution, and the manifest carries this so a restore can say
+    /// the node may have been running.
     pub(super) why_running_is_unknown: Option<String>,
     pub(super) was_stopped_by_backup: bool,
 }
 
 impl NodeGuard<'_> {
-    /// Put the node back now rather than at the end of the scope, for the paths that want to
-    /// report it in order. Idempotent: the flag is cleared, so `Drop` then does nothing.
+    /// Starts the node now, for paths that report the restart in order.
+    ///
+    /// Idempotent, because it clears the flag and `Drop` then does nothing.
     pub(super) fn restart(&mut self) {
         if !self.was_stopped_by_backup {
             return;
         }
         self.was_stopped_by_backup = false;
-        // Announced only once there is something to announce. Said first, the run printed
-        // "starting the node again" and then, on the next line, that it had not: the step and
-        // the warning contradict each other and the reader has to work out which one won.
+        // The step prints only once `rad` is found, so no warning contradicts it a line later
         let Some(rad) = self.rad else {
             self.ctx.term.warn(&format!(
                 "{}, so the node this run stopped is still stopped",
@@ -72,38 +61,31 @@ impl Drop for NodeGuard<'_> {
     }
 }
 
-/// Whether this run still owes the node a restart, after a stop whose result it never saw.
+/// Whether this run owes the node a restart after a stop it never saw complete.
 ///
-/// Three cases and only one of them owes anything. With no doubt on the probe, the socket
-/// demonstrably kept answering, so nothing went down and there is nothing to put back. With a
-/// doubt and a `rad node stop` that failed, there is nothing to put back either. With a doubt
-/// and a stop that was ACCEPTED, nobody knows: the same error that made the state a doubt made
-/// every poll after it a doubt too, and the stop may well have worked. That one owes a
-/// restart, because starting a node that never went down costs a line of `rad` output and
-/// leaving one down that this run stopped costs the machine its node until somebody notices.
+/// A restart is owed only when the stop was accepted and the probe could not see the socket,
+/// since the stop may then have worked. A needless start costs a line of output, and a missed
+/// one leaves the node down.
 fn owes_a_restart(stop_accepted: bool, why_running_is_unknown: Option<&str>) -> bool {
     stop_accepted && why_running_is_unknown.is_some()
 }
 
-/// What a running node can cost a backup, said without `--stop-node`.
+/// What a running node can cost a backup, printed when `--stop-node` is absent.
 const MAY_LAG: &str = "a repository that syncs during the backup may be saved slightly behind. \
                        Use --stop-node for an exact copy.";
 
-/// Stop the node when `--stop-node` asks for it, and say what a running one costs when nothing
-/// asked.
+/// Stops the node when `--stop-node` asks, and otherwise prints what a running node costs.
 ///
-/// Only git storage is at risk from a running node: the databases are snapshotted through
-/// SQLite's own backup API, keys and config do not change, and restore compares repositories
-/// with the network. So a running node is a plain step, not a warning. Nothing is stored in
-/// the archive about it beyond `node` in the manifest, which is what restore reads.
+/// A running node puts only git storage at risk, because the databases are snapshotted and
+/// restore compares repositories with the network. So a running node is a step, not a warning.
 pub(super) fn quiesce<'a>(
     ctx: &'a Ctx,
     args: &Create,
     rad: Option<&'a Rad>,
 ) -> Result<NodeGuard<'a>> {
-    // A doubt is said out loud and then treated as "running", which is the cautious half:
-    // `--stop-node` still tries, and the manifest records `was_running` with the doubt beside
-    // it. Read as stopped, the restore on the far end skips the warning that costs an identity.
+    // A doubt is printed and then treated as running, so `--stop-node` still tries and the
+    // manifest records the doubt. Read as stopped, a restore would skip its double-signing
+    // warning.
     let state = ctx.home.probe_node_state();
     let why_running_is_unknown = state.doubt();
     if let Some(doubt) = &why_running_is_unknown {
@@ -121,7 +103,7 @@ pub(super) fn quiesce<'a>(
         });
     }
     if !args.stop_node {
-        // After a doubt, "the node is running" would contradict the line just printed.
+        // After a doubt, "the node is running" would contradict the line just printed
         match why_running_is_unknown {
             Some(_) => ctx.term.detail(&format!("if it is, {MAY_LAG}")),
             None => ctx.term.step(&format!("the node is running, so {MAY_LAG}")),
@@ -145,14 +127,12 @@ pub(super) fn quiesce<'a>(
         )
     })?;
     ctx.term.step("stopping the node");
-    // The exit status, and not only the spawn. A `rad node stop` that fails outright used
-    // to be discarded here, and the run then spent the whole timeout watching a socket that
-    // was never going to close before blaming the node for not stopping.
+    // The exit status matters, because a failed stop would otherwise cost the whole timeout
+    // watching a socket that never closes
     let stop_accepted = rad.stop_node()?;
 
-    // The guard exists from the moment the stop is asked for, not from the moment it is
-    // confirmed. `rad node stop` can succeed and the socket still be up when the deadline
-    // passes, and that path returned an error with nothing recorded as owing a restart.
+    // The guard exists from the moment the stop is asked, because `rad node stop` can succeed
+    // while the socket outlives the deadline
     let mut node = NodeGuard {
         ctx,
         rad: Some(rad),
@@ -161,10 +141,8 @@ pub(super) fn quiesce<'a>(
         was_stopped_by_backup: true,
     };
 
-    // A stop that failed outright is asked about once and no more: there is nothing in
-    // flight to wait for, and the whole timeout spent on it only delays the refusal. A stop
-    // that was accepted gets the full deadline, because the node closes its socket when it is
-    // done serving and that is not instant.
+    // A failed stop is checked once, because nothing is in flight. An accepted stop gets the
+    // full deadline, because the node closes its socket only once it finishes serving.
     let deadline = Instant::now()
         + if stop_accepted {
             NODE_STOP_TIMEOUT
@@ -181,10 +159,8 @@ pub(super) fn quiesce<'a>(
         std::thread::sleep(NODE_STOP_POLL);
     }
     node.was_stopped_by_backup = owes_a_restart(stop_accepted, why_running_is_unknown.as_deref());
-    // Both of these say the socket is still being served, and neither knows that when the
-    // socket is the thing that could not be reached: the same EACCES that made the state a
-    // doubt made every poll above a doubt too. Saying so is the difference between sending
-    // the user to stop a node and sending them to look at a permission.
+    // Under a doubt, every poll above failed the way the probe did, so the message points
+    // the user at a permission and not at a running node
     let still_up = match &why_running_is_unknown {
         Some(doubt) => format!("the node could not be asked whether it stopped ({doubt})"),
         None => "the node is still serving its control socket".to_string(),
@@ -193,9 +169,8 @@ pub(super) fn quiesce<'a>(
         Error::refused(
             format!("{still_up} after being asked to stop"),
             match why_running_is_unknown.is_some() {
-                // The stop may have worked and this run may be unable to see it, so
-                // the node is being started again on the way out and the advice is about the
-                // thing that actually went wrong.
+                // The stop may have worked unseen, so the node starts again on the way out and
+                // the advice targets the real fault
                 true => {
                     "check who owns the node directory and its control socket, then run \
                          again; the node is being started again in case the stop did work"
@@ -215,10 +190,6 @@ pub(super) fn quiesce<'a>(
 mod tests {
     use super::owes_a_restart;
 
-    /// A `--stop-node` run whose probe could not see the socket used to walk away leaving the
-    /// node down. The stop was accepted, no poll could confirm anything, and the run recorded
-    /// that it had stopped nothing, so the guard put nothing back and the message sent the
-    /// user to stop a node that may already have been down.
     #[test]
     fn a_stop_this_run_could_not_confirm_still_owes_the_node_a_restart() {
         const DOUBT: &str = "permission denied on the control socket";

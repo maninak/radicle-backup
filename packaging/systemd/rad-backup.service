@@ -1,22 +1,22 @@
 [Unit]
 Description=Back up this Radicle identity
 Documentation=man:rad-backup(1) https://github.com/maninak/radicle-backup
-# A backup that cannot reach the network still works; it just cannot fill in what the
-# network knows, so this waits rather than requires.
+# A backup without the network still works, but cannot fill in what the network knows. So
+# this waits for the network and does not require it.
 After=network-online.target
 
 [Service]
 Type=oneshot
-# The dash means "start anyway if it is not there": a fresh install has no settings yet.
+# The dash starts the service anyway when the file is missing, as on a fresh install
 EnvironmentFile=-%h/.config/rad-backup/env
 ExecStart=/usr/bin/rad-backup --yes --quiet
-# Reading storage and compressing it is never more urgent than what the user is doing.
+# Reading storage and compressing it is never more urgent than what the user is doing
 Nice=10
 IOSchedulingClass=idle
 NoNewPrivileges=true
 PrivateTmp=true
-# No hardening beyond this: the whole job is to write a file wherever the user chose,
-# and a sandbox that guesses at that path is a backup that silently does not happen.
+# No hardening beyond this, because the job writes wherever the user chose, and a sandbox
+# guessing at that path makes the backup silently fail
 
 [Install]
 WantedBy=default.target

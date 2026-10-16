@@ -1,23 +1,15 @@
-//! The `rad` commands this tool asks questions of.
-//!
-//! Three kinds of call live here. Queries that return JSON (`rad inspect --identity`) are
-//! parsed as JSON. Queries that return a table are never parsed by column: repository
-//! identifiers are picked out of the text by their `rad:z` prefix, which is a shape no table
-//! layout can change. Everything else is run for its exit status alone and nothing it prints
-//! is read. Anything more fragile than the second kind belongs in `git` or in SQLite instead.
+//! The `rad` commands this tool runs, reading tables only for their `rad:z` identifiers.
 
 use std::path::Path;
 
 use crate::error::Result;
 use crate::exec::Tool;
 
-/// Whether a string may be handed to `rad` or `git` as an identifier.
+/// Whether a string may be handed to `rad` or `git` as an identifier, which is base58 with
+/// an optional `rad:` prefix.
 ///
-/// Base58 and nothing else, which is what a repository id and a node id both are. The point is
-/// not that a wrong id would be rejected downstream anyway: it is that anything reaching an
-/// argv position must not be readable as a flag, and a value beginning with `-` is. Ids arrive
-/// from an archive that nobody has vouched for, so they are checked here rather than
-/// trusted to whatever `rad` version happens to be installed.
+/// Ids arrive from an unvouched archive, and a value beginning with `-` in an argv position
+/// reads as a flag.
 pub fn is_identifier(value: &str) -> bool {
     let bare = value.strip_prefix("rad:").unwrap_or(value);
     !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric())
@@ -25,18 +17,14 @@ pub fn is_identifier(value: &str) -> bool {
 
 /// What `rad` was able to say about one repository.
 ///
-/// A failed call is not folded into "there is no paperwork", because the two are opposites
-/// where it matters: a repository whose visibility could not be read looks public, and the
-/// private selection then leaves it out of the archive without naming it. An archive quietly
-/// missing the repositories it was taken for is the failure this tool exists to prevent, so
-/// the reason travels back to whoever can act on it.
+/// A failed call keeps its reason, because a repository whose visibility could not be read
+/// looks public and the private selection would silently leave it out of the archive.
 pub enum Described {
     Identity(RepoIdentity),
     Unavailable { why: String },
 }
 
-/// What `rad ls` was able to answer, for the same reason `Described` exists: a listing that
-/// failed is not a listing that came back empty.
+/// What `rad ls` was able to answer, keeping a failed listing apart from an empty one
 pub enum Listed {
     Ids(Vec<String>),
     Unavailable { why: String },
@@ -45,10 +33,10 @@ pub enum Listed {
 /// Which repositories to ask `rad ls` about.
 #[derive(Debug, Clone, Copy)]
 pub enum Listing {
-    /// Repositories this identity initialised or forked.
+    /// Repositories this identity initialised or forked
     Own,
-    /// Repositories marked private: the open network does not carry them, and only the
-    /// peers their identity document allows can fetch them.
+    /// Repositories marked private, which only the peers their identity document allows can
+    /// fetch
     Private,
 }
 
@@ -77,8 +65,8 @@ impl Rad {
         self.tool.is_available()
     }
 
-    /// The version string `rad --version` prints, recorded in the manifest so that a restore
-    /// years later knows which Radicle wrote the storage it is holding.
+    /// The version string `rad --version` prints, recorded in the manifest so a later restore
+    /// knows which Radicle wrote the storage.
     pub fn version(&self) -> Result<String> {
         Ok(self.tool.output(&["--version"])?.trim().to_string())
     }
@@ -93,8 +81,8 @@ impl Rad {
 
     /// What a repository's identity document says about it.
     ///
-    /// One `rad inspect` per repository rather than one per question: on a seed being asked
-    /// about every repository it holds, each extra subprocess is another fork and exec.
+    /// One `rad inspect` answers every question, because a seed asks this of every repository
+    /// it holds and each extra subprocess is another fork and exec.
     pub fn describe_repo(&self, rid: &str) -> Result<Described> {
         let json = match self.tool.output(&["inspect", rid, "--identity"]) {
             Ok(json) => json,
@@ -108,7 +96,6 @@ impl Rad {
         }
     }
 
-    /// Repository identifiers from a `rad ls` listing.
     pub fn list(&self, listing: Listing) -> Result<Listed> {
         let args: &[&str] = match listing {
             Listing::Own => &["ls"],
@@ -120,13 +107,13 @@ impl Rad {
         }
     }
 
-    /// Fetch a repository from the network, which is what makes a restored copy comparable
-    /// with what other nodes hold.
+    /// Fetches a repository from the network, so a restored copy can be compared with what
+    /// other nodes hold.
     pub fn fetch(&self, rid: &str) -> Result<bool> {
         self.tool.passthrough(&["sync", rid, "--fetch"])
     }
 
-    /// Re-apply one seeding policy, for restoring into a Radicle whose schema has moved on.
+    /// Re-applies one seeding policy, for restoring into a Radicle whose schema has moved on.
     pub fn seed(&self, rid: &str, scope: &str) -> Result<bool> {
         self.tool
             .passthrough(&["seed", rid, "--scope", scope, "--no-fetch"])
@@ -148,18 +135,18 @@ impl Rad {
     }
 }
 
-/// The parts of an identity document this tool has an opinion about.
+/// The parts of an identity document this tool reads.
 ///
-/// Parsed leniently: a document that has grown fields, or lost the ones we look for, yields
-/// what could be read rather than an error. Nothing here is worth failing a backup over.
+/// Parsed leniently, so a document that has grown or lost fields yields what could be read,
+/// because nothing here is worth failing a backup over.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RepoIdentity {
     pub name: Option<String>,
     pub delegates: Vec<String>,
-    /// `public` or `private`. A document with no `visibility` is public, which is heartwood's
-    /// own default.
+    /// `public` or `private`, defaulting to `public` as heartwood does when the document has
+    /// no `visibility`
     pub visibility: String,
-    /// The peers a private repository is shared with. Always empty for a public one.
+    /// The peers a private repository is shared with, always empty for a public one
     pub allowed: Vec<String>,
 }
 
@@ -204,10 +191,10 @@ fn strings_at(value: Option<&serde_json::Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Pull repository identifiers out of any `rad` output.
+/// Pulls repository identifiers out of any `rad` output, sorted and deduplicated.
 ///
-/// Table borders, column widths and colour all change between releases; a `rad:z...` token
-/// does not, because it is the identifier itself.
+/// Table borders, column widths and colour change between releases, and a `rad:z...` token is
+/// the identifier itself.
 fn parse_repository_ids(printed: &str) -> Vec<String> {
     let mut ids: Vec<String> = printed
         .split(|c: char| c.is_whitespace() || c == '│' || c == '|')
@@ -224,7 +211,7 @@ fn parse_repository_ids(printed: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// Real `rad ls` output from rad 1.10.1, box drawing and all.
+    /// Real `rad ls` output from rad 1.10.1, box drawing and all
     const LISTING: &str = "\
 ╭──────────────────────────────────────────────────────────────────╮
 │ Name              RID                                Visibility  │
@@ -263,8 +250,8 @@ mod tests {
             "z6MkiTBz1ymuepK3Q7DwjNhrsFYVvfa4qGwrfKMdDwbrCVvV"
         ));
 
-        // The whole point of the rule. These reach `rad seed` or `rad follow` in an argv
-        // position out of an archive nobody vouched for, and a leading `-` there is a flag.
+        // These reach `rad seed` or `rad follow` in an argv position from an unvouched
+        // archive, and a leading `-` there is a flag
         assert!(!is_identifier("--help"));
         assert!(!is_identifier("-v"));
         assert!(!is_identifier("rad:-v"));

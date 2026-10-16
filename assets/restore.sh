@@ -7,11 +7,10 @@
 #     sh restore.sh [target-home]
 #
 # The target home defaults to $RAD_HOME, then to $HOME/.radicle. It needs `git` and a POSIX
-# shell; `jq` is used when present and skipped when not.
+# shell, and uses `jq` when present to restore each repository's HEAD.
 #
-# This script exists so that an archive can be restored by someone who does not have
-# rad-backup, or cannot run it. `rad-backup restore` does the same and additionally checks
-# your restored repositories against the network, which this script cannot do.
+# `rad-backup restore` does the same and also checks your restored repositories against the
+# network, which this script cannot do.
 
 set -eu
 
@@ -22,22 +21,16 @@ if [ ! -f manifest.json ]; then
 	exit 1
 fi
 
-# `-e` and `-L`, not `-f`: a dangling symlink at the key's name is not a file, so `-f` alone
-# walked straight past one and the `cp` below then followed it and wrote the private key to
-# whatever it pointed at, outside the home and at whatever permissions that path had.
+# `-L` as well, because a dangling symlink at the key's name fails `-e`, and the `cp` below
+# would follow it and write the private key outside the home
 if [ -e "$RAD_HOME/keys/radicle" ] || [ -L "$RAD_HOME/keys/radicle" ]; then
 	echo "$RAD_HOME already holds an identity; move it aside first" >&2
 	exit 1
 fi
 
-# The same hazard at every other name this writes, and at the three directories it writes
-# them into. `cp` follows a symlink at its destination and `mkdir -p` walks through one at a
-# directory, so a home seeded with either is a home that redirects an archive's contents
-# somewhere else: `keys` pointing at a directory somebody else owns puts the private key in
-# it, under whatever permissions the file already there had. Refused rather than unlinked:
-# this script never destroys anything in a home it did not put there. `$RAD_HOME` itself is
-# deliberately not on the list: it is the home you asked for, by argument or by environment,
-# and pointing one at another disk is something people do on purpose.
+# `cp` and `mkdir -p` follow a symlink, so a link at any name this writes would redirect the
+# archive, private key included, outside the home. A link is refused and never removed.
+# `$RAD_HOME` itself may be a link, because pointing it at another disk is deliberate.
 for name in keys node storage keys/radicle.pub config.json \
 	node/policies.db node/notifications.db node/node.db; do
 	if [ -L "$RAD_HOME/$name" ]; then
@@ -50,23 +43,21 @@ done
 echo "restoring into $RAD_HOME"
 mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node" "$RAD_HOME/storage"
 
-# The identity. Permissions are set before the bytes land, not after, so the key is never
-# briefly readable by anyone else.
+# The identity. The umask applies before the bytes land, so the key is never readable by
+# anyone else.
 (umask 077 && cp keys/radicle "$RAD_HOME/keys/radicle")
 cp keys/radicle.pub "$RAD_HOME/keys/radicle.pub"
 chmod 644 "$RAD_HOME/keys/radicle.pub"
-# Guarded like the databases below: an identity-tier archive, or a home that never had a
-# config, legitimately has no config.json, and under `set -e` a bare cp aborted the restore
-# after the key had landed and before any repository did.
+# An archive may carry no config.json, and under `set -e` a bare `cp` would abort the
+# restore after the key had landed
 [ -f config.json ] && cp config.json "$RAD_HOME/config.json"
 
 [ -f node/policies.db ] && cp node/policies.db "$RAD_HOME/node/policies.db"
 [ -f node/notifications.db ] && cp node/notifications.db "$RAD_HOME/node/notifications.db"
 [ -f node/node.db ] && cp node/node.db "$RAD_HOME/node/node.db"
 
-# Whether there is anything for the next block to be about. An identity-only archive carries
-# no bundles, and a warning about "the repositories below" followed by none of them describes
-# a risk this run is not taking.
+# Whether the archive carries any repositories, so an identity-only restore skips the git
+# warning below
 bundles=""
 for bundle in repos/*.bundle; do
 	[ -e "$bundle" ] || break
@@ -74,14 +65,11 @@ for bundle in repos/*.bundle; do
 	break
 done
 
-# Said once, before the first bundle is opened, and for the same reason `rad-backup restore`
-# says it: the `fetch.fsckObjects` below reaches a bundle only from git 2.46. An older git
-# accepts the setting and never consults it on this path, so the objects go into storage
-# unchecked and a run that says nothing looks exactly like one that checked them.
+# The `fetch.fsckObjects` below reaches a bundle only from git 2.46. An older git ignores it
+# and stores the objects unchecked, so this warns once, as `rad-backup restore` does.
 #
-# The first word that starts with a digit, rather than a pattern over the whole line, because
-# what follows the number is the distribution's to choose: `2.51.0.windows.1` and
-# `2.39.5 (Apple Git-154)` are both out there.
+# The version is the first word starting with a digit, because distributions append their own
+# tails (`2.51.0.windows.1`, `2.39.5 (Apple Git-154)`).
 git_said=$(git --version 2>/dev/null || true)
 git_version=""
 for word in $git_said; do
@@ -92,9 +80,8 @@ for word in $git_said; do
 		;;
 	esac
 done
-# A number with no dot in it is not a version this can read: `${v#*.}` hands back the whole
-# value when there is nothing to strip, so a bare `2` would otherwise read as major 2 minor 2
-# and be warned about, where `rad-backup` says it could not tell.
+# A number with no dot is unreadable, because `${v#*.}` returns the whole value when there is
+# nothing to strip and a bare `2` would read as 2.2
 git_major=""
 git_minor=""
 if [ "$git_version" != "${git_version#*.}" ]; then
@@ -102,15 +89,12 @@ if [ "$git_version" != "${git_version#*.}" ]; then
 	git_minor=${git_version#*.}
 	git_minor=${git_minor%%.*}
 fi
-# The unreadable arm first, and matched by what a number may NOT hold. `[0-9]*` is a leading
-# digit and anything at all after it, so a release candidate's `46-rc0` took the numeric arm,
-# `[ 46-rc0 -lt 46 ]` printed the shell's own "Illegal number" at somebody mid-recovery, and
-# the warning that a 2.45-rc git writes bundles unchecked was the one thing not said. Neither
-# half holds a colon, so the separator is safe to exempt.
+# The unreadable arm matches any character a number may not hold, because a release
+# candidate's `46-rc0` would make `-lt` fail with "Illegal number". Neither half holds a
+# colon, so the separator is exempt.
 case "$git_major:$git_minor" in
 *[!0-9:]* | :* | *:)
-	# Git printing nothing at all is git not being installed, and the failure this script
-	# then dies of says that far better than a sentence about what a bundle was checked for.
+	# Git printing nothing means git is missing, and the next git call reports that clearly
 	if [ -n "$bundles" ] && [ -n "$git_said" ]; then
 		echo "the version of git could not be read, so it is not known whether the objects" >&2
 		echo "inside each bundle were checked on the way in" >&2
@@ -129,11 +113,8 @@ restored=0
 for bundle in repos/*.bundle; do
 	[ -e "$bundle" ] || break
 	rid=$(basename "$bundle" .bundle)
-	# A real id is base58 and nothing else. `rad-backup` refuses an archive whose manifest
-	# says otherwise, and this script is what runs when `rad-backup` is not there. Today the
-	# glob above already keeps `..` out, because a leading dot does not match `*`; this says
-	# so on purpose, so that reading ids from manifest.json instead, the way HEAD is read
-	# below, cannot quietly drop it.
+	# A real id is base58 and nothing else, as `rad-backup` also enforces. The glob already
+	# keeps `..` out, and this check keeps it out if ids are ever read from manifest.json.
 	case "$rid" in
 	'' | *[!A-Za-z0-9]*)
 		echo "skipping $bundle: '$rid' is not a repository id" >&2
@@ -141,48 +122,33 @@ for bundle in repos/*.bundle; do
 		;;
 	esac
 	target="$RAD_HOME/storage/$rid"
-	# A link at the repository's own name, inside a `storage` that is a real directory and so
-	# passed the check at the top. `git init` initialises at whatever it points at, and the
-	# archive names the repository, so whoever wrote it knows which name to plant. Skipped
-	# rather than fatal: the repositories before this one are already back.
+	# Initialising follows a link at the repository's own name, and the archive's author knows
+	# which name to plant. It is skipped, because earlier repositories are already back.
 	if [ -L "$target" ]; then
 		echo "skipping $rid: $target is a symlink, so it would be restored outside the home" >&2
 		continue
 	fi
 
 	git init --bare --quiet "$target"
-	# fsckObjects, matching what `rad-backup restore` does: a bundle is the one part of
-	# an archive nothing else validates, and one can carry a tree entry named `.git`.
+	# fsckObjects, as `rad-backup restore` does, because nothing else validates a bundle and
+	# one can carry a tree entry named `.git`
 	git --git-dir "$target" -c fetch.fsckObjects=true \
 		fetch --quiet --force "$(pwd)/$bundle" 'refs/*:refs/*'
-	# The two settings a restore takes out of an archive, which is the same allowlist
-	# `rad-backup restore` applies. A repository config is where git looks for `core.pager`,
-	# `core.fsmonitor` and `remote.<name>.url = ext::sh -c ...`, every one of which it RUNS on
-	# an ordinary operation, and an archive is a file somebody handed you. Everything else a
-	# storage config holds is what `git init` above worked out about this disk, and that answer
-	# is truer than the archive's, so only the node's own name and DID are carried over. Asked
-	# key by key through `git config`, which is the same reader `rad-backup` uses, so no
-	# spelling reaches one of them and not the other, and `--no-includes` so an `include.path`
-	# in the file cannot pull in a second config from a path the archive chose. A setting that
-	# will not go is a line lost and not a repository lost: the bare repository above already
-	# carries a working config. Anything else the file held is named, because a restore that
-	# silently drops what somebody put there is one nobody can check.
+	# Only the node's name and DID come back, the allowlist `rad-backup restore` applies. Git
+	# RUNS some config values (`core.pager`, `core.fsmonitor`, `ext::` urls), and an archive
+	# is a file somebody handed you. `--no-includes` stops `include.path` reaching elsewhere.
 	if [ -f "repos/$rid.config" ]; then
 		if git config --no-includes --file "repos/$rid.config" --list >/dev/null 2>&1; then
 			for key in user.email user.name; do
 				value=$(git config --no-includes --file "repos/$rid.config" \
 					--get "$key" 2>/dev/null) || continue
-				# A key with no value at all: git reads that as true and prints nothing,
-				# and written back it is a name set to the empty string, which is worse
-				# than the name the archive did not carry.
+				# A key with no value prints nothing, and would come back as an empty name
 				[ -n "$value" ] || continue
 				git --git-dir "$target" config "$key" "$value" 2>/dev/null ||
 					echo "skipping $key for $rid: git would not take that value" >&2
 			done
-			# What the config held besides those two and the ones `git init` writes for
-			# itself, which are the ones this leaves to git deliberately: they describe the
-			# disk the repository is on now. `--name-only` is git 2.19 and newer; on an older
-			# one this says nothing rather than crying wolf.
+			# Names every key left out, except those a fresh repository writes about this
+			# disk. `--name-only` needs git 2.19, and an older git reports nothing here.
 			init_writes='core\.(bare|filemode|ignorecase|logallrefupdates'
 			init_writes="$init_writes|precomposeunicode|repositoryformatversion|symlinks)"
 			left_out=$(git config --no-includes --file "repos/$rid.config" \
@@ -205,14 +171,9 @@ for bundle in repos/*.bundle; do
 	else
 		head=$(jq -r --arg rid "rad:$rid" \
 			'.repos[] | select(.rid==$rid) | .head // empty' manifest.json)
-		# `symbolic-ref` takes no `--`, so a manifest saying `head: "-d"` would reach git
-		# as a flag rather than as a branch, and it stores whatever it is handed without
-		# checking, so `refs/../../evil` would later write a file outside the repository.
-		# The same set `rad-backup` refuses, checked again here for the same reason the
-		# id above is: this script runs when `rad-backup` is not there, and both readers
-		# of an archive have to put the same thing back. A `refs/` prefix, and no
-		# component that is empty, starts with a dot, ends in `.lock`, or holds a
-		# character git forbids in a refname.
+		# `symbolic-ref` takes no `--` and stores what it is handed, so `-d` reaches git as
+		# a flag and `refs/../../evil` writes outside the repository. A HEAD needs `refs/`
+		# and a valid refname, the same set `rad-backup` refuses.
 		case "$head" in
 		'') ;;
 		*[[:cntrl:]]* | *..* | */.* | *//* | */ | *.lock | *.lock/* \

@@ -1,9 +1,4 @@
-//! Reporting how recoverable an identity currently is.
-//!
-//! This is the answer to the question the Radicle support channel keeps getting: "what is my
-//! exposure, and what do I do about it". Every failing line says what fixes it,
-//! and every check says what it actually looked at, because a score nobody can audit is a
-//! score nobody should trust.
+//! Reports how recoverable an identity is now, with a remedy under every failing line.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,9 +16,8 @@ use crate::rad::Rad;
 use crate::state;
 use crate::term;
 
-/// How old a backup may get before it stops counting as one, because `schedule` writes a
-/// timer no looser than monthly and a backup older than the loosest cadence this tool offers
-/// is one whose timer stopped firing. Revisit if `schedule` ever offers a longer interval.
+/// The age in days past which a backup stops counting as one, so a timer that stopped
+/// firing shows within a month.
 const STALE_AFTER_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -32,18 +26,17 @@ pub enum Verdict {
     Pass,
     Warn,
     Fail,
-    /// Something could not be looked at. Never counted as a pass.
+    /// A check that could not look at what it was asked about. It never counts as a pass.
     Unknown,
-    /// There is nothing yet for the check to look at, such as an archive before the first
-    /// backup. Kept apart from `Unknown`, because a first run would otherwise read as a report
-    /// that could not see half of what it was asked about.
+    /// A check with nothing yet to look at, such as an archive before the first backup. It
+    /// stays apart from `Unknown`, so a first run does not read as a half-blind report.
     Skipped,
 }
 
-/// A check's stable identity, printed as `checkId` so a script matches on it and not on
-/// `topic`. Ids are frozen once released. Topics are wording and may change.
+/// A check's stable id, printed as `checkId` for scripts to match on.
 ///
-/// Owns its topic, so an id and its topic cannot disagree.
+/// Ids are frozen once released, and topics may change. The id owns its topic, so the two
+/// cannot disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckId {
     KeyPassphrase,
@@ -58,8 +51,8 @@ pub enum CheckId {
 }
 
 impl CheckId {
-    /// Spelled out rather than derived from the variant name, so renaming a variant cannot
-    /// change a string scripts already match on.
+    /// The id string scripts match on. Each one is spelled out, so renaming a variant cannot
+    /// change it.
     fn id(self) -> &'static str {
         match self {
             Self::KeyPassphrase => "key-passphrase",
@@ -102,12 +95,11 @@ impl Serialize for CheckId {
 pub struct Check {
     #[serde(rename = "checkId")]
     pub check_id: CheckId,
-    /// What was looked at, never what was hoped for. A topic cannot be read as a claim, so a
-    /// failing line can never say the opposite of what it means: "backup: no archive has ever
-    /// been taken" is unambiguous where "✗ a backup exists" is a sentence arguing with itself.
+    /// What was looked at, never what was hoped for, so a failing line cannot read as a claim
+    /// arguing with itself, as "✗ a backup exists" would.
     pub topic: &'static str,
     pub verdict: Verdict,
-    /// What was actually found, as a complete statement that is true on its own.
+    /// What was found, as a complete statement that is true on its own.
     pub detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
@@ -129,15 +121,10 @@ impl Check {
         self
     }
 
-    /// Hold a check to what it actually looked at, when some repositories' identity documents
-    /// could not be read.
+    /// Marks a check incomplete when some repositories' identity documents could not be read.
     ///
-    /// Visibility and delegates live in those documents, and a record that has none of them
-    /// looks exactly like a public repository nobody delegates. So a pass over an incomplete
-    /// reading is not a pass: "there are no private repositories to lose" is what a home with
-    /// no `rad` on PATH used to be told about every private repository it had. A finding stays
-    /// a finding, because the ones that were read are still findings, but its count is a floor
-    /// and the sentence has to say so.
+    /// A pass turns `Unknown`, because a record missing its document looks like a public
+    /// repository nobody delegates. A finding stays, and its detail says the count is a floor.
     fn qualified_by_unread(mut self, unread: usize) -> Self {
         if unread == 0 {
             return self;
@@ -205,7 +192,7 @@ pub fn run(ctx: &Ctx, args: &Doctor) -> Result<std::process::ExitCode> {
                 }
             }
             // The remedy goes through `detail` under anything but a Pass, so `--quiet` cannot
-            // print "you would lose this" and withhold the one line that fixes it.
+            // print "you would lose this" and withhold the line that fixes it
             if let Some(remedy) = &check.remedy {
                 let line = format!("--> {remedy}");
                 match check.verdict {
@@ -240,25 +227,18 @@ struct Tally {
 }
 
 impl Tally {
-    /// Whether a report has earned an exit 0.
+    /// Whether a report has earned an exit 0, with no failure and a pass or warning.
     ///
-    /// A failing check is the ordinary reason not to. So is a report that answered nothing:
-    /// `doctor --json` is documented as a monitoring probe, and a run where no check passed or
-    /// warned has established no posture at all. A skipped check is not an answer either, so
-    /// it counts toward neither side.
-    ///
-    /// Unknowns alongside answers keep the exit 0. A machine with no `rad` on PATH cannot
-    /// answer several of these and may be perfectly covered, and exiting 3 at it every night is
-    /// how a red line stops being read.
+    /// A run that answered nothing exits 3, because `doctor --json` is a monitoring probe.
+    /// Unknowns beside answers keep the exit 0, because a machine with no `rad` on PATH cannot
+    /// answer several checks, and a nightly exit 3 there teaches people to ignore it.
     fn is_clean(&self) -> bool {
         self.failed == 0 && self.passed + self.warned > 0
     }
 
-    /// Name every bucket that has something in it, rather than reporting a score.
+    /// Names every non-empty bucket, so the line adds up to the number of checks.
     ///
-    /// "2 of 7 checks pass" counts a check that could not be run as one that did not pass.
-    /// Naming the buckets means the line adds up to the number of checks and says which of
-    /// them need a person.
+    /// A score such as "2 of 7 checks pass" counts a check that could not run as a failure.
     fn summary(&self) -> String {
         let total = self.passed + self.warned + self.failed + self.unknown + self.skipped;
         if self.passed == total {
@@ -288,9 +268,8 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let git = Git::new();
     let rad = Rad::new(home.path());
     let rad = rad.is_available().then_some(rad);
-    // `doctor` is what somebody runs when something is already wrong, so a database it cannot
-    // open has to cost the checks that read it and none of the others. Read with `?`, one
-    // unreadable file ended the report with an sqlite error before a single check had printed.
+    // An unreadable database costs only the checks that read it, because `doctor` runs when
+    // something is already wrong. A `?` here would end the report before any check printed.
     let (policies, _) = tolerate(
         ctx,
         "the seeding policies",
@@ -311,9 +290,8 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
         &policies,
         &routing,
     )?;
-    // The inventory pass says out loud what it could not read, and every one of those lines
-    // is why a check below has to answer "not known" instead of "none". Dropping them left
-    // the reader with a report that had gone quiet about the very thing that weakened it.
+    // Each inventory warning explains a check below that answers "not known", so all of them
+    // are printed
     for warning in &inventory.warnings {
         ctx.term.warn(warning);
     }
@@ -325,9 +303,8 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
     let record = stored.record();
     let now = jiff::Timestamp::now();
 
-    // The archive on disk, found once and read by four checks: its age, its encryption, where
-    // it sits, and whether it covers the private repositories. Reading the state file instead
-    // is how they came to report on a run that happened rather than on the file that is there.
+    // Four checks read the archive found on disk, so they report on the file that is there.
+    // The state file only records a run that happened.
     let directory = crate::cmd::archive_dir_from_env(args.dir.as_deref(), record);
     let newest = crate::archives::newest(&directory, &node_id)?;
 
@@ -384,9 +361,8 @@ fn examine(ctx: &Ctx, args: &Doctor) -> Result<Vec<Check>> {
             &node_id,
             &NothingCameBack::of(
                 synced_unreadable,
-                // Per read, not per process. `doctor` reads `policies.db` and the routing
-                // table before this, and drift in either used to make this check answer "not
-                // known" about a table it had read perfectly.
+                // Drift is asked of this table alone, because `doctor` reads `policies.db` and
+                // the routing table first, and drift there says nothing about this table
                 db::saw_schema_drift_in(&home.node_db(), "sync status table"),
             ),
         )
@@ -417,11 +393,9 @@ fn check_key_protection(secret: &SecretKey, key_path: &std::path::Path) -> Check
 
 /// The newest archive there is evidence of, and what that evidence was.
 struct Newest {
-    /// Its age in whole days. `None` when the record's stamp does not parse, which is not a
-    /// failure: the archive was taken, its own claim about when just cannot be read.
+    /// Its age in whole days, `None` when the record's stamp does not parse.
     days: Option<i64>,
-    /// What the age was read off, so the sentence names something the reader can go and look
-    /// at rather than an age from nowhere.
+    /// What the age was read off, so the sentence names something the reader can look at.
     named: String,
     /// Said beside the age when the file on this disk and the record disagree.
     caveat: Option<Aside>,
@@ -429,19 +403,17 @@ struct Newest {
 
 /// What has to be said beside the age, and whether it takes the shine off a pass.
 ///
-/// An enum rather than a second boolean beside the string, because the two asides pull in
-/// opposite directions and a caller cannot tell them apart by looking: one means there is no
-/// archive at hand, the other means there is a fresher one somewhere else. Told apart by
-/// whether a caveat was present at all, the second turned a covered home into a warning.
+/// The variants pull in opposite directions. `NotAtHand` downgrades a pass, and
+/// `SomethingNewerElsewhere` leaves it alone.
 enum Aside {
-    /// The age was read off the record, and the file it names is not there. A pass would
-    /// otherwise read as "there is an archive here to restore from", and there is not.
+    /// The age was read off the record, and the file it names is not listed here. A plain pass
+    /// would claim an archive is at hand to restore from.
     NotAtHand(String),
-    /// The age was read off the record of a `--stdout` run. There was never a file here to
-    /// find, and warning about that every night would push people off a documented setup.
+    /// The age was read off the record of a `--stdout` run, which leaves no file here. A
+    /// nightly warning about that would push people off a documented setup.
     WentToStdout(String),
     /// A file is here, and the record remembers a newer archive that went somewhere else.
-    /// The age below is right about this file; it is just not the newest one that exists.
+    /// The age is this file's.
     SomethingNewerElsewhere(String),
 }
 
@@ -459,14 +431,12 @@ impl Aside {
     }
 }
 
-/// Why the archive the record names was not among the ones listed here.
+/// Why the archive the record names is not among the ones listed here.
 ///
-/// "Is not there now" was said from the record alone, without looking, and `--output
-/// /backups/mine.tar.zst.age` names a file this tool writes and then does not recognise: the
-/// listing wants a `-<short node id>-` in the name. So a report said an archive was gone while
-/// it sat there, and `check_archive_location` in the same report said it existed.
+/// The listing wants `-<short node id>-` in a file name, so an archive written with `--output
+/// /backups/mine.tar.zst.age` can be there and still go unlisted.
 fn not_listed_here(path: &str) -> String {
-    // Anything the filesystem will not answer about is not proof of absence either.
+    // A filesystem error is no proof of absence, so it is reported as it is
     match std::fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!("{path} is not there now"),
         Err(e) => format!("{path} could not be looked at: {e}"),
@@ -479,9 +449,8 @@ fn not_listed_here(path: &str) -> String {
 
 /// The record's own archive, when it is newer than the file found on this disk.
 ///
-/// Both ages are needed, so a record whose stamp does not parse produces nothing:
-/// there is no comparison to report, and inventing one from a missing half is how a report
-/// starts saying more than it knows.
+/// Returns `None` when the record's stamp does not parse, because there is no comparison to
+/// report.
 fn newer_elsewhere(
     record: Option<&state::Record>,
     here: i64,
@@ -498,14 +467,11 @@ fn newer_elsewhere(
     })
 }
 
-/// How recently an archive of this identity was taken.
+/// How recently an archive of this identity was taken, read from the directory and the state
+/// file.
 ///
-/// Two sources, because neither alone is the answer. The state file remembers what this user
-/// on this machine last wrote, which is nothing at all when the timer runs as another user,
-/// when the state directory has been wiped, or when the home came back through `restore.sh`.
-/// The directory holds what is actually there, which is nothing once the last archive has been
-/// pruned or carried off. Reading only the first is how "no archive has ever been taken for
-/// this identity" was printed at a machine with a working nightly backup.
+/// The state file knows nothing when the timer runs as another user or the state was wiped or
+/// restored, and the directory knows nothing once the last archive is pruned or moved.
 fn check_backup_freshness(
     stored: &state::Stored,
     newest: Option<&crate::archives::Archive>,
@@ -513,26 +479,24 @@ fn check_backup_freshness(
     now: jiff::Timestamp,
 ) -> Check {
     const ID: CheckId = CheckId::Backup;
-    // Absolute, because the directory defaults to `.` and the remedy below is a command to copy:
-    // `rad backup --output .` means a different place in every shell it is pasted into.
+    // The path is absolute, because the directory defaults to `.` and the remedy is a command
+    // to paste, where `.` means a different place in every shell
     let looked_in = std::path::absolute(directory)
         .unwrap_or_else(|_| directory.to_path_buf())
         .display()
         .to_string();
     let record = stored.record();
 
-    // The file that is there answers first: it is what a restore would actually use, and it is
-    // there whoever wrote it. The record gives the age only when no file does, because an
-    // archive carried off to another disk is still an archive that was taken.
+    // The file found here answers first, because a restore would use it whoever wrote it.
+    // The record gives the age only when no file does, because a moved archive still counts.
     let judged = match (newest, record) {
         (Some(archive), _) => {
             let here = term::days_between(archive.taken, now);
             Newest {
                 days: Some(here),
                 named: format!("{} in {looked_in}", archive.name()),
-                // A nightly `rad backup --stdout` to another disk records an archive this
-                // directory never receives. Reading only the file here, the report called a
-                // year-old copy the newest backup and never mentioned last night's.
+                // A nightly `--stdout` run records archives this directory never receives, so
+                // an older file here may not be the newest backup
                 caveat: newer_elsewhere(record, here, now),
             }
         }
@@ -580,9 +544,8 @@ fn check_backup_freshness(
         .map(|caveat| format!(", though {}", caveat.said()))
         .unwrap_or_default();
     let check = match days {
-        // Ahead of this clock, so the age says nothing. Left as a Pass it pinned the staleness
-        // alarm open forever: one archive taken on a machine whose clock ran fast reported
-        // "taken -300 days ago" and never went stale again.
+        // An archive stamped in the future has no meaningful age. As a pass it would never go
+        // stale, so one archive from a fast clock would silence the alarm for good.
         Some(days) if days < 0 => Check::new(
             ID,
             Verdict::Unknown,
@@ -606,9 +569,8 @@ fn check_backup_freshness(
             format!("{named} carries a timestamp that does not parse{beside}"),
         ),
     };
-    // An archive that is not where it was is still an archive, but a clean pass would say it
-    // is at hand, and it is not. A newer one on another disk is the opposite news and leaves
-    // the pass alone.
+    // An archive no longer at hand downgrades a pass, because a clean pass says it is at hand.
+    // A newer archive on another disk leaves the pass alone.
     match check.verdict == Verdict::Pass && caveat.is_some_and(|caveat| caveat.downgrades_a_pass())
     {
         true => Check {
@@ -620,7 +582,7 @@ fn check_backup_freshness(
     }
 }
 
-/// "it is" for one and "all 3 are" for more, so a sentence about a count never reads "all 1 are".
+/// Phrases a count as "it is" for one and "all 3 are" for more, never "all 1 are".
 fn every(count: usize) -> String {
     match count {
         1 => "it is".to_string(),
@@ -631,7 +593,7 @@ fn every(count: usize) -> String {
 /// What a check that needs an archive says when there is none to look at.
 const NO_ARCHIVE_FOUND: &str = "no archive found";
 
-/// A path as one shell word, quoted only when it needs to be, so a remedy pastes as printed.
+/// Quotes `path` as one shell word when it needs quoting, so a remedy pastes as printed.
 fn shell_word(path: &str) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/._-+=:@,".contains(c);
     match path.chars().all(plain) && !path.is_empty() {
@@ -640,14 +602,10 @@ fn shell_word(path: &str) -> String {
     }
 }
 
-/// Whether the newest archive can still be read by someone who is not you, and whether it can
-/// still be read by you.
+/// Whether the newest archive is closed to others and still opens for its owner.
 ///
-/// Read off the file whenever there is one. The record says what a run once wrote, so it
-/// answered "the newest archive cannot be read without its passphrase" over a directory whose
-/// only archive was a plaintext one somebody dropped there by hand. It also cannot answer the
-/// half that matters more: an archive encrypted to a key nobody still holds is as lost as no
-/// archive at all, and only trying the unwrap says so.
+/// The verdict is read off the file whenever there is one, because a record only says what a
+/// run once wrote. Trying the unwrap shows whether a key on hand still opens it.
 fn check_archive_encryption(
     identities: &crate::crypt::Identities,
     newest: Option<&crate::archives::Archive>,
@@ -655,8 +613,8 @@ fn check_archive_encryption(
 ) -> Result<Check> {
     const ID: CheckId = CheckId::ArchiveEncryption;
     let Some(archive) = newest else {
-        // Nothing here to open, so the record is all there is, and it is hearsay about a file
-        // this run never saw. It is still worth repeating when what it remembers is bad news.
+        // With no file to open, the record is hearsay about a file this run never saw, so only
+        // its bad news earns a warning
         return Ok(match record {
             Some(record) if !record.is_encrypted => Check::new(
                 ID,
@@ -687,9 +645,8 @@ fn check_archive_encryption(
         .with_remedy("take another without --plaintext, then delete the old one"));
     }
     if crate::crypt::needs_passphrase(&archive.path)? {
-        // Not opened, because opening it means asking for the passphrase, and a health report
-        // that prompts is one people stop running. The header is enough to say which key it
-        // wants, and a passphrase is something its owner can test whenever they like.
+        // A passphrase archive stays unopened, because opening it means a prompt, and people
+        // stop running a health report that prompts. The header says which key it wants.
         return Ok(Check::new(
             ID,
             Verdict::Pass,
@@ -705,14 +662,9 @@ fn check_archive_encryption(
         )
         .with_remedy("rad backup doctor --identity ~/.ssh/id_ed25519"));
     }
-    // The whole point of the check: the header unwraps or it does not, and everything after it
-    // (zstd, tar, the manifest) is somebody else's check. Opening far enough to build the zstd
-    // decoder has already made age produce the file key, so this proves the key on hand opens
-    // the archive without reading a gigabyte to find out.
-    //
-    // Never interactively, whatever the run outside is: a passphrase-protected ssh key is the
-    // shape the README shows, and a health report that stops to ask for its passphrase is one
-    // people take off the timer.
+    // Building the zstd decoder makes age produce the file key, so an open proves the key on
+    // hand works without reading the whole archive. The open never prompts, because a report
+    // that stops to ask for an ssh key's passphrase gets taken off the timer.
     let silent = crate::crypt::Identities {
         is_interactive: false,
         ..identities.clone()
@@ -724,10 +676,8 @@ fn check_archive_encryption(
                 Verdict::Pass,
                 format!("{name} is encrypted to a key, and the key offered here opens it"),
             ),
-            // The key never came unlocked, or came unlocked and was of a type age cannot use.
-            // Either way nothing was learnt about the archive, and reported as a Fail this was
-            // a permanent red line, and an exit 3 every night, for the setup the README
-            // shows.
+            // A key that stayed locked or that age cannot use says nothing about the archive.
+            // As a Fail it would exit 3 every night for the setup the README shows.
             Err(
                 Error::KeysStayedLocked { what, remedy } | Error::KeyNotUsable { what, remedy },
             ) => Check::new(ID, Verdict::Unknown, format!("{name}: {what}")).with_remedy(remedy),
@@ -746,8 +696,8 @@ fn check_archive_location(
     record: Option<&state::Record>,
 ) -> Check {
     const ID: CheckId = CheckId::ArchiveLocation;
-    // The file that is there first, then the path the record remembers, which may well be on
-    // another disk entirely and is the more interesting answer when it is.
+    // The file found here answers first, then the path the record remembers, which may be on
+    // another disk
     let recorded = record.and_then(|record| record.archive.as_ref());
     let judged = newest.map(|archive| archive.path.clone()).or_else(|| {
         recorded
@@ -775,18 +725,16 @@ fn check_archive_location(
 
     let name = path.display().to_string();
     match crate::perms::same_device(&path, home) {
-        // A warning and not a failure, because the same filesystem does not mean the same
-        // fate: a directory synced by MEGA, Dropbox, Drive or Syncthing is already off this
-        // machine, and this tool has no way to know whether one is watching. Failing a posture
-        // it cannot evaluate would make `doctor` exit 3 at somebody who is properly covered.
+        // A same-disk archive warns, because a directory synced by MEGA, Dropbox, Drive or
+        // Syncthing is already off this machine and this tool cannot see whether one is. A
+        // Fail would exit 3 at someone who is covered.
         Some(true) => Check::new(
             ID,
             Verdict::Warn,
             format!("{name} is on the same disk as your Radicle data"),
         )
         .with_remedy("copy archives to another disk or machine, unless a sync tool already does"),
-        // A different filesystem is not always a different disk: two partitions of one drive
-        // answer the same way as a second machine would, so the pass says filesystem.
+        // Two partitions of one drive are different filesystems, so the pass says filesystem
         Some(false) => Check::new(
             ID,
             Verdict::Pass,
@@ -800,14 +748,10 @@ fn check_archive_location(
     }
 }
 
-/// Whether the record is about the archive this run found on the disk.
+/// Whether the record is about the archive this run found on disk.
 ///
-/// `Record::carries` answers off the record, which is hearsay about a file this run may never
-/// have seen: the timer may run as another user, the archive may have been pruned or moved
-/// since, and `restore.sh` writes no record at all. The freshness and encryption checks were
-/// moved onto the file for exactly that reason. The coverage check below still has only the
-/// record to go on, because knowing which repositories are inside an archive means opening it,
-/// so it says whose word it is taking instead.
+/// A record is hearsay about a file this run may never have seen, because the timer may run as
+/// another user, the archive may have moved, and `restore.sh` writes no record.
 fn record_is_about(record: &state::Record, newest: Option<&crate::archives::Archive>) -> bool {
     match (record.archive.as_deref(), newest) {
         (Some(recorded), Some(found)) => std::path::Path::new(recorded) == found.path,
@@ -828,10 +772,8 @@ fn check_private_coverage(
     }
     let vouched = record.is_some_and(|record| record_is_about(record, newest));
 
-    // A private repository is not automatically the only copy. Its owner can allow peers to
-    // hold it, and the routing table knows when one announces it. Those are different degrees
-    // of safety, and this check says which one each repository is in rather than failing them
-    // all alike.
+    // An owner can allow peers to hold a private repository, and the routing table knows when
+    // one announces it, so this check says which degree of safety each repository is in
     let missing: Vec<&&crate::manifest::RepoRecord> = private
         .iter()
         .filter(|repo| !record.is_some_and(|record| record.carries(&repo.rid)))
@@ -843,9 +785,8 @@ fn check_private_coverage(
                 Verdict::Pass,
                 format!("{} in the newest archive", every(private.len())),
             ),
-            // A pass on the strength of a record about a file nothing here matched. Said as an
-            // unknown, because "they are all backed up" about an archive this run never found
-            // is the shape of claim this whole report exists not to make.
+            // A record about a file nothing here matched earns an unknown, because "they are
+            // all backed up" about an archive this run never found is a claim it cannot check
             false => {
                 let all = every(private.len());
                 match (record.and_then(|record| record.archive.as_deref()), newest) {
@@ -882,10 +823,8 @@ fn check_private_coverage(
             }
         };
     }
-    // The routing table is half of what `has_another_holder` answers with, so a table that
-    // could not be read makes "on no other node" a claim about a file nobody opened. Said as
-    // an unknown instead: the strongest thing this check says is a Fail, and earning one off a
-    // failed read is how a report gets somebody to stop believing it.
+    // The routing table is half of what `has_another_holder` answers with, so an unreadable
+    // table earns an unknown. A Fail off a failed read teaches people to stop believing it.
     if routing_is_unreadable {
         let (count, verb) = (missing.len(), term::is_or_are(missing.len()));
         return Check::new(
@@ -931,9 +870,9 @@ fn check_private_coverage(
 
 /// Whether losing the key would also cost the repositories nobody else can update.
 ///
-/// `key_is_archived` is whether any archive of the key is known: one found on disk, or one
-/// rad-backup recorded writing. A restore's record does not count, because the archive it came
-/// from may be gone. Its age does not matter, because the key in an old archive is the same key.
+/// `key_is_archived` is whether an archive of the key is known, found on disk or recorded as
+/// written. A restore's record does not count, because its source may be gone. Age does not
+/// matter, because an old archive holds the same key.
 fn check_sole_delegate(inventory: &Inventory, key_is_archived: bool) -> Check {
     let sole: Vec<&str> = inventory
         .solely_delegated()
@@ -960,10 +899,9 @@ fn check_sole_delegate(inventory: &Inventory, key_is_archived: bool) -> Check {
         term::count(sole.len(), "repository", "repositories"),
         sole.join(", "),
     );
-    // Being the only delegate is how most repositories start, so it warns only when nothing
-    // could bring the key back. A warning nobody is expected to act on is one people learn to
-    // scroll past. Whether a second delegate helps depends on the threshold, which nothing
-    // here reads, so the hint says how to add one and makes no claim about how many is best.
+    // Most repositories start with one delegate, so this warns only when nothing could bring
+    // the key back. The threshold is never read here, so the hint says how to add a delegate
+    // and makes no claim about how many is best.
     if !key_is_archived {
         return Check::new(
             ID,
@@ -983,16 +921,10 @@ fn check_sole_delegate(inventory: &Inventory, key_is_archived: bool) -> Check {
     )
 }
 
-/// What to tell somebody an empty table sent here.
+/// Reads a database that must not end the report, warning when the read fails.
 ///
-/// "Start the node" is right when the node has never gossiped and wrong when it is running
-/// perfectly against a schema this build cannot read, and the two arrive as the same empty
-/// map. The warning naming the file and the sqlite reason is printed by the command layer
-/// either way; this is only about not sending a reader to start a node that is already up.
-/// A database read that must not end the report, warned about when it fails.
-///
-/// Returns the empty answer and the sentence explaining it, which the check that reads it
-/// prints as its remedy so that the line and the reason for it are never separated.
+/// Returns the empty value and the warning, which the check that reads it prints as its
+/// remedy, so the line and its reason stay together.
 fn tolerate<T: Default>(ctx: &Ctx, what: &str, read: Result<T>) -> (T, Option<String>) {
     match read {
         Ok(value) => (value, None),
@@ -1004,21 +936,21 @@ fn tolerate<T: Default>(ctx: &Ctx, what: &str, read: Result<T>) -> (T, Option<St
     }
 }
 
-/// Why a reader of the node's databases handed nothing back, which is the whole of what
-/// separates "no node has run here yet" from "this build cannot read the schema" from "the
-/// file will not open". All three arrive at a check as an empty map, and telling somebody to
-/// start a node that is already running is what reading them as one answer costs.
+/// Why a read of the node's databases handed nothing back.
+///
+/// A node that has not run, a schema this build cannot read and a file that will not open all
+/// arrive as an empty map, and starting the node fixes only the first.
 enum NothingCameBack {
-    /// It opened and answered, so empty means a node that has not gossiped or synced yet.
+    /// The database answered, so empty means the node has not gossiped or synced yet.
     NodeHasNotRun,
-    /// This build cannot read part of heartwood's schema, which is heartwood moving on.
+    /// This build cannot read part of heartwood's schema.
     SchemaHasMovedOn,
-    /// It could not be read at all, so nothing was ever asked of it.
+    /// The database could not be read at all, for the reason held.
     Unreadable(String),
 }
 
 impl NothingCameBack {
-    /// Unreadable first: a file that never opened cannot have told anybody its schema moved.
+    /// Picks the reason, unreadable first, because a file that never opened cannot show drift.
     fn of(unreadable: Option<String>, schema_has_moved_on: bool) -> Self {
         match (unreadable, schema_has_moved_on) {
             (Some(why), _) => Self::Unreadable(why),
@@ -1028,6 +960,10 @@ impl NothingCameBack {
     }
 }
 
+/// The remedy for a table that came back empty, by why it did.
+///
+/// `then` completes the advice to start a node that has not run. A running node whose schema
+/// this build cannot read also comes back empty, and is never told to start.
 fn empty_because(nothing_came_back: &NothingCameBack, then: &str) -> String {
     match nothing_came_back {
         NothingCameBack::Unreadable(why) => why.clone(),
@@ -1047,14 +983,13 @@ fn check_replication(
     routing: &BTreeMap<String, u64>,
     nothing_came_back: &NothingCameBack,
 ) -> Check {
-    // `is_public`, not `!is_private`: a record whose identity document was never read has no
-    // visibility, and passing it here put a repository that may well be private into a list
-    // whose remedy is `rad sync --announce`. The caller qualifies the count with how many
-    // could not be described.
+    // The filter is `is_public`, because a record whose identity document was never read has
+    // no visibility, and this list ends in `rad sync --announce`. The caller qualifies the
+    // count with how many could not be described.
     const ID: CheckId = CheckId::PublicRepositories;
     let public = inventory.records.iter().filter(|repo| repo.is_public());
-    // "None here" only when every identity was read. Otherwise nothing is known to be public,
-    // and an unreadable database is the more useful thing to say.
+    // The check passes with none only when every identity was read, because otherwise
+    // nothing is known to be public
     if public.clone().next().is_none() && inventory.identities_not_read() == 0 {
         return Check::new(ID, Verdict::Pass, "your node holds none");
     }
@@ -1095,18 +1030,10 @@ fn check_replication(
     .with_remedy("announce them with `rad sync --announce <rid>`, or ask a seed to hold a copy")
 }
 
-/// Work that is signed here and has reached nobody.
+/// Work signed here that has reached no other node.
 ///
-/// Distinct from `check_replication` beside it, and the distinction is the whole point: that
-/// one asks whether a repository exists anywhere else, this one asks whether the LATEST work
-/// in it does. A repository can be held by forty seeds and still have this morning's commits
-/// on one disk, which is the loss a file copy of the home cannot see.
-///
-/// Private repositories are left out. They are announced to nobody by design, so counting them
-/// here would report the feature working as a failure. A repository whose identity document
-/// nothing could read is not known to be public either, which is why the caller qualifies this
-/// answer the way it qualifies every other check that reads identity documents: without it, a
-/// home with no `rad` on PATH was told to announce repositories that must never be announced.
+/// `check_replication` asks whether a repository exists elsewhere, and this asks whether its
+/// latest work does. Private repositories are left out, because they are announced to nobody.
 fn check_sigrefs_propagation(
     inventory: &Inventory,
     synced_heads: &BTreeMap<String, BTreeSet<String>>,
@@ -1114,9 +1041,8 @@ fn check_sigrefs_propagation(
     nothing_came_back: &NothingCameBack,
 ) -> Check {
     const ID: CheckId = CheckId::UnsharedWork;
-    // Only a repository known to be public. One whose identity document was never read is not
-    // known to be anything, and this list ends in `rad sync --announce`. No signed refs of our
-    // own means nothing of ours to share, not work stuck here.
+    // Only repositories known to be public count, because this list ends in `rad sync
+    // --announce`. A repository with none of this peer's signed refs has nothing to share.
     let yours: Vec<(&crate::manifest::RepoRecord, &String)> = inventory
         .records
         .iter()
@@ -1143,8 +1069,7 @@ fn check_sigrefs_propagation(
         ));
     }
 
-    // When each node said so is not this check's question: a head that reached anybody, ever,
-    // has left this disk.
+    // A head that reached any node, at any time, has left this disk, so sync times are ignored
     let here_only: Vec<&str> = yours
         .into_iter()
         .filter(|(repo, mine)| {
@@ -1179,17 +1104,9 @@ fn check_sigrefs_propagation(
 
 /// Whether another machine may still be running this identity.
 ///
-/// Two nodes signing under one peer id is the one hazard the thread that produced this tool
-/// agreed on without dissent, and a restore is how a second one comes into being: the archive
-/// puts the key here while the machine it came from still holds its own copy. `move` is the
-/// command that closes it, by retiring the source key as part of the run, so an archive that
-/// says it was written by a move is the one case this can pass on.
-///
-/// Given the whole `Stored` and not just its record, because the two ways there is no record
-/// are not the same answer. A missing state file is the normal shape of a home restored under
-/// `sudo`, or by `restore.sh`, which writes none: reading that as "not restored from an
-/// archive" printed a green line about the double-signing hazard at exactly the people most
-/// likely to be in it.
+/// A restore puts the key here while the source machine keeps its copy, and `move` retires
+/// that copy. A missing state file is no evidence either way, because a restore under `sudo`
+/// or by `restore.sh` writes none.
 fn check_second_key_copy(stored: &state::Stored) -> Check {
     const ID: CheckId = CheckId::KeyCopies;
     let record = match stored {
@@ -1220,8 +1137,8 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
         }
     };
 
-    // Every backup writes a record with no `restored` in it, so this is only what the latest
-    // record says. A home restored and then backed up lands here too.
+    // Every backup writes a record with no `restored`, so a home restored and then backed up
+    // passes here too
     let Some(restored) = record.restored.as_ref() else {
         return Check::new(
             ID,
@@ -1231,19 +1148,16 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
     };
 
     match restored.source_retires_key {
-        // What the archive recorded, not what happened on the other machine: this tool has
-        // never been there. `move` retires the key as part of its own run, so the claim is a
-        // good one, but a sentence that stated it as fact would be stating something it cannot
-        // see, and `--keep-source` is exactly the case where it would be wrong.
+        // The pass repeats what the archive recorded, because this tool cannot see the old
+        // machine, and `--keep-source` is the case where the claim would be wrong
         Some(true) => Check::new(
             ID,
             Verdict::Pass,
             "your Radicle data was moved here, and the archive says the old machine retires its \
              key",
         ),
-        // Said as a possibility, never as a finding: this tool cannot see the other machine,
-        // and telling somebody their identity is being double-signed when it is not would send
-        // them to retire a key they still need.
+        // The warning names a possibility, because this tool cannot see the other machine and
+        // a false alarm would send someone to retire a key they still need
         Some(false) => Check::new(
             ID,
             Verdict::Warn,
@@ -1254,8 +1168,8 @@ fn check_second_key_copy(stored: &state::Stored) -> Check {
                 (true, false) => {
                     "your Radicle data was restored from a backup of a machine with a node running"
                 }
-                // The source run could not reach the socket and recorded the cautious answer.
-                // Repeating that as a fact is this report asserting what nothing established.
+                // The source run could not reach the socket and recorded the cautious answer,
+                // so the sentence says "may have had"
                 (true, true) => {
                     "your Radicle data was restored from a backup of a machine that may have had a \
                      node running"
@@ -1286,9 +1200,8 @@ mod tests {
     use super::*;
     use crate::key::tests::TestScratch;
 
-    /// Every check id, as the exact JSON string a script matches on. A second copy on purpose:
-    /// an edit to `CheckId::id` has to be made twice to ship. Nothing notices a variant left
-    /// out of this list, so a new id needs a line here too.
+    /// The ids are spelled a second time here, so an edit to `CheckId::id` has to be made
+    /// twice to ship. A new variant needs a line here, because nothing notices one left out.
     #[test]
     fn check_ids_are_pinned_because_scripts_match_on_them() {
         let pinned = [
@@ -1327,15 +1240,13 @@ mod tests {
         assert!(tally(9, 0, 0, 0, 0).is_clean());
         assert!(tally(7, 2, 0, 0, 0).is_clean());
         assert!(!tally(8, 0, 1, 0, 0).is_clean());
-        // No check answered: some could not be looked at and the rest had nothing to look at.
-        // Green here is a monitoring probe reporting a posture nothing looked at.
+        // With no check answered, a green exit would report a posture nothing looked at
         assert!(!tally(0, 0, 0, 6, 3).is_clean());
         assert!(tally(6, 0, 0, 0, 3).is_clean());
     }
 
-    /// A first run has no archive, and the checks that read one have nothing to look at. That
-    /// is not a question the report failed to answer, but a recorded archive this run cannot
-    /// see is.
+    /// A first run has nothing for the archive checks to look at, so they skip. A recorded
+    /// archive this run cannot see is an unknown.
     #[test]
     fn the_archive_checks_skip_when_there_is_no_archive_and_no_record_of_one() {
         let home = std::path::Path::new("/nowhere");
@@ -1345,7 +1256,7 @@ mod tests {
         let none = check_archive_location(home, None, None);
         assert_eq!(none.verdict, Verdict::Skipped, "{}", none.detail);
 
-        // A `--stdout` run: an archive exists somewhere this tool cannot see.
+        // A `--stdout` run leaves an archive somewhere this tool cannot see
         let recorded = record();
         let elsewhere = check_archive_encryption(&Default::default(), None, Some(&recorded))
             .expect("no archive is not an error");
@@ -1354,8 +1265,7 @@ mod tests {
         assert_eq!(elsewhere.verdict, Verdict::Unknown, "{}", elsewhere.detail);
     }
 
-    /// A key file for a test, owner-only inside an owner-only directory, because these used
-    /// to be `std::fs::write` into `/tmp` at the umask default under a pid-guessable name.
+    /// Writes a key file for a test, owner-only inside an owner-only directory.
     fn secret_file(path: &std::path::Path, contents: &str) {
         use std::io::Write as _;
 
@@ -1364,14 +1274,13 @@ mod tests {
             .expect("scratch file is writable");
     }
 
-    /// Freshness judged with nothing on disk, which is the case every state-record test is
-    /// about: what the tool remembers, when the directory it looked in holds nothing.
+    /// Judges freshness from the state record alone, with nothing on disk.
     fn recorded_freshness(stored: &state::Stored, now: jiff::Timestamp) -> Check {
         check_backup_freshness(stored, None, std::path::Path::new("/nowhere"), now)
     }
 
-    /// An archive found on disk, stamped `when`. Freshness never opens one, so no file is
-    /// needed to ask it how old what it found is.
+    /// An archive found on disk, stamped `when`. Freshness never opens one, so the path need
+    /// not exist.
     fn found(when: &str) -> crate::archives::Archive {
         crate::archives::Archive {
             path: std::path::PathBuf::from(
@@ -1383,8 +1292,7 @@ mod tests {
         }
     }
 
-    /// Freshness judged on an archive that is there, which is what a covered machine looks
-    /// like: the file answers, and the record beside it is never consulted.
+    /// Judges freshness on an archive found on disk, with no state record.
     fn found_freshness(when: &str, now: jiff::Timestamp) -> Check {
         check_backup_freshness(
             &state::Stored::Absent,
@@ -1394,10 +1302,9 @@ mod tests {
         )
     }
 
-    /// The shape: a nightly `rad backup --stdout` to another disk, and one old copy lying in
-    /// the directory `doctor` looks in. Read off the file alone, the report called a year-old
-    /// archive the newest backup and never mentioned last night's; downgraded for having
-    /// anything to say, it warned at a machine that is covered.
+    /// A nightly `rad backup --stdout` goes to another disk, and one old copy sits in the
+    /// directory `doctor` looks in. The report names the newer archive and keeps the pass the
+    /// file here earns.
     #[test]
     fn a_newer_archive_the_record_remembers_is_said_beside_an_older_file_without_costing_the_pass()
     {
@@ -1420,8 +1327,8 @@ mod tests {
             stale_file.detail
         );
 
-        // Both fresh, and the record is the fresher of the two. Still a pass: there is an
-        // archive here to restore from, and another one newer still somewhere else.
+        // Both are fresh and the record is fresher, which still passes, because the archive
+        // here can be restored from
         let fresh_file = check_backup_freshness(
             &stored,
             Some(&found("2026-08-12T12:00:00Z")),
@@ -1435,7 +1342,7 @@ mod tests {
             fresh_file.detail
         );
 
-        // The file here is the newer of the two, so there is nothing to add.
+        // The file here is the newer of the two, so there is nothing to add
         let newest_here = check_backup_freshness(
             &stored,
             Some(&found("2026-08-14T00:00:00Z")),
@@ -1450,14 +1357,10 @@ mod tests {
         );
     }
 
-    /// How many checks `examine` runs. Pinned because `every_topic` below is built by hand:
-    /// a tenth check swept by none of the rules that read that list would be added silently.
+    /// How many checks `examine` runs, pinned because `every_topic` below is built by hand.
     ///
-    /// This number is written in three places and derived in none, so it is `ci/pins.sh` that
-    /// holds them together: it counts the `check_` functions the file defines and refuses a
-    /// tree where they, this constant and the `total` the integration suite asks the real
-    /// command for are not the same number. What the test below adds is the other direction,
-    /// an entry dropped from `every_topic` while the constant beside it stayed.
+    /// `ci/pins.sh` holds this, the count of `check_` functions and the integration suite's
+    /// `total` to one number. The test below catches an entry dropped from `every_topic`.
     const CHECKS_THE_COMMAND_RUNS: usize = 9;
 
     #[test]
@@ -1467,9 +1370,8 @@ mod tests {
 
     /// Every topic the report can print, one per check, whatever the verdict turns out to be.
     ///
-    /// The scratch name comes from the caller: two tests calling this with one name inside it
-    /// ask `TestScratch` for the same parent, which it refuses, and the refusal names the
-    /// helper rather than either test.
+    /// Each caller passes its own scratch name, because `TestScratch` refuses two tests that
+    /// share one parent.
     fn every_topic(scratch: &str) -> Vec<String> {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
         let empty = Inventory {
@@ -1477,8 +1379,8 @@ mod tests {
             selected: Default::default(),
             warnings: Vec::new(),
         };
-        // The key check is built the long way rather than left out: a sweep that exempts
-        // one of the checks it exists to police reports a conformance it is not checking.
+        // The key check is built in full, because a sweep that exempts a check it polices
+        // reports a conformance it does not check
         let seed = zeroize::Zeroizing::new([1u8; 32]);
         let openssh = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
         let scratch = TestScratch::create(scratch);
@@ -1514,16 +1416,13 @@ mod tests {
         .collect()
     }
 
-    /// The bug this guards, seen in the wild: `✗ a backup exists` printed when none did.
-    ///
-    /// A topic phrased as a claim asserts the good state, so the marker and the words say
-    /// opposite things the moment a check fails. A topic must name the subject and leave every
-    /// assertion to the detail beside it, which is written to be true whatever was found.
+    /// A topic phrased as a claim asserts the good state, so a failing line such as
+    /// "✗ a backup exists" contradicts its own marker. A topic names the subject and leaves
+    /// every assertion to the detail.
     #[test]
     fn no_topic_asserts_a_state_so_a_failing_line_cannot_contradict_its_own_marker() {
-        // ` on ` and `elsewhere` were added after `key on another machine` and `signed refs
-        // elsewhere` both printed a topic the detail beside them then denied, and none of the
-        // earlier claims caught either.
+        // ` on ` and `elsewhere` catch topics such as `key on another machine`, which a detail
+        // beside it can deny
         const CLAIMS: [&str; 9] = [
             "exists",
             " is ",
@@ -1553,8 +1452,8 @@ mod tests {
             tally(2, 2, 1, 2, 2).summary(),
             "2 pass, 2 worth improving, 1 failing, 2 could not be checked, 2 skipped"
         );
-        // "6 of 7 checks pass" reads as one failure when there is none: a check nobody could
-        // run is not a check that went wrong.
+        // "6 of 7 checks pass" reads as one failure, and a check nobody could run did not go
+        // wrong
         assert_eq!(
             tally(6, 0, 0, 1, 0).summary(),
             "6 pass, 1 could not be checked"
@@ -1572,8 +1471,8 @@ mod tests {
         let secret = SecretKey::read(&path).expect("key is readable");
         let check = check_key_protection(&secret, &path);
         assert_eq!(check.verdict, Verdict::Fail);
-        // The path this home actually uses, not `$RAD_HOME`, which is unset for everyone who
-        // never set it and left the one line that fixes this un-runnable as printed.
+        // The remedy names this home's key path, because `$RAD_HOME` is unset for most users
+        // and would leave the command un-runnable as printed
         let remedy = check.remedy.clone().expect("a failing key names its fix");
         assert!(remedy.contains(&path.display().to_string()), "{remedy}");
         assert!(!remedy.contains("RAD_HOME"), "{remedy}");
@@ -1585,7 +1484,7 @@ mod tests {
         let check = recorded_freshness(&state::Stored::Absent, now);
         assert_eq!(check.verdict, Verdict::Fail);
         // The remedy names where it looked, because "rad backup" alone sends the next archive
-        // wherever the default points, which is where this run already found nothing.
+        // wherever the default points, which is where this run already found nothing
         let remedy = check.remedy.expect("a failing backup names its fix");
         assert!(remedy.starts_with("rad backup --output "), "{remedy}");
     }
@@ -1603,10 +1502,8 @@ mod tests {
         );
     }
 
-    /// The bug this half fixes: `doctor` read the state file only, so a machine whose nightly
-    /// timer runs as another user, or whose home came back through `restore.sh`, was told "no
-    /// archive has ever been taken for this identity" while its archives sat in the directory
-    /// the same command had just been pointed at.
+    /// A timer running as another user, or a home restored by `restore.sh`, leaves no state
+    /// record beside archives that are there.
     #[test]
     fn an_archive_on_disk_answers_even_when_this_tool_has_no_record_of_taking_one() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
@@ -1615,9 +1512,8 @@ mod tests {
         assert!(check.detail.contains(".tar.zst"), "{}", check.detail);
     }
 
-    /// The other half: a record fresh enough to pass, over a directory where the file it names
-    /// is gone. It may have been carried off somewhere safe, so this is not a failure, but a
-    /// clean pass would say the archive is at hand and it is not.
+    /// A fresh record whose file is gone may mean the archive was carried off somewhere safe,
+    /// so the check warns. A clean pass would say the archive is at hand.
     #[test]
     fn a_recorded_backup_whose_archive_is_not_there_warns_rather_than_passing() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
@@ -1646,11 +1542,9 @@ mod tests {
         assert!(check.remedy.is_some());
     }
 
-    /// A same-disk archive may still be replicated. A directory a cloud client watches shares
-    /// a filesystem with nothing that copies it locally, and is carried off the machine all
-    /// the same. Only the person running this knows, so the check reports the fact and leaves
-    /// the verdict short of a failure. Exiting 3 at somebody who is covered trains them to
-    /// ignore the 3.
+    /// A directory a cloud client watches shares the home's filesystem and still leaves the
+    /// machine. Only the user knows, so the check warns, because an exit 3 at someone covered
+    /// teaches them to ignore it.
     #[test]
     fn an_archive_on_the_same_filesystem_warns_rather_than_fails_because_it_may_still_be_synced() {
         let dir = std::env::temp_dir().join(format!("rad-backup-locality-{}", std::process::id()));
@@ -1670,11 +1564,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// A real archive on disk, sealed as asked, plus the record a directory scan makes of it.
+    /// Writes a real archive sealed as asked, and returns the record a directory scan makes.
     ///
-    /// Every one of these checks reads the file now, so a fixture that is only a
-    /// `state::Record` would test the reading of a claim rather than the reading of an
-    /// archive.
+    /// The checks read the file, so a fixture made only of a `state::Record` tests a claim.
     fn archive_at(
         dir: &std::path::Path,
         name: &str,
@@ -1687,8 +1579,8 @@ mod tests {
         let file = std::fs::File::create(&path).expect("scratch archive is creatable");
         let mut sink =
             crate::crypt::Sink::new(Box::new(file), encryption).expect("sink is buildable");
-        // Empty, but genuinely zstd: opening an archive builds the decoder, and a body of
-        // rubbish would fail there for a reason that has nothing to do with the key.
+        // The body is empty zstd, because opening an archive builds the decoder, and a junk
+        // body would fail there for a reason unrelated to the key
         let body = zstd::encode_all(std::io::empty(), 0).expect("zstd encodes nothing");
         sink.write_all(&body).expect("body is writable");
         sink.finish().expect("sink finishes");
@@ -1701,9 +1593,7 @@ mod tests {
         }
     }
 
-    /// The bug: `rad backup --plaintext` into a directory whose state record remembers an
-    /// encrypted run was reported as encrypted, because the check read the record. The record
-    /// describes a run; the archive is the thing anyone would steal.
+    /// The record describes a run, and the archive is the thing anyone would steal.
     #[test]
     fn a_plaintext_archive_fails_even_when_the_record_remembers_an_encrypted_one() {
         let dir = std::env::temp_dir().join(format!("rad-backup-crypt-{}", std::process::id()));
@@ -1719,10 +1609,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The freshness check said "is not there now" straight off the record, without looking.
-    /// `rad backup --output /backups/mine.tar.zst.age` writes a name the listing does not
-    /// recognise (it wants the short node id in it), so a report called an archive gone while
-    /// it sat on the disk, and `archive location` in the same report said it was there.
+    /// The listing wants the short node id in a name, so `--output /backups/mine.tar.zst.age`
+    /// writes an archive that is there and still unlisted.
     #[test]
     fn an_archive_the_listing_does_not_recognise_is_not_reported_as_gone() {
         let scratch = TestScratch::create("doctor-unlisted-archive");
@@ -1747,8 +1635,7 @@ mod tests {
         ));
         let archive = archive_at(&dir, "sealed.tar.zst.age", &sealed);
 
-        // No passphrase is given and none is read from anywhere: a health report that stops to
-        // prompt is one nobody schedules.
+        // No passphrase is given or read, because nobody schedules a report that prompts
         let check = check_archive_encryption(&Default::default(), Some(&archive), None)
             .expect("the header is readable");
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
@@ -1764,8 +1651,8 @@ mod tests {
         let keyed = crate::crypt::Encryption::Recipients(vec![identity.to_public().to_string()]);
         let archive = archive_at(&dir, "keyed.tar.zst.age", &keyed);
 
-        // Nothing was offered, so nothing was tried. Calling that a pass is how an archive
-        // whose key had been lost went on being reported as a working backup.
+        // With no key offered nothing is tried, and a pass would vouch for an archive whose
+        // key may be lost
         let blind = check_archive_encryption(&Default::default(), Some(&archive), None)
             .expect("the header is readable");
         assert_eq!(blind.verdict, Verdict::Unknown, "{}", blind.detail);
@@ -1803,10 +1690,8 @@ mod tests {
         assert_eq!(wrong.verdict, Verdict::Fail, "{}", wrong.detail);
     }
 
-    /// The bug: an ssh key with a passphrase on it is the shape the README shows,
-    /// and `doctor` reported the archive it opens as a failure every night, because "the key
-    /// never came unlocked" was read as "the key does not open this". On a terminal it did
-    /// worse and stopped to ask for the passphrase.
+    /// An ssh key with a passphrase is the README's setup. A key that never came unlocked says
+    /// nothing about the archive, and `doctor` must not prompt for it.
     #[test]
     fn a_key_that_stayed_locked_is_a_question_doctor_could_not_put_rather_than_a_failure() {
         let scratch = TestScratch::create("doctor-locked");
@@ -1827,10 +1712,8 @@ mod tests {
                 .as_str(),
         );
 
-        // Interactive on purpose, which is how `doctor` is usually called. What this asserts
-        // is the verdict; that the check hands age a non-interactive copy of the identities
-        // is visible in `check_archive_encryption` and cannot be shown from here, because a
-        // test run has no terminal for the prompt to reach either way.
+        // Interactive, as `doctor` usually runs. The test asserts the verdict, because a test
+        // run has no terminal for a prompt to reach either way.
         let locked = check_archive_encryption(
             &crate::crypt::Identities {
                 files: vec![key_file.clone()],
@@ -1848,7 +1731,7 @@ mod tests {
             "an unknown with no way out is a nag"
         );
 
-        // The same key, unlocked by a passphrase file, opens it.
+        // The same key, unlocked by a passphrase file, opens it
         let passphrase_file = dir.join("passphrase");
         secret_file(&passphrase_file, passphrase.as_str());
         let opened = check_archive_encryption(
@@ -1917,8 +1800,8 @@ mod tests {
             public_repo_signed_at("rad:zAAA", "aaa"),
             public_repo_signed_at("rad:zBBB", "bbb"),
         ]);
-        // Somebody else has zAAA's current head. Nobody has zBBB's: it was committed and
-        // signed here and has reached nothing, which no file copy of the home can tell you.
+        // Another node has zAAA's current head. No node has zBBB's, which was signed here and
+        // reached nothing, and no file copy of the home can show that.
         let synced = BTreeMap::from([
             ("rad:zAAA".to_string(), BTreeSet::from(["aaa".to_string()])),
             (
@@ -1934,10 +1817,8 @@ mod tests {
         assert!(!check.detail.contains("rad:zAAA"), "{}", check.detail);
     }
 
-    /// One commit in two spellings is one commit. `git` prints an oid in whichever case it was
-    /// handed and heartwood stores whatever the announcing node sent, so compared with `==` a
-    /// home whose work had reached every seed was told to announce it again and to keep an
-    /// archive until it had propagated.
+    /// `git` prints an oid in whichever case it was handed, and heartwood stores whatever the
+    /// announcing node sent, so heads compare without regard to case.
     #[test]
     fn a_head_another_node_holds_in_the_other_case_is_the_same_head() {
         let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "abcdef01")]);
@@ -1953,8 +1834,8 @@ mod tests {
 
     #[test]
     fn a_private_repository_is_not_counted_as_work_that_failed_to_propagate() {
-        // Private repositories are announced to nobody on purpose. Counting them here would
-        // report the feature working as a fault, on every run, for everyone who has one.
+        // Private repositories are announced to nobody, so counting them would report the
+        // feature working as a fault
         let mut private = public_repo_signed_at("rad:zPriv", "aaa");
         private.visibility = Some("private".to_string());
         let synced =
@@ -1983,10 +1864,8 @@ mod tests {
         assert!(remedy.contains("rad node start"), "{remedy}");
     }
 
-    /// An empty table has two causes, and only one of them is answered by starting a node. A
-    /// reader whose node is running fine against a schema this build cannot read was being
-    /// sent to start it again, which does nothing and makes the report look wrong about
-    /// everything.
+    /// An empty table has two causes, and starting a node answers only one. A node running
+    /// against a schema this build cannot read must not be told to start.
     #[test]
     fn a_table_this_build_cannot_read_is_not_answered_by_starting_the_node() {
         let inventory = holding(vec![public_repo_signed_at("rad:zAAA", "aaa")]);
@@ -2027,9 +1906,8 @@ mod tests {
             check.detail
         );
 
-        // The same record, except that the run which took the archive could not reach the
-        // control socket and wrote the cautious answer. Repeating that as a sighting tells
-        // somebody their identity is being double-signed when nothing established it.
+        // The same record, from a run that could not reach the control socket and wrote the
+        // cautious answer, which the warning must not repeat as a sighting
         record.restored = Some(state::Restored {
             source_retires_key: Some(false),
             source_node_was_running: true,
@@ -2060,8 +1938,8 @@ mod tests {
 
     #[test]
     fn an_archive_too_old_to_say_whether_it_retired_its_source_is_unknown_not_a_pass() {
-        // The dangerous shape: silence read as safety. An archive written before the manifest
-        // carried the answer cannot vouch for the machine it came from.
+        // An archive written before the manifest carried the answer cannot vouch for the
+        // machine it came from, so its silence is no pass
         let mut record = record();
         record.restored = Some(state::Restored {
             source_retires_key: None,
@@ -2080,10 +1958,8 @@ mod tests {
         assert_eq!(check_second_key_copy(&stored).verdict, Verdict::Pass);
     }
 
-    /// The bug: `sudo rad-backup restore` writes its record into root's state directory, and
-    /// `restore.sh` writes none at all. Both leave the user's own `doctor` with nothing to
-    /// read, and reading nothing as "never restored" put a green line on the one hazard this
-    /// tool exists for, at the two people most likely to be standing in it.
+    /// `sudo rad-backup restore` writes its record into root's state directory, and
+    /// `restore.sh` writes none, so the user's own `doctor` has nothing to read.
     #[test]
     fn a_home_with_no_record_of_its_own_origin_is_unknown_rather_than_never_restored() {
         for stored in [
@@ -2100,11 +1976,7 @@ mod tests {
     }
 
     /// The coverage answer comes off the state record, which is hearsay about a file this run
-    /// may never have seen: the timer may run as another user, and the archive it names may
-    /// have been pruned or moved. Every other check moved onto the file on disk for that
-    /// reason, and this one could not, so it has to say whose word it is taking. It used to
-    /// print "all 2 of them are in the newest archive" as a Pass in the same report whose
-    /// freshness line said that archive was not there.
+    /// may never have seen, so the check says whose word it is taking.
     #[test]
     fn coverage_taken_off_the_record_is_not_a_pass_about_the_archive_that_is_here() {
         let mut private = public_repo_signed_at("rad:zAAA", "aaa");
@@ -2124,7 +1996,7 @@ mod tests {
         let check = check_private_coverage(&inventory, Some(&record), Some(&found), false);
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
 
-        // The same record beside a different archive, and beside none at all.
+        // The same record beside a different archive, and beside none at all
         let other = crate::archives::Archive {
             path: std::path::PathBuf::from("/backups/another.tar.zst.age"),
             ..found
@@ -2140,10 +2012,8 @@ mod tests {
         }
     }
 
-    /// "On no other node" is half an answer from the routing table, so a routing table that
-    /// would not open must not earn a Fail. `doctor` reads that file tolerantly now, and an
-    /// empty map from a file nobody opened looks exactly like a repository nothing announces:
-    /// the strongest finding this report makes, off a read that never happened.
+    /// "On no other node" is half an answer from the routing table, so a table that would not
+    /// open must not earn a Fail.
     #[test]
     fn a_routing_table_that_would_not_open_is_not_evidence_that_nobody_else_holds_it() {
         let mut private = public_repo_signed_at("rad:zAAA", "aaa");
@@ -2151,7 +2021,7 @@ mod tests {
         private.other_seeds = None;
         let inventory = holding(vec![private]);
 
-        // Not in any archive, and nothing to say who else has it.
+        // Not in any archive, and nothing to say who else has it
         let check = check_private_coverage(&inventory, None, None, true);
         assert_eq!(check.verdict, Verdict::Unknown, "{}", check.detail);
         assert!(
@@ -2160,7 +2030,7 @@ mod tests {
             check.detail
         );
 
-        // The same inventory with the table read and genuinely empty is still a finding.
+        // The same inventory with the table read and genuinely empty is still a finding
         let check = check_private_coverage(&inventory, None, None, false);
         assert_eq!(check.verdict, Verdict::Fail, "{}", check.detail);
     }

@@ -1,15 +1,4 @@
-//! The archive container: a tar of plain files, compressed with zstd, then encrypted with age.
-//!
-//! Named for the container rather than for archives, because `archives.rs` beside it is a
-//! different subject: what this identity's archives are called and where they are found.
-//!
-//! Layers are ordinary formats in an ordinary order, because somebody with no copy of this
-//! tool, five years from now, has to be able to recover an identity with `age`, `zstd`, `tar`
-//! and `git` alone. The instructions for doing that ride inside the archive.
-//!
-//! The manifest is written last, because it carries the digest of every entry as that entry
-//! was written. A manifest written first could only carry digests of what was on disk before
-//! the copy, which is a claim about the wrong bytes.
+//! The archive container, a tar of plain files compressed with zstd and encrypted with age.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -22,22 +11,20 @@ use crate::crypt::{self, Encryption, Sink};
 use crate::error::{Error, Result};
 use crate::manifest::{Entry, MANIFEST_ENTRY, Manifest};
 
-/// zstd level 10 costs a little more time than the default 3 and gives a meaningfully smaller
-/// archive on the text-heavy contents of a Radicle home. Levels above ~15 stop paying.
+/// The zstd level, a little slower than the default 3 and meaningfully smaller on the text in
+/// a Radicle home. Levels above about 15 stop paying.
 const COMPRESSION_LEVEL: i32 = 10;
 
-/// A ceiling on the manifest, checked before a byte of it is allocated.
+/// The largest manifest a reader accepts, checked from the tar header before allocating.
 ///
-/// `read_to_string` grows to whatever the tar header declares, so an archive whose manifest
-/// header claims 8 GiB costs 8 GiB of memory to reject. The real thing is a few hundred bytes
-/// of JSON per entry and about a kilobyte per repository, so a home would need thousands of
-/// repositories to come near this.
+/// `read_to_string` grows to the declared size, so a header claiming 8 GiB would cost 8 GiB.
+/// A real manifest takes about a kilobyte per repository, so thousands fit.
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
-/// A ceiling on any single entry, likewise checked from the header before copying.
+/// The largest entry a reader accepts, checked from the tar header before copying.
 ///
-/// Generous on purpose: the largest thing this tool writes is one repository bundle, and the
-/// point is not to guess a real size but to refuse the absurd before it fills a disk.
+/// The ceiling sits far above any repository bundle and only refuses the absurd before it
+/// fills a disk.
 const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 
 pub use crate::perms::{MODE_DOC, MODE_SECRET};
@@ -57,7 +44,7 @@ impl<'a> Writer<'a> {
         })
     }
 
-    /// Add bytes already in memory: manifests, JSON exports, the restore instructions.
+    /// Adds an in-memory entry, such as a JSON export or the restore instructions.
     pub fn add_bytes(&mut self, path: &str, bytes: &[u8], mode: u32) -> Result<()> {
         reject_unwritable_name(path)?;
         let mut header = entry_header(bytes.len() as u64, mode);
@@ -72,14 +59,10 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    /// Add a file from disk, hashing it in the same pass that copies it.
+    /// Adds a file from disk, hashing it in the same pass that copies it.
     ///
-    /// The tar header needs the size before the content, so a file that changes length while
-    /// it is being read produces a corrupt entry. Most of what this tool archives is a
-    /// snapshot it just took, but some of it is read live out of the home, so the two are
-    /// compared afterwards rather than assumed equal: a `config.json` rewritten mid-run would
-    /// otherwise be padded or truncated to fit a header that no longer describes it, and the
-    /// archive would be reported as written.
+    /// The tar header carries the size before the content, and some files are read live from
+    /// the home. A file whose length changes mid-copy fails the run.
     pub fn add_file(&mut self, path: &str, source: &Path, mode: u32) -> Result<Entry> {
         reject_unwritable_name(path)?;
         let file = std::fs::File::open(source).map_err(|e| Error::io(source, e))?;
@@ -114,17 +97,17 @@ impl<'a> Writer<'a> {
         Ok(entry)
     }
 
-    /// Write the manifest and close every layer. The archive is only readable once this
-    /// returns, because the encryption layer writes its final chunk here.
+    /// Writes the manifest and closes every layer.
+    ///
+    /// The manifest comes last, because it carries each entry's digest as written. The archive
+    /// is readable only once this returns, because the encryption layer writes its last chunk.
     pub fn finish(mut self, manifest: &mut Manifest) -> Result<()> {
         manifest.entries = std::mem::take(&mut self.entries);
         manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
 
         let json = serde_json::to_vec_pretty(manifest)?;
-        // The same ceiling the reader enforces, checked here so the tool cannot write an
-        // archive it would then refuse to open. A home would need thousands of repositories to
-        // reach it; if one ever does, this says so at the moment the archive is written rather
-        // than at the moment somebody needs it back.
+        // The writer enforces the reader's ceiling, so this tool never writes an archive it
+        // would refuse to open
         if json.len() as u64 > MAX_MANIFEST_BYTES {
             return Err(Error::Refused {
                 what: format!(
@@ -150,16 +133,16 @@ impl<'a> Writer<'a> {
     }
 }
 
-/// What a pass over an archive observed, for checking against what the manifest claims.
+/// What a pass over an archive observed, for checking against the manifest's claims.
 pub struct Scan {
     pub manifest: Manifest,
-    /// Path to (bytes, sha256) as actually read out of the archive.
+    /// Each entry's byte count and sha256 as read out of the archive.
     pub observed: BTreeMap<String, (u64, String)>,
 }
 
 impl Scan {
-    /// Entries whose bytes do not match the manifest, plus entries the manifest lists that the
-    /// archive does not contain. Both are corruption; naming which is which saves a bisect.
+    /// Describes each entry that differs from the manifest's record, is missing, or is
+    /// unlisted.
     pub fn mismatches(&self) -> Vec<String> {
         let mut problems = Vec::new();
         for entry in &self.manifest.entries {
@@ -199,8 +182,8 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    /// Open an archive, decrypting it when it is encrypted. Detection reads the age header
-    /// rather than trusting the file name, so a renamed archive still opens.
+    /// Opens an archive, decrypting it when it begins with an age header, so a renamed archive
+    /// still opens.
     pub fn open(
         path: &Path,
         passphrase: Option<&Zeroizing<String>>,
@@ -221,7 +204,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Read the whole archive without writing anything, hashing as it goes.
+    /// Reads the whole archive without writing anything, hashing as it goes.
     pub fn scan(self, archive_path: &Path) -> Result<Scan> {
         self.walk(archive_path, |_, reader| {
             io::copy(reader, &mut io::sink()).map_err(Error::PathlessIo)?;
@@ -229,10 +212,10 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Read the whole archive, writing each entry under `into`.
+    /// Reads the whole archive, writing each entry under `into`.
     ///
-    /// Entries land in a staging directory rather than in the home being restored, so that a
-    /// truncated or corrupt archive cannot leave a half-built identity behind.
+    /// `into` must be a staging directory and never the home, so a truncated or corrupt
+    /// archive cannot leave a half-built identity behind.
     pub fn unpack(self, archive_path: &Path, into: &Path) -> Result<Scan> {
         std::fs::create_dir_all(into).map_err(|e| Error::io(into, e))?;
         self.walk(archive_path, |entry_path, reader| {
@@ -258,10 +241,8 @@ impl<'a> Reader<'a> {
         for entry in self.archive.entries().map_err(Error::PathlessIo)? {
             let mut entry = entry.map_err(Error::PathlessIo)?;
             let entry_name_os = entry.path().map_err(Error::PathlessIo)?.into_owned();
-            // Refused rather than lossily converted: two names differing only outside UTF-8
-            // both become the same string of replacement characters, so one file would
-            // silently overwrite the other and the digest check would still pass. The format
-            // says entry names are ASCII paths this tool wrote, so there is nothing to lose.
+            // A lossy conversion maps two non-UTF-8 names to one string, and one file then
+            // silently overwrites the other. Entry names this tool writes are ASCII.
             let entry_path = entry_name_os
                 .to_str()
                 .ok_or_else(|| Error::NotAnArchive {
@@ -274,10 +255,8 @@ impl<'a> Reader<'a> {
                 .to_string();
             reject_traversal(&entry_path, archive_path)?;
 
-            // `entry.size()`, not `header().size()`: a PAX header can override the ustar
-            // size field, and the override is what bounds the reader. Reading the ustar field
-            // instead, the ceilings below saw a declared 1 while the entry handed out
-            // gigabytes.
+            // `entry.size()` honours a PAX size override, which is what bounds the reader. The
+            // ustar field can declare 1 while the entry hands out gigabytes.
             let declared = entry.size();
 
             if entry_path == MANIFEST_ENTRY {
@@ -292,9 +271,7 @@ impl<'a> Reader<'a> {
                 }
                 let mut json = String::new();
                 entry.read_to_string(&mut json).map_err(Error::PathlessIo)?;
-                // Named, because serde alone says "expected value at line 1 column 1" and
-                // nothing else, and the file somebody is holding is the whole question when
-                // an archive will not open.
+                // The error names the archive, because serde alone names no file
                 manifest = Some(serde_json::from_str::<Manifest>(&json).map_err(|e| {
                     Error::NotAnArchive {
                         path: archive_path.to_path_buf(),
@@ -341,10 +318,9 @@ fn entry_header(size: u64, mode: u32) -> tar::Header {
     header.set_size(size);
     header.set_mode(mode);
     header.set_entry_type(tar::EntryType::Regular);
-    // Fixed ownership and timestamp keep an entry's bytes independent of who wrote it and
-    // when, so an unchanged repository lands identically in two archives and restic and borg
-    // can deduplicate it. The archive as a whole still differs run to run: the manifest
-    // carries the clock, and age adds a fresh salt.
+    // Fixed ownership and timestamp make an unchanged repository's entry identical across
+    // archives, so restic and borg can deduplicate it. The manifest's clock and age's salt
+    // still make each whole archive differ.
     header.set_uid(0);
     header.set_gid(0);
     header.set_mtime(0);
@@ -352,13 +328,10 @@ fn entry_header(size: u64, mode: u32) -> tar::Header {
     header
 }
 
-/// Refuse to WRITE an entry under a name the tar cannot carry unchanged.
+/// Refuses to write an entry under a name the tar cannot carry unchanged.
 ///
-/// The manifest records the name it was given, tar records the name it stored, and verify
-/// compares the two. A name built with the platform separator made those disagree on Windows:
-/// the manifest said `repos\x.bundle`, the tar said `repos/x.bundle`, and every archive taken
-/// there failed its own verification. Refusing here rather than at read time puts the error on
-/// the caller that got the name wrong, before an unverifiable archive exists.
+/// Verify compares the name the manifest recorded with the name tar stored. A name with a
+/// Windows separator makes those disagree, and the archive fails its own verification.
 fn reject_unwritable_name(path: &str) -> Result<()> {
     if !is_portable_entry_name(path) {
         return Err(Error::Refused {
@@ -372,11 +345,10 @@ fn reject_unwritable_name(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Refuse an entry that would write outside the directory it is being unpacked into.
+/// Refuses an entry that would be written outside the directory it is unpacked into.
 ///
-/// Archives are usually one's own, but "usually" is not a security property: a restore runs
-/// with the user's full rights, and an entry called `../../.ssh/authorized_keys` would use
-/// them.
+/// A restore runs with the user's full rights, and an entry named
+/// `../../.ssh/authorized_keys` would use them.
 fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
     if !is_portable_entry_name(entry_path) {
         return Err(Error::NotAnArchive {
@@ -389,14 +361,11 @@ fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Is this a name a tar entry may carry: relative, `/`-separated, staying under its root?
+/// Whether `entry_path` is a relative, `/`-separated name that stays under its root.
 ///
-/// Judged on the name itself, never on what the running platform makes of it. A tar entry name
-/// separates with `/` and nothing else, so a backslash or a `C:` is never a name this tool
-/// wrote, and every one of those shapes makes `Path::join` throw the destination away
-/// somewhere: `/etc/passwd` is not `is_absolute()` on Windows, yet it still lands at the root
-/// of the current drive. A name refused on one platform is refused on all of them, the only
-/// answer a format meant to be read anywhere can give.
+/// The name is judged as written, the same on every platform. A backslash or a `C:` is never a
+/// name this tool writes, and on Windows `/etc/passwd` is not `is_absolute()` yet lands at the
+/// drive root.
 fn is_portable_entry_name(entry_path: &str) -> bool {
     let bytes = entry_path.as_bytes();
     let drive_qualified = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
@@ -410,13 +379,10 @@ fn is_portable_entry_name(entry_path: &str) -> bool {
         })
 }
 
-/// Refuse a repository id that would not stay a single directory under `storage/`.
+/// Refuses a repository id that would not stay a single directory under `storage/`.
 ///
-/// `reject_traversal` checks entry names, but the ids in the manifest are a second, separate
-/// source of paths: `Home::repository_path` joins one onto the home, and `Path::join` with an
-/// absolute component throws the base away. An id of `rad:../../x` got `git init --bare` run
-/// on it outside the home. A real id is `rad:` and base58, so anything else is refused here,
-/// once, rather than at each of restore, verify and sync.
+/// `Home::repository_path` joins each manifest id onto the home, and `Path::join` drops the
+/// base for an absolute component. A real id is `rad:` followed by base58.
 fn reject_hostile_rid(rid: &str, archive: &Path) -> Result<()> {
     if !crate::rad::is_identifier(rid) {
         return Err(Error::NotAnArchive {
@@ -427,7 +393,7 @@ fn reject_hostile_rid(rid: &str, archive: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A reader that digests what passes through it, so hashing costs no extra pass over the data.
+/// A reader that digests what passes through it, so hashing costs no extra pass.
 struct HashingReader<R> {
     inner: R,
     hasher: Sha256,
@@ -571,8 +537,7 @@ mod tests {
         let path = dir.join("archive.tar.zst");
         write_archive(&path, &Encryption::Plaintext);
 
-        // Rewrite the manifest's claim about one entry, which is what a corrupted archive
-        // looks like from the reader's side.
+        // A manifest with one entry's claim rewritten is what a corrupted archive looks like
         let scan = Reader::open(&path, None, &crypt::Identities::default())
             .expect("archive opens")
             .scan(&path)
@@ -615,7 +580,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Build an archive by hand, so that entry types our own writer never emits can be tested.
+    /// Builds an archive by hand, to test entry types the writer never emits.
     fn write_hostile_archive(path: &Path, entry: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
         let mut builder = tar::Builder::new(Vec::new());
         entry(&mut builder);
@@ -660,8 +625,7 @@ mod tests {
             Err(e) => e,
         };
 
-        // It used to surface as serde's own "expected value at line 1 column 1", which names
-        // no file at all. The archive somebody is holding is the whole question here.
+        // The error must name the archive, because serde's own message names no file
         let said = failed.to_string();
         assert!(said.contains("archive.tar.zst"), "{said}");
 
@@ -674,9 +638,8 @@ mod tests {
         assert!(reject_hostile_rid("rad:z3gqcJUoA1n9HaHKufZs5FCSGazv5", archive).is_ok());
         assert!(reject_hostile_rid("z3gqcJUoA1n9HaHKufZs5FCSGazv5", archive).is_ok());
 
-        // `Home::repository_path` joins the id onto the home, and `Path::join` throws the base
-        // away for an absolute component. Every one of these is a write somewhere the person
-        // restoring did not name.
+        // `Path::join` drops the base for an absolute component, so each of these would
+        // write outside the home
         assert!(reject_hostile_rid("rad:../../../.ssh", archive).is_err());
         assert!(reject_hostile_rid("..", archive).is_err());
         assert!(reject_hostile_rid("/etc/cron.d", archive).is_err());
@@ -691,9 +654,8 @@ mod tests {
         let dir = scratch_dir("hostile-rid");
         let path = dir.join("archive.tar.zst");
 
-        // Hand-built, because this tool will not write one: the id goes into the JSON the way
-        // a hostile writer would put it there, and the refusal has to happen on the reading
-        // side or not at all.
+        // The archive is built by hand, because this tool never writes such an id, so the
+        // refusal must happen on read
         let mut json = serde_json::to_value(manifest()).expect("a manifest serialises");
         json["repos"] = serde_json::json!([{
             "rid": "rad:../../../../tmp/pwned",
@@ -713,9 +675,8 @@ mod tests {
         encoder.write_all(&tar).expect("the tar compresses");
         encoder.finish().expect("the encoder closes");
 
-        // Refused by `scan`, which is what every verb calls before it writes anything:
-        // `reject_traversal` covers entry names, and the manifest is the second, separate
-        // place an archive gets to state a path.
+        // `scan` runs before any verb writes, and the manifest is a second place, besides
+        // entry names, where an archive states a path
         let refused = Reader::open(&path, None, &crypt::Identities::default())
             .expect("the outer layers still open")
             .scan(&path);
@@ -776,9 +737,8 @@ mod tests {
         let dir = scratch_dir("climb");
         let path = dir.join("archive.tar.zst");
         write_hostile_archive(&path, |builder| {
-            // The tar crate refuses to write `..` through its own path API, which is exactly
-            // the archive a hostile writer would not use. The name goes into the header field
-            // directly, the way a handwritten tar would have it.
+            // The tar crate's path API refuses `..`, so the name goes straight into the
+            // header field, as a handwritten tar would have it
             let mut header = entry_header(6, MODE_SECRET);
             let name = b"../escaped";
             header.as_old_mut().name[..name.len()].copy_from_slice(name);
@@ -804,9 +764,8 @@ mod tests {
         assert!(reject_traversal("keys/radicle", archive).is_ok());
         assert!(reject_traversal("../../.ssh/authorized_keys", archive).is_err());
         assert!(reject_traversal("/etc/passwd", archive).is_err());
-        // Windows shapes, refused on every platform: the archive is the same file wherever it
-        // is opened, so the verdict on it has to be too. Each of these lands outside the
-        // destination on Windows, and the first two are not `is_absolute()` there.
+        // Windows shapes are refused on every platform, because the archive is the same file
+        // wherever it is opened. The first two are not `is_absolute()` on Windows.
         assert!(reject_traversal("C:/Windows/System32/drivers/etc/hosts", archive).is_err());
         assert!(reject_traversal("C:evil", archive).is_err());
         assert!(reject_traversal("\\\\server\\share\\evil", archive).is_err());
@@ -816,9 +775,8 @@ mod tests {
     #[test]
     fn an_entry_name_the_tar_would_rewrite_is_refused_at_write_time() {
         assert!(reject_unwritable_name("repos/z3gq.bundle").is_ok());
-        // What `PathBuf::from("repos").join(..)` produced on Windows. tar stored it with a `/`
-        // while the manifest kept the `\`, so verify reported the entry both missing and
-        // unlisted, and every archive taken on Windows failed its own check.
+        // `PathBuf::join` builds this on Windows, and tar stores it with `/` while the
+        // manifest keeps the backslash, so the archive fails its own verification
         assert!(reject_unwritable_name("repos\\z3gq.bundle").is_err());
         assert!(reject_unwritable_name("/etc/passwd").is_err());
         assert!(reject_unwritable_name("../escape").is_err());

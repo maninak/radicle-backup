@@ -1,8 +1,4 @@
 //! A printable recovery sheet.
-//!
-//! Paper outlives disks, formats and this program. The sheet carries the key twice, as a QR
-//! code for a scanner and as text a human can retype, plus enough plain English that whoever
-//! finds it in a drawer in ten years knows what they are holding.
 
 use std::io::IsTerminal;
 
@@ -60,17 +56,15 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
         ("the key file", caution, key)
     };
 
-    // The QR encodes the key, so the SVG carrying it is key material as much as the text is.
+    // The QR encodes the key, so its SVG is key material too
     let qr = qr_svg(&secret_text)?;
-    // Holds the key or its 24 words in the clear, as the QR does.
     let secret_html = if args.words {
         word_grid(&secret_text)
     } else {
         key_block(&secret_text)
     };
 
-    // `render` returns its buffer by move, so wrapping the result wipes the sheet itself
-    // rather than a copy of it.
+    // `render` returns its buffer by move, so this wrapper wipes the buffer holding the sheet
     let sheet = Zeroizing::new(render(Sheet {
         alias: ctx.home.read_alias()?.as_deref().unwrap_or("unnamed"),
         did: &identity.did(),
@@ -89,11 +83,9 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
             ctx.term
                 .hint("open it in a browser and print it. Then delete the file");
         }
-        // A terminal keeps thousands of lines of scrollback in its own memory, and some
-        // emulators log a session to disk, so a sheet printed to a TTY outlives the process
-        // that was careful to zeroize it. A pipe is different: `paper | wkhtmltopdf -` hands
-        // the bytes to one program and ends, so the refusal is about the terminal, not about
-        // the absence of `--output`.
+        // A terminal keeps scrollback in memory and may log a session to disk, so a sheet
+        // printed there outlives the zeroizing process. A pipe hands the bytes to one
+        // program and ends, so a pipe is allowed.
         None if std::io::stdout().is_terminal() => {
             return Err(Error::refused(
                 "the recovery sheet holds your key, so it is not printed to the terminal",
@@ -105,11 +97,11 @@ pub fn run(ctx: &Ctx, args: &Paper) -> Result<()> {
     Ok(())
 }
 
-/// Everything the sheet says, already computed. Split from `run` so that the escaping can be
-/// tested against the real template without a home to read it from.
+/// The values the sheet template is filled with.
 struct Sheet<'a> {
-    /// Raw, straight out of `config.json`. `render` escapes it and nothing else may, because
-    /// escaping twice prints `&amp;lt;` on the sheet where the alias should be.
+    /// The alias as `config.json` holds it, unescaped.
+    ///
+    /// `render` escapes this field, so escaping it beforehand prints `&amp;lt;` on the sheet.
     alias: &'a str,
     did: &'a str,
     fingerprint: &'a str,
@@ -120,16 +112,13 @@ struct Sheet<'a> {
     qr: &'a str,
 }
 
-/// Fill the template in.
-///
-/// The alias is escaped here because it is the one field that is neither derived from the key
-/// nor written by this program: it arrives in a `config.json`, which a restore copies verbatim
-/// out of somebody else's archive, and it lands in the `<title>` and a `<td>` of a page the
-/// user is told to open in a browser next to their private key.
+/// Fills the sheet template, HTML-escaping the alias.
 fn render(sheet: Sheet<'_>) -> String {
     fill(
         SHEET_TEMPLATE,
         &[
+            // The alias may come verbatim out of another person's archive, and it lands in a
+            // page the user opens in a browser next to their private key
             ("ALIAS", &escape(sheet.alias)),
             ("DID", sheet.did),
             ("FINGERPRINT", sheet.fingerprint),
@@ -143,8 +132,7 @@ fn render(sheet: Sheet<'_>) -> String {
     )
 }
 
-/// The 32-byte seed as a BIP-39 mnemonic: 24 words, checksummed, and readable after a bad
-/// photocopy in a way a QR code is not.
+/// Spells the seed as a checksummed 24-word BIP-39 mnemonic.
 fn mnemonic(seed: &Zeroizing<[u8; 32]>) -> Result<Zeroizing<String>> {
     let mnemonic = bip39::Mnemonic::from_entropy(seed.as_slice()).map_err(|e| {
         Error::refused(
@@ -158,15 +146,7 @@ fn mnemonic(seed: &Zeroizing<[u8; 32]>) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(mnemonic.to_string()))
 }
 
-/// The key as an SVG QR code. Returned `Zeroizing` because the SVG decodes back to the key.
-///
-/// Not everything on the way there is wiped. `QrCode::new` encodes the key into a `Vec<Color>`
-/// module matrix through its own intermediates (the data bits, the codewords, the canvas), and
-/// the SVG renderer grows its `String` with `write!`, so every reallocation on the way leaves
-/// a partial copy of the drawing behind. All of that is private to `qrcode`, `Color` is a
-/// foreign type that implements no `Zeroize`, and `unsafe` is forbidden here, so none of it
-/// can be wiped from this side. What this function owns, it wipes: the finished SVG is taken
-/// over by move and trimmed in place, so no copy of the whole drawing is dropped intact.
+/// Renders the key as an SVG QR code.
 fn qr_svg(text: &str) -> Result<Zeroizing<String>> {
     let code = QrCode::new(text.as_bytes()).map_err(|e| {
         Error::refused(
@@ -174,8 +154,9 @@ fn qr_svg(text: &str) -> Result<Zeroizing<String>> {
             "use --words to put the key on the sheet as 24 words",
         )
     })?;
-    // `build` returns the renderer's buffer by move, so wrapping it wipes the buffer that
-    // actually holds the bytes rather than a copy taken out of it.
+    // `qrcode` leaves unwiped intermediates and partial copies from each `String` growth,
+    // which no safe code here can reach. `build` returns the final buffer by move, so this
+    // wrapper wipes the buffer that holds the drawing.
     let mut rendered = Zeroizing::new(
         code.render::<svg::Color>()
             .min_dimensions(320, 320)
@@ -184,17 +165,15 @@ fn qr_svg(text: &str) -> Result<Zeroizing<String>> {
             .light_color(svg::Color("#ffffff"))
             .build(),
     );
-    // The renderer emits an XML prolog, which is fine in a .svg file and wrong inside an HTML
-    // document, where it renders as visible text. The sheet is HTML, so it goes. Drained
-    // rather than sliced and copied, because the copy would leave the original to drop
-    // unwiped.
+    // An XML prolog renders as visible text inside HTML. Draining it in place leaves no
+    // unwiped copy of the drawing to drop.
     if let Some(start) = rendered.find("<svg") {
         rendered.drain(..start);
     }
     Ok(rendered)
 }
 
-/// The key file as preformatted text, escaped, in a buffer that wipes itself.
+/// Wraps the key file, HTML-escaped, in a `<pre>` block.
 fn key_block(key: &str) -> Zeroizing<String> {
     const OPEN: &str = "<pre class=\"key\">";
     const CLOSE: &str = "</pre>";
@@ -207,11 +186,10 @@ fn key_block(key: &str) -> Zeroizing<String> {
     html
 }
 
-/// Numbered words, so a person reading them aloud and a person writing them down stay in step.
-///
-/// Built in one buffer that wipes itself, because those words are the key: a `format!` per
-/// word would drop 24 small plaintext copies of it on the way.
+/// Lays out the words as a numbered HTML list.
 fn word_grid(mnemonic: &str) -> Zeroizing<String> {
+    // The words are the key, so they go into one buffer sized up front. A `format!` per word
+    // would drop 24 plaintext pieces of the key.
     const OPEN: &str = "<ol class=\"words\">";
     const CLOSE: &str = "</ol>";
     const ITEM_OPEN: &str = "<li>";
@@ -233,19 +211,19 @@ fn word_grid(mnemonic: &str) -> Zeroizing<String> {
     html
 }
 
-/// HTML-escape `text` into a buffer that wipes itself.
-///
-/// Sized exactly and filled in one pass rather than chained through `replace`, because each
-/// `replace` allocates a whole fresh copy that is then dropped intact, and this function is
-/// called on the key.
+/// HTML-escapes `text`.
 fn escape(text: &str) -> Zeroizing<String> {
+    // The buffer is sized once and filled in one pass, because each `replace` call would drop
+    // a whole unwiped copy of the key
     let mut escaped = Zeroizing::new(String::with_capacity(escaped_len(text)));
     escape_into(&mut escaped, text);
     escaped
 }
 
-/// Append `text` to `out`, HTML-escaped. `out` must already have room for `escaped_len(text)`
-/// more bytes, because a `String` that grows drops its old buffer unwiped whatever wraps it.
+/// Appends `text` to `out`, HTML-escaped.
+///
+/// `out` must already have room for `escaped_len(text)` more bytes, because a `String` that
+/// grows drops its old buffer unwiped whatever wraps it.
 fn escape_into(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
@@ -257,7 +235,7 @@ fn escape_into(out: &mut String, text: &str) {
     }
 }
 
-/// How long `escape_into(_, text)` will be, so that its buffer can be allocated once.
+/// The byte length of `text` once HTML-escaped.
 fn escaped_len(text: &str) -> usize {
     text.chars()
         .map(|c| match c {
@@ -293,8 +271,6 @@ mod tests {
     #[test]
     fn markup_in_an_alias_or_a_key_cannot_break_out_of_the_sheet() {
         assert_eq!(escape("<script>&").as_str(), "&lt;script&gt;&amp;");
-        // The same answer the `replace` chain it replaced gave, on every awkward shape at
-        // once.
         let text = "<&>&&<<>> plain & <x> \"q\" 'a' é\n";
         let reference = text
             .replace('&', "&amp;")
@@ -324,8 +300,7 @@ mod tests {
 
     #[test]
     fn every_buffer_that_carries_the_key_wipes_itself() {
-        // Type-level: each of these hands back `Zeroizing`, so none can drop a plain copy of
-        // its own result. A return type of `String` fails to compile here.
+        // The bindings check each return type, so a builder returning `String` fails to build
         let seed = Zeroizing::new([7u8; 32]);
         let key = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
         let _: Zeroizing<String> = escape(&key);
@@ -336,9 +311,8 @@ mod tests {
 
     #[test]
     fn the_key_is_escaped_in_one_exactly_sized_allocation() {
-        // A `String` that outgrows its capacity frees its old buffer unwiped, whatever wraps
-        // it, so the buffer must be sized right before the first byte lands. Capacity equal
-        // to length is the trace of that: a buffer that grew would carry the slack.
+        // A `String` that outgrows its capacity frees its old buffer unwiped. Capacity equal
+        // to length shows the buffer never grew.
         let seed = Zeroizing::new([7u8; 32]);
         let key = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
         let words = mnemonic(&seed).expect("a seed converts");
@@ -357,7 +331,7 @@ mod tests {
         let seed = Zeroizing::new([7u8; 32]);
         let key = crate::key::openssh_from_seed(&seed, None).expect("key is buildable");
         let svg = qr_svg(&key).expect("a key file fits");
-        // The sheet embeds this inline in HTML, where an XML prolog would render as text.
+        // The sheet embeds this inline in HTML, where an XML prolog would render as text
         assert!(svg.starts_with("<svg"), "{}", &svg[..svg.len().min(120)]);
         assert!(!svg.contains("<?xml"));
     }

@@ -1,7 +1,5 @@
-//! One error type for the whole tool, and the exit codes it maps to.
-//!
-//! Exit codes are part of the interface: cron jobs and CI steps branch on them, so they are
-//! documented in the README and must not be renumbered.
+//! The error type and its exit codes, which the README documents and scripts branch on, so
+//! no code is ever renumbered.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,13 +7,12 @@ use std::process::ExitCode;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Exit code for a run that found problems but did not itself fail: a failed verification, a
-/// doctor report with at least one failing check, a diff that found drift.
+/// Exit code for a run that found problems without failing itself, such as a failed
+/// verification, a failing doctor check or a diff that found drift.
 pub const EXIT_CHECKS_FAILED: u8 = 3;
 /// Exit code for a run that stopped on purpose to avoid destroying something.
 pub const EXIT_REFUSED: u8 = 4;
-/// Exit code for a run that simply failed. `ExitCode::FAILURE` in a name the tests can
-/// compare.
+/// Exit code for a run that failed, as a number the tests can compare.
 pub const EXIT_FAILURE: u8 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -23,11 +20,8 @@ pub enum Error {
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 
-    /// An io error with no file to attach it to, which is rare: almost every one this tool
-    /// meets is about a path somebody is holding. Not `#[from]`, so that `?` on an `io::Error`
-    /// does not compile and the pathless spelling has to be asked for by name. With `#[from]`,
-    /// `Io { path, source }` above is the variant a writer has to remember, and the message
-    /// that names no file is the one the path of least resistance produces.
+    /// An io error with no file to attach it to. It has no `#[from]`, so `?` on an `io::Error`
+    /// does not compile and a writer has to choose between this and `Io` with its path.
     #[error("{0}")]
     PathlessIo(io::Error),
 
@@ -52,8 +46,8 @@ pub enum Error {
     #[error("could not read the key at {path}: {reason}")]
     BadKey { path: PathBuf, reason: String },
 
-    /// A file this tool reads that is there and does not parse. Separate from a bare
-    /// `serde_json::Error`, whose "expected value at line 1 column 1" names no file at all.
+    /// A file that is there and does not parse, named because a bare `serde_json::Error` names
+    /// no file.
     #[error("{path}: {reason}")]
     Malformed { path: PathBuf, reason: String },
 
@@ -72,32 +66,24 @@ pub enum Error {
     )]
     ArchiveTooNew { found: u32, supported: u32 },
 
-    /// A deliberate stop, not a failure. Carries what the user should do next.
+    /// A deliberate stop that leaves everything intact, with what the user should do next.
     #[error("{what}\n{remedy}")]
     Refused { what: String, remedy: String },
 
-    /// Keys were offered, and none of them was ever unlocked, so the archive was never
-    /// actually tried against any of them. Its own variant rather than one more `Refused`,
-    /// because "the right key is here and still locked" and "no key here opens this" are
-    /// different news: `doctor` reports the first as a question it could not put, and only
-    /// the second as a backup nobody can open.
+    /// Keys were offered and none was ever unlocked, so the archive was never tried. `doctor`
+    /// reports this as a question it could not put, and never as a backup no key opens.
     #[error("{what}\n{remedy}")]
     KeysStayedLocked { what: String, remedy: String },
 
-    /// A key was unlocked with the passphrase given and still could not be used, which age
-    /// reports the same way whether the passphrase was wrong or the key is of a type it
-    /// cannot use. A separate variant for the same reason as the one above: this is a
-    /// question nobody answered, not a proof that the archive cannot be opened.
+    /// A key was unlocked and still could not be used, which age reports alike for a wrong
+    /// passphrase and an unsupported key type. This proves nothing about whether the archive
+    /// can be opened.
     #[error("{what}\n{remedy}")]
     KeyNotUsable { what: String, remedy: String },
 
-    /// The manual asked for with stdout on a terminal, where roff is noise. A failure rather
-    /// than a note, as `gzip` treats compressed data asked for on a terminal: a capture that
-    /// goes through a pty (`ssh -t`, `docker run -t`) would otherwise install this text as the
-    /// page and report success. Revisit if `man::run` ever shows the page at a terminal.
-    ///
-    /// Names no package that installs the page, because a list here ships inside the binary
-    /// and goes stale as packages come and go.
+    /// The manual was asked for with stdout on a terminal, where roff is noise. A capture
+    /// through a pty (`ssh -t`) would otherwise save this text as the page and report success.
+    /// The message names no package, because a list compiled into the binary goes stale.
     #[error(
         "`rad-backup man` prints a file to save, not a page to read\n\
          to read the manual, run `man rad-backup`. If that finds no page, run:\n  \
@@ -120,11 +106,8 @@ pub enum Error {
 }
 
 impl Error {
-    /// This error as one line, for the places that carry it as a `why` inside a warning next
-    /// to a repository id rather than printing it on its own.
-    ///
-    /// Each line becomes a sentence: a line with no closing punctuation gets a full stop, and a
-    /// line after the first starts with a capital.
+    /// Formats this error as one line, each source line a sentence, for a warning that
+    /// carries it as a `why` beside a repository id.
     pub fn one_line(&self) -> String {
         let text = self.to_string();
         let lines: Vec<&str> = text
@@ -164,18 +147,15 @@ impl Error {
         }
     }
 
-    /// `EXIT_REFUSED` means the run stopped because going on would have been unsafe, and
-    /// everything is intact. A key that stayed locked or could not be used is neither: it is
-    /// the ordinary failure of not being given what was needed, and a script that reads it as
-    /// "refused, safe to try again later" loops on a typo. Those two exit `1`, the same code
-    /// as a wrong passphrase on the archive itself, which is the same news about the other
-    /// secret.
+    /// Maps `Refused` to `EXIT_REFUSED` and everything else to `1`.
+    ///
+    /// A key that stayed locked or unusable exits `1`, because a script reading `4` as "safe
+    /// to retry later" would loop on a typo.
     pub fn exit_code(&self) -> ExitCode {
         ExitCode::from(self.exit_status())
     }
 
-    /// The same answer as a number, because `ExitCode` cannot be compared and an exit code
-    /// nothing asserts is one the README can drift away from.
+    /// The exit code as a number, because `ExitCode` cannot be compared in a test.
     pub fn exit_status(&self) -> u8 {
         match self {
             Self::Refused { .. } => EXIT_REFUSED,
@@ -184,7 +164,6 @@ impl Error {
     }
 }
 
-/// `line` with its first letter upper case, for a line that starts a later sentence.
 fn capitalised(line: &str) -> String {
     let mut chars = line.chars();
     match chars.next() {
@@ -203,11 +182,9 @@ impl From<age::DecryptError> for Error {
     fn from(e: age::DecryptError) -> Self {
         match e {
             // age reports a wrong passphrase as "no identity matched", which reads as a bug
-            // report rather than as the typo it almost always is.
             age::DecryptError::NoMatchingKeys => Self::WrongPassphrase,
-            // Every remaining variant means the ciphertext did not authenticate. With the
-            // right passphrase that is damage, not a mistake, and saying so points at the
-            // copy of the file rather than at the person typing.
+            // Every remaining variant means the ciphertext did not authenticate, which with
+            // the right passphrase is damage to the file
             other => Self::Age(format!(
                 "{other}. If the passphrase was right, the archive is damaged"
             )),
@@ -219,11 +196,9 @@ impl From<age::DecryptError> for Error {
 mod tests {
     use super::*;
 
-    /// `4` is documented as "everything is intact and nothing was written, because doing it
-    /// would have been unsafe". A key that never unlocked, or one age could not use, is not
-    /// that: nothing was unsafe, the run was simply not given what it needed. Both used to
-    /// exit `4`, so a script reading `4` as "safe to retry later" looped on a typo. They exit
-    /// `1`, the code a wrong passphrase on the archive already used.
+    /// `4` means nothing was written because going on was unsafe. A key that never unlocked,
+    /// or one age could not use, exits `1`, so a script retrying on `4` does not loop on a
+    /// typo.
     #[test]
     fn only_a_refusal_on_safety_grounds_exits_four() {
         let locked = Error::KeysStayedLocked {

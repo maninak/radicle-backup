@@ -1,16 +1,11 @@
-//! The archive manifest: what an archive says about itself.
-//!
-//! This is a wire format. It is read by builds of this tool that did not write it, so it
-//! parses tolerantly: unknown fields are ignored, unknown enum values fall back to a variant
-//! that says so instead of failing the whole read. Fields are camelCase to match the JSON
-//! Radicle itself emits.
+//! The archive manifest, a wire format read by builds of this tool that did not write it.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// The archive layout this build writes. Bumped only when a reader that does not know the
-/// change would misread an archive.
+/// The archive layout this build writes. Bump this number only when a reader that does not
+/// know the change would misread an archive.
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Entry name of the manifest inside the archive.
@@ -53,7 +48,7 @@ impl Tier {
 pub enum RepoSelection {
     /// No repositories at all.
     None,
-    /// Only the repositories the open network does not carry: the private ones.
+    /// Only the private repositories, which the open network does not carry.
     Private,
     /// Private repositories, the ones the user delegates, and any whose namespace holds the
     /// user's refs.
@@ -68,10 +63,8 @@ pub enum RepoSelection {
 }
 
 impl RepoSelection {
-    /// Read back what `as_str` wrote, for the records and manifests that store the selection
-    /// as a word. Anything unrecognised is `Unknown` rather than an error, on the same
-    /// principle as the `#[serde(other)]` above: a file written by a later version is read for
-    /// what can be read.
+    /// Reads back what `as_str` wrote. An unrecognised word is `Unknown`, so a file written by
+    /// a later version is read for what can be read.
     pub fn from_word(word: &str) -> Self {
         match word {
             "none" => Self::None,
@@ -138,9 +131,8 @@ pub struct ToolInfo {
 impl Default for ToolInfo {
     fn default() -> Self {
         Self {
-            // The binary, not CARGO_PKG_NAME: this string is a documented field of the
-            // archive format, and deriving it from the package would let a crate rename
-            // silently rewrite what every future archive claims wrote it.
+            // Never derive this from CARGO_PKG_NAME, because the string is a documented
+            // archive field and a crate rename would silently rewrite it
             name: env!("CARGO_BIN_NAME").to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
@@ -160,9 +152,8 @@ pub struct IdentityInfo {
     pub fingerprint: String,
     /// Whether the archived secret key carries its own passphrase.
     ///
-    /// The wire name stays `keyEncrypted`: an archive is read by versions that were never
-    /// built, and a field this one renamed would come back as `false` for every key that has
-    /// a passphrase.
+    /// The wire name stays `keyEncrypted`, because every other build would read a renamed
+    /// field as `false` for every key that has a passphrase.
     #[serde(rename = "keyEncrypted")]
     pub key_is_encrypted: bool,
 }
@@ -179,12 +170,10 @@ pub struct SourceInfo {
     pub git_version: Option<String>,
     pub os: String,
     /// Whether the machine that wrote this archive retires its own key as part of the run,
-    /// which only `move` does.
+    /// which `move` does. `None` in an archive older than this field.
     ///
-    /// A home restored from an archive where this is false may not be the only one holding the
-    /// identity, and two nodes signing under one peer id fork that peer's history. `None` in
-    /// an archive written before this field existed, which is the case nothing here can
-    /// resolve either way.
+    /// When false, the restored home may not be the only holder of the identity, and two
+    /// nodes signing under one peer id fork that peer's history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retires_key: Option<bool>,
 }
@@ -193,19 +182,17 @@ pub struct SourceInfo {
 #[serde(rename_all = "camelCase")]
 pub struct NodeInfo {
     /// Whether the node was serving its control socket when the archive was taken. A run that
-    /// could not reach the socket at all writes `true` here, because a node assumed up costs
-    /// a warning and a node assumed down costs an identity; `why_running_is_unknown` beside it
-    /// is how the far end tells the precaution from the observation.
+    /// could not reach the socket writes `true`, because a node assumed up costs a warning and
+    /// a node assumed down costs an identity.
     pub was_running: bool,
-    /// Why the field above is a precaution rather than something this run saw: the error the
-    /// control socket gave. Absent when the socket answered, which is the ordinary case.
+    /// The error the control socket gave when `was_running` is a precaution. Absent when the
+    /// socket answered.
     ///
-    /// Added rather than making `was_running` an `Option`, because a manifest that omits a
-    /// field an older build reads as a plain `bool` is a manifest that build cannot parse at
-    /// all, and an archive has to stay readable by the versions already installed.
+    /// `was_running` must stay a plain `bool`, because older builds cannot parse a manifest
+    /// that omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why_running_is_unknown: Option<String>,
-    /// Whether this run stopped it, which is the only case where a restart is owed.
+    /// Whether this run stopped the node, which means a restart is owed.
     #[serde(rename = "stoppedByBackup")]
     pub was_stopped_by_backup: bool,
 }
@@ -237,9 +224,7 @@ pub struct RepoRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<String>,
     /// The peers a private repository is shared with, from its identity document. Empty for a
-    /// public repository, and empty for a private one that was never allowed to anybody: a
-    /// private repository is not automatically alone in the world, it is alone until its owner
-    /// says otherwise.
+    /// public repository and for a private one allowed to nobody.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed: Vec<String>,
     /// Whether the archived identity is one of this repository's delegates. A sole delegate
@@ -256,9 +241,9 @@ pub struct RepoRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     pub refs: usize,
-    /// Signed refs per peer at the moment of the backup. Restore takes our own entry and
-    /// holds it against the node's record of what other nodes announced, to decide whether
-    /// building on the restored copy would fork the identity.
+    /// Signed refs per peer at the moment of the backup. Restore compares the archived
+    /// identity's own entry with what other nodes announced, to tell whether building on the
+    /// restored copy would fork the identity.
     #[serde(default)]
     pub sigrefs: BTreeMap<String, String>,
     /// How many other nodes the routing table said announce this repository.
@@ -281,51 +266,37 @@ impl RepoRecord {
 
     /// Whether this repository is one Radicle announces.
     ///
-    /// Not `!is_private()`, because a record whose identity document was never read has no
-    /// visibility at all and would pass that test. The checks that count public repositories
-    /// end in `rad sync --announce`, and announcing one that turns out to be private is the
-    /// single mistake they must never make, so an unread document is left out of the count and
-    /// the caller says how many it could not describe.
+    /// Never replace this with `!is_private()`, because a record whose identity document was
+    /// never read would then count as public, and public counts end in `rad sync --announce`.
     pub fn is_public(&self) -> bool {
         matches!(self.visibility.as_deref(), Some("public"))
     }
 
-    /// Whether this repository's identity document was actually read.
+    /// Whether this repository's identity document was read.
     ///
-    /// `visibility`, `delegates` and `allowed` all come out of that one document, so a record
-    /// without a visibility has none of them: its delegate list is empty because nothing was
-    /// asked, not because there is nobody. Anything reporting on those fields has to tell an
-    /// unasked question from a negative answer, or it says "there are no private repositories"
-    /// about a home it never looked inside.
+    /// `visibility`, `delegates` and `allowed` all come from that document, so an unread
+    /// record's empty delegate list means nothing was asked. A report that misses this calls
+    /// a home it never looked inside free of private repositories.
     pub fn identity_was_read(&self) -> bool {
         self.visibility.is_some()
     }
 
-    /// Whether anything but this machine could hand this repository back: another node has
-    /// announced it, its owner allowed a peer to hold it, or somebody else delegates it.
+    /// Whether anything but this machine could hand this repository back, because another
+    /// node announced it, its owner allowed a peer to hold it, or somebody else delegates it.
     ///
-    /// A second delegate holds the repository by definition, and leaving them out told the
-    /// owner of a jointly delegated private repository that it was "in no archive and on no
-    /// other node", which is a Fail over a copy that is sitting on the other delegate's disk.
-    /// The same fact `has_nowhere_to_fetch_from` counts on, said about a different question.
+    /// A second delegate holds the repository by definition.
     pub fn has_another_holder(&self) -> bool {
         self.other_seeds.is_some_and(|seeds| seeds > 0)
             || !self.allowed.is_empty()
             || self.delegates.len() > 1
     }
 
-    /// Whether a fetch has anybody at all to ask about this repository.
+    /// Whether a fetch has nobody to ask about this repository, which holds only for a private
+    /// repository delegated to the archived identity alone and allowed to nobody.
     ///
-    /// "Private" is about announcement, not about reachability: `rad sync --fetch` has a
-    /// separate path for a private repository that goes to its delegates and its allowed
-    /// peers. So only one delegated to us alone and allowed to nobody has no network side,
-    /// and a private repository shared with a collaborator is exactly the one that can fork.
-    ///
-    /// A delegate list that is empty means nothing was read, not that there is nobody, so
-    /// that case falls through to the fetch: an unnecessary fetch costs a few seconds, and a
-    /// skipped comparison costs a peer history. The sole delegate has to be us for the same
-    /// reason: a repository delegated to one person who is somebody else has that person to
-    /// ask.
+    /// `rad sync --fetch` reaches a private repository through its delegates and allowed
+    /// peers. An empty delegate list means nothing was read and answers false, because a
+    /// needless fetch costs seconds and a skipped comparison costs a peer history.
     pub fn has_nowhere_to_fetch_from(&self) -> bool {
         self.is_private()
             && self.allowed.is_empty()
@@ -337,8 +308,7 @@ impl RepoRecord {
 #[cfg(test)]
 mod tests {
     /// The sample in `ARCHIVE-FORMAT.md` is the spec a stranger reads to open an archive by
-    /// hand. Nothing checked that it still parses as a `Manifest`, so a renamed field would
-    /// have left the document describing a format this tool no longer writes.
+    /// hand, so it must keep parsing as a `Manifest`.
     #[test]
     fn the_sample_manifest_in_the_format_document_still_parses() {
         let document = include_str!("../ARCHIVE-FORMAT.md");
@@ -351,8 +321,7 @@ mod tests {
         let manifest: super::Manifest =
             serde_json::from_str(sample).expect("the sample parses as a manifest");
 
-        // Read back, so a manifest that parsed into all-defaults cannot pass for one that
-        // matched.
+        // Reading fields back stops a manifest that parsed into all-defaults from passing
         assert_eq!(manifest.tool.name, "rad-backup");
         assert_eq!(manifest.identity.alias.as_deref(), Some("alice"));
         assert_eq!(manifest.entries.len(), 1);
@@ -364,10 +333,8 @@ mod tests {
 
     #[test]
     fn the_manifest_names_the_command_that_wrote_it_and_not_the_crate_it_was_built_from() {
-        // ARCHIVE-FORMAT.md publishes this exact string, and readers of an archive match on
-        // it. Renaming the package to `radicle-backup` once changed it silently, which is why
-        // it is spelled out here rather than derived: this assertion is the format, and it
-        // must fail if the value ever moves again.
+        // ARCHIVE-FORMAT.md publishes this exact string and archive readers match on it. The
+        // value is spelled out, so a crate rename fails here.
         assert_eq!(ToolInfo::default().name, "rad-backup");
     }
 
@@ -435,9 +402,9 @@ mod tests {
         );
     }
 
-    /// The gate `restore` uses to skip the sigrefs comparison. Skipping it for a repository
-    /// somebody else holds is how a restored copy forks its own peer history, so each way a
-    /// repository stays reachable is spelled out here rather than left to the one boolean.
+    /// The check `restore` uses to skip the sigrefs comparison. Skipping it for a repository
+    /// somebody else holds forks the restored peer history, so each way a repository stays
+    /// reachable is asserted on its own.
     #[test]
     fn only_a_private_repository_delegated_to_us_alone_has_nobody_to_ask() {
         let mut record = RepoRecord {
@@ -496,9 +463,8 @@ mod tests {
     }
 
     /// Every check that counts public repositories ends its remedy in `rad sync --announce`,
-    /// and a record whose identity document was never read has no visibility at all. Told
-    /// apart by `!is_private()`, such a record joined the public list, so a home with no `rad`
-    /// on PATH was told to announce repositories that may well be private.
+    /// so a record whose identity document was never read counts as neither public nor
+    /// private.
     #[test]
     fn a_repository_nothing_could_describe_is_neither_public_nor_private() {
         let mut record = RepoRecord {
@@ -524,7 +490,7 @@ mod tests {
         assert!(record.is_public());
         record.visibility = Some("private".to_string());
         assert!(!record.is_public());
-        // A visibility a later heartwood adds is not one this build may guess at either way.
+        // A visibility a later heartwood adds is not one this build may guess at either way
         record.visibility = Some("unlisted".to_string());
         assert!(!record.is_public());
         assert!(!record.is_private());

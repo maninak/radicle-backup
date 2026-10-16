@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Refuse a dependency version that was published less than MIN_AGE_DAYS ago.
+"""Refuse a dependency version published less than `--min-age-days` (default 7) days ago.
 
-Dependabot's cooldown holds back the pull requests IT raises. It says nothing about a
-`cargo update` run by hand, which is the case where somebody is already in a hurry. This
-reads Cargo.lock instead of the config, so it judges what is actually pinned.
+Dependabot's cooldown holds back only the pull requests it raises, so this reads Cargo.lock
+and also catches a hand-run `cargo update`.
 
-By default it looks only at versions this commit ADDS relative to a base ref, because that is
-the moment a dependency is adopted; an existing pin only ever gets older. Pass --all to sweep
-the whole lockfile, which is slow enough to be a manual act (crates.io is rate limited, so
-requests are spaced a second apart).
+Given `--base`, it checks only versions added since that ref, because an existing pin only
+ever gets older. Without `--base`, or with `--all`, it sweeps the whole lockfile, spacing
+requests a second apart for the crates.io rate limit.
 """
 
 import argparse
@@ -21,17 +19,17 @@ import time
 import urllib.error
 import urllib.request
 
-# crates.io asks that automated clients identify themselves and say where to complain.
+# crates.io asks automated clients to identify themselves and say where to complain
 USER_AGENT = "radicle-backup-ci (https://github.com/maninak/radicle-backup)"
 PACKAGE = re.compile(r"^\[\[package\]\]$")
 FIELD = re.compile(r'^(name|version|source) = "(.*)"$')
 
 
 def packages(text):
-    """Every registry-sourced (name, version) in a Cargo.lock.
+    """Return every registry-sourced (name, version) in a Cargo.lock.
 
-    Entries with no `source` are workspace members, and a git or path source is not on
-    crates.io to be asked about.
+    An entry with no `source` is a workspace member, and a git or path source is not on
+    crates.io.
     """
     found, current = set(), {}
     for line in text.splitlines():
@@ -49,7 +47,7 @@ def packages(text):
 
 
 def published(name, version):
-    """When crates.io says this exact version appeared, and whether it has been yanked."""
+    """Return when crates.io published this exact version, and whether it is yanked."""
     url = f"https://crates.io/api/v1/crates/{name}/{version}"
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -76,7 +74,7 @@ def main():
                 capture_output=True, text=True, check=True,
             ).stdout
         except subprocess.CalledProcessError:
-            # No lockfile at the base (a new branch, a first commit). Everything is new.
+            # The base has no lockfile, so every entry is new
             before = ""
         subjects = current - packages(before)
         scope = f"what this changes against {args.base}"
@@ -105,8 +103,8 @@ def main():
                 file=sys.stderr,
             )
             status = 1
-        # Reported, never fatal: a yank is somebody else's decision landing on a lockfile that
-        # was fine when it was written, and it should not turn an unrelated change red.
+        # A yank is reported and never fatal, because it lands on a lockfile that was fine when
+        # written and would turn an unrelated change red
         if yanked:
             print(f"::warning::{name} {version} has been yanked from crates.io")
 

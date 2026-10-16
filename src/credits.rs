@@ -1,24 +1,23 @@
-//! Who makes this, where its issues go, and how to support it: said once here for `--help`
-//! and the man page both.
+//! Who makes this, where its issues go and how to support it, for `--help` and the man page.
 
-/// The Radicle repository, which is where issues live: GitHub's are turned off.
+/// The Radicle repository, where issues live, since GitHub issues are turned off.
 pub const RID: &str = "rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J";
 
 pub const AUTHOR: &str = "Konstantinos Maninakis (maninak)";
 
-/// The family of Radicle tools this is one of, rather than a page about this tool alone.
+/// The site for the family of Radicle tools this belongs to.
 pub const RADICLE_TOOLS: &str = "https://radicle.tools";
 
 pub const DONATE: &str = "https://liberapay.com/maninak/donate";
 
-/// Where a vulnerability goes instead of an issue, which is public, and which a node that has
-/// fetched it keeps. The address `SECURITY.md` gives.
+/// Where a vulnerability goes, because an issue is public and every node that fetched it
+/// keeps a copy. The address `SECURITY.md` gives.
 pub const SECURITY: &str = "security@radicle.tools";
 
-/// The lines `--help` ends with. Not `-h`, which is for somebody looking up a flag.
+/// The lines `--help` ends with, and `-h` leaves out.
 ///
-/// No full stop after a URL or a repository id, because a terminal that makes links of them
-/// can take the full stop into the link.
+/// No line ends in a full stop, because a terminal that links a URL or an id can take the full
+/// stop into the link.
 pub fn help_footer() -> String {
     format!(
         "A project by {AUTHOR} for {RADICLE_TOOLS}\n\
@@ -32,9 +31,8 @@ pub fn help_footer() -> String {
 mod tests {
     use super::*;
 
-    /// Each of these is a fact a document owns, and the binary carries a copy of it to every
-    /// machine it is installed on. A security address that moved in `SECURITY.md` alone would
-    /// go on sending vulnerabilities to the old one.
+    /// The binary carries copies of facts its documents own, so a security address moved in
+    /// `SECURITY.md` alone would keep sending vulnerabilities to the old one.
     #[test]
     fn the_credits_say_what_the_documents_that_own_them_say() {
         for (document, text, value) in [
@@ -46,8 +44,8 @@ mod tests {
         }
     }
 
-    /// The footer names where issues go, so it has to name where a vulnerability goes instead,
-    /// or somebody who has found a way to read a key reports it in public.
+    /// A footer naming where issues go must also name where a vulnerability goes, or a finder
+    /// reports it in public.
     #[test]
     fn the_help_footer_sends_a_vulnerability_away_from_the_issues() {
         let footer = help_footer();

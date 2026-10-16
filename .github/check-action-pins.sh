@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Every third-party action must be pinned to a commit SHA that is at least MIN_AGE_DAYS old.
-#
-# Dependabot's cooldown covers the updates it raises, but not a pin typed by hand, which is
-# exactly when somebody is in a hurry. This reads the workflows rather than the config, so it
-# fails on whatever is actually there.
+# Every action pin is a commit SHA at least MIN_AGE_DAYS old, hand-typed ones included
 set -euo pipefail
 
 MIN_AGE_DAYS=${MIN_AGE_DAYS:-7}
@@ -11,19 +7,14 @@ now=$(date -u +%s)
 status=0
 seen=0
 
-# `actions/*` is GitHub's own namespace, published from the same place the runner comes from.
-# Everything else is a third party and gets no exemption.
 while read -r file line spec; do
-  # A local path is not a pin problem: `./.github/workflows/x.yml` is read from the very commit
-  # that is running, which is a tighter guarantee than any SHA could give. Skipped before the
-  # counter so it cannot pad `seen` and prop up the examined-nothing guard below.
+  # A local path runs from the current commit. It is skipped before the counter, so it cannot
+  # pad `seen` past the examined-nothing guard below.
   if [[ $spec == ./* ]]; then
     continue
   fi
   seen=$((seen + 1))
-  # A `uses:` with no `@` at all resolves the action's default branch at run time, which is the
-  # worst pin there is. Matched separately from the pattern below, because a value with no `@`
-  # cannot be split into repo and ref.
+  # A `uses:` with no `@` tracks the action's default branch, and has no ref to split off
   if [[ $spec != *@* ]]; then
     echo "$file:$line  $spec names no ref at all, so it tracks a branch" >&2
     status=1
@@ -47,19 +38,15 @@ while read -r file line spec; do
     status=1
   fi
 done < <(
-  # Both spellings of the extension, and composite actions too, because a workflow this
-  # misses is a workflow that goes unchecked. `uses:` is matched with one-or-more spaces
-  # and an optional quote, and WITHOUT requiring an `@`, so a completely unpinned action
-  # reaches the loop above instead of failing to match and vanishing.
+  # Both extensions and composite actions are read. A `uses:` matches without an `@`, so an
+  # unpinned action reaches the loop above and fails there.
   find .github -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
     | xargs -0 -r grep -Hno "uses:[[:space:]]\+[\"']\?[^ \"']*" \
     | sed "s/:uses:[[:space:]]*[\"']\?/ /" \
     | awk '{print $1, $2, $3}' FS='[: ]' OFS=' '
 )
 
-# A gate that examined nothing must not report success. Without this the script printed its
-# green line and exited 0 when the glob matched no file at all, which is what it did for every
-# workflow named `.yaml` and for any move of the directory.
+# A gate that examined nothing fails, because a glob matching no file would otherwise pass
 if [ "$seen" -eq 0 ]; then
   echo "no \`uses:\` found under .github, so this check verified nothing" >&2
   exit 1

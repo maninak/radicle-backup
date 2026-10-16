@@ -1,5 +1,4 @@
-# cross runs the build in a container, where the source is at /project and the cargo home at
-# /cargo whatever the host looks like. Only the things that make a build depend on *when* it
-# ran have to travel in, and cross forwards nothing it is not told to.
+# cross fixes the source and cargo home paths in its container and forwards no variable it is
+# not told to, so only the build time travels in
 [build.env]
 passthrough = ["SOURCE_DATE_EPOCH"]

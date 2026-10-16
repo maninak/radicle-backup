@@ -1,7 +1,4 @@
-//! Reading, inspecting and rebuilding the ed25519 keypair that is a Radicle identity.
-//!
-//! Secret material never leaves this module as a plain `Vec`: seeds and passphrases are
-//! wrapped in `Zeroizing` so that a copy cannot outlive the operation that needed it.
+//! The ed25519 keypair that is a Radicle identity, with secrets held in `Zeroizing`.
 
 use std::path::Path;
 
@@ -13,10 +10,9 @@ use crate::error::{Error, Result};
 
 /// Multicodec prefix for an ed25519 public key, as the varint pair `did:key` expects.
 const MULTICODEC_ED25519_PUB: [u8; 2] = [0xed, 0x01];
-/// The comment `rad auth` writes into the key file. Kept so a key rebuilt from a seed carries
-/// the same one, which is what a reader comparing two key files looks at. An unprotected key
-/// then matches `rad`'s byte for byte; an encrypted one never can, because the salt and the
-/// ciphertext come from `OsRng`.
+/// The comment `rad auth` writes into the key file, so an unprotected key rebuilt from a seed
+/// matches `rad`'s byte for byte. An encrypted one never can, because its salt and ciphertext
+/// come from `OsRng`.
 const RADICLE_KEY_COMMENT: &str = "radicle";
 
 /// A public key, and the two names Radicle shows it under.
@@ -53,8 +49,8 @@ impl Identity {
             .expect("an Identity is only built from an ed25519 key")
     }
 
-    /// The `did:key:z6Mk...` form: multicodec-tagged public key in base58btc, per the did:key
-    /// method spec. This is the name that appears in every identity document.
+    /// The `did:key:z6Mk...` form, the multicodec-tagged public key in base58btc per the
+    /// did:key method spec.
     pub fn did(&self) -> String {
         let mut tagged = Vec::with_capacity(MULTICODEC_ED25519_PUB.len() + 32);
         tagged.extend_from_slice(&MULTICODEC_ED25519_PUB);
@@ -80,8 +76,8 @@ impl Identity {
     }
 }
 
-/// How the secret key file protects itself. `Plaintext` is a finding, not a state: a key with
-/// no passphrase is one stolen laptop away from a stolen identity.
+/// How the secret key file protects itself. `Plaintext` is a finding, because a key with no
+/// passphrase is one stolen laptop away from a stolen identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Protection {
     Plaintext,
@@ -121,8 +117,8 @@ impl SecretKey {
         }
     }
 
-    /// The 32-byte seed, which is the whole of the identity. Everything else about a Radicle
-    /// account is derived from it or refetchable.
+    /// The 32-byte seed, from which everything else about a Radicle account is derived or
+    /// refetched.
     pub fn seed(&self, passphrase: Option<&Zeroizing<String>>) -> Result<Zeroizing<[u8; 32]>> {
         let decrypted;
         let key = if self.key.is_encrypted() {
@@ -151,8 +147,8 @@ impl SecretKey {
     }
 }
 
-/// The name `ssh-keygen` prints for a key derivation function, which `ssh-key` models as an
-/// enum without a `Display`.
+/// The name `ssh-keygen` prints for a key derivation function, since `ssh_key::Kdf` has no
+/// `Display`.
 fn kdf_name(kdf: &ssh_key::Kdf) -> &'static str {
     match kdf {
         ssh_key::Kdf::None => "none",
@@ -161,9 +157,9 @@ fn kdf_name(kdf: &ssh_key::Kdf) -> &'static str {
     }
 }
 
-/// Rebuild a key file from a seed, which is how a paper or mnemonic backup comes home.
+/// Rebuilds a key file from a seed, which is how a paper or mnemonic backup comes home.
 ///
-/// Passing `None` writes an unprotected key, which the caller must have said out loud.
+/// `None` writes an unprotected key, which the caller must have asked for explicitly.
 pub fn openssh_from_seed(
     seed: &Zeroizing<[u8; 32]>,
     passphrase: Option<&Zeroizing<String>>,
@@ -190,9 +186,8 @@ pub fn identity_from_seed(seed: &Zeroizing<[u8; 32]>) -> Result<Identity> {
 pub(crate) mod tests {
     use super::*;
 
-    /// Kostis' own public key, and the DID and fingerprint `rad self` prints for it on rad
-    /// 1.10.1. A real vector, so a wrong multicodec prefix or a wrong base58 alphabet cannot
-    /// pass.
+    /// A real public key with the DID and fingerprint `rad self` prints for it on rad 1.10.1,
+    /// so a wrong multicodec prefix or base58 alphabet cannot pass.
     const PUBLIC_KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK";
     const DID: &str = "did:key:z6MkvAFBkdph6yXSZDkkVqf9FfCcvkG29JD4KbwwnGphDRLV";
@@ -261,8 +256,8 @@ pub(crate) mod tests {
         );
     }
 
-    /// A key file for a test, owner-only inside an owner-only directory, because it used to be
-    /// `std::fs::write` straight into `/tmp` under a name anyone could guess from the pid.
+    /// Writes a key file for a test, owner-only inside an owner-only directory, so it never
+    /// sits in `/tmp` under a name anyone could guess from the pid.
     fn scratch_file(scratch: &TestScratch, name: &str, contents: &str) -> std::path::PathBuf {
         use std::io::Write as _;
 
@@ -273,31 +268,27 @@ pub(crate) mod tests {
         path
     }
 
-    /// The guard this crate's tests write key material behind: no fixture holding a key, or
-    /// anything shaped like one, goes into `/tmp` by any other route.
+    /// A per-test scratch directory, the only route by which a fixture holding a key reaches
+    /// `/tmp`.
     ///
-    /// `crate::cmd::Scratch` already does the two things that matter, an owner-only directory
-    /// that refuses to exist twice and a `Drop` that removes it however the test ends. What it
-    /// does not do is tell tests apart: it names its directory after the process id alone, and
-    /// every test in a binary shares one process, so two tests creating one under the same
-    /// parent would refuse each other. Each test therefore gets its own parent, named after
-    /// the test, with the `Scratch` inside it.
+    /// `crate::cmd::Scratch` names its directory after the process id and refuses one that
+    /// exists, so two tests in one binary would refuse each other. Each test gets its own
+    /// parent, named after the test, with the `Scratch` inside it.
     pub(crate) struct TestScratch {
         parent: std::path::PathBuf,
-        // An `Option` only so that `Drop` can remove the inner directory BEFORE the parent
-        // holding it, because a struct's fields drop after its own `Drop` has run.
+        // An `Option`, so `Drop` can remove the inner directory before the parent holding it,
+        // because a struct's fields drop after its own `Drop` has run
         scratch: Option<crate::cmd::Scratch>,
     }
 
     impl TestScratch {
-        /// `name` has to be unique across the test binary, because two tests sharing one
-        /// would refuse each other the way a squatted directory is refused.
+        /// `name` must be unique across the test binary, because two tests sharing one refuse
+        /// each other.
         pub(crate) fn create(name: &str) -> Self {
             let parent =
                 std::env::temp_dir().join(format!("rad-backup-test-{name}-{}", std::process::id()));
-            // Owner-only and never pre-existing, for the same reason the inner directory is:
-            // a parent somebody else made first would be a parent they can rename from under
-            // the test. A leftover from a crashed run with this pid fails here, on purpose.
+            // Owner-only and never pre-existing, because somebody else's parent could be
+            // renamed from under the test. A leftover from a crashed run with this pid fails.
             crate::perms::create_private_dir(&parent)
                 .expect("the test's own scratch parent is creatable and was not already there");
             let scratch =
@@ -311,13 +302,8 @@ pub(crate) mod tests {
         /// A scratch short enough to bind a unix socket under.
         ///
         /// `sun_path` holds 104 bytes on macOS and 108 on Linux, and the ordinary scratch
-        /// spends most of that before the test has named anything: a temporary directory that
-        /// is itself 48 characters on macOS, a parent named after the test, and the `Scratch`
-        /// inside it. `node/control.sock` under all that is past the limit, so `connect`
-        /// refuses the path without looking at it and every probe answers the same doubt,
-        /// whatever is or is not listening. The parent is the scratch here, with no `Scratch`
-        /// inside it, and `name` is expected to be a word rather than a sentence.
-        /// Unix only, like the socket it exists for and like its one caller.
+        /// leaves too little of that for `node/control.sock`, so `connect` refuses the path
+        /// unread. The parent is the scratch here, and `name` should be a single word.
         #[cfg(unix)]
         pub(crate) fn create_short(name: &str) -> Self {
             let parent = std::env::temp_dir().join(format!("rb-{name}-{}", std::process::id()));
@@ -329,8 +315,7 @@ pub(crate) mod tests {
             }
         }
 
-        /// Under the `Scratch` when there is one, and under the parent itself when the path
-        /// has to stay short enough to bind a socket under.
+        /// A path under the `Scratch`, or under the parent itself for a short scratch.
         pub(crate) fn path_of(&self, name: &str) -> std::path::PathBuf {
             let Some(scratch) = self.scratch.as_ref() else {
                 return self.parent.join(name);
@@ -351,9 +336,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// The defect this guards: fixtures wrote key material into `/tmp` at the umask default,
-    /// through calls that follow a symlink planted under the guessable name. Every fixture
-    /// file now sits in a directory only its owner can enter.
+    /// Fixture key material must never sit in `/tmp` at the umask default, behind a guessable
+    /// name a planted symlink can redirect.
     #[test]
     #[cfg(unix)]
     fn a_fixture_key_file_sits_in_a_directory_nobody_else_can_enter() {

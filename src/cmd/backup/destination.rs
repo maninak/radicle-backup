@@ -1,8 +1,4 @@
-//! Where an archive is going, and how it gets there without leaving rubble behind.
-//!
-//! Separate from the archiving itself because the choice is made before any bytes exist and
-//! the cleanup happens after they stop: a `.partial` file that nothing lists and nothing
-//! prunes is the one failure a backup tool must not leave lying around.
+//! Where an archive goes, written under a `.partial` name until it is complete.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,14 +11,10 @@ use crate::key::Identity;
 use crate::perms::create_private_file;
 use crate::term::Term;
 
-/// Where the archive is going, and how it gets there safely.
+/// Where the archive goes.
 ///
-/// A file is written under a `.partial` name and renamed once it is complete, so an
-/// interrupted run cannot leave something that looks like a usable backup.
-///
-/// The `.partial` is removed on drop when it was never committed. Nothing lists or prunes
-/// those files, so every failed run left one behind: a directory of encrypted-looking rubble
-/// beside the real archives, growing without limit and impossible to tell apart by eye.
+/// A file is written under a `.partial` name and renamed once complete, so an interrupted run
+/// never leaves something that looks like a usable backup.
 pub(super) enum Destination {
     Stdout,
     File {
@@ -32,11 +24,11 @@ pub(super) enum Destination {
     },
 }
 
-/// Drop runs on a return and on a panic, and on neither when a signal kills the process.
-/// A Ctrl-C mid-write therefore leaves the `.partial` behind. Said here rather than fixed,
-/// because a handler is the wrong trade for it: the file is named `.partial`, it is never the
-/// archive anybody is pointed at, and the next run to the same destination overwrites it.
-/// Revisit if this tool ever grows a signal handler for another reason.
+/// Removes the `.partial` of an uncommitted archive, because nothing lists or prunes those.
+///
+/// A signal kills the process without running this, so Ctrl-C mid-write leaves the `.partial`
+/// until the next run to the same destination overwrites it. Revisit if this tool ever grows a
+/// signal handler.
 impl Drop for Destination {
     fn drop(&mut self) {
         if let Self::File {
@@ -74,11 +66,9 @@ impl Destination {
                 partial_path,
                 committed,
             } => {
-                // Flushed is not durable: `Write::flush` on a `File` is a no-op, so without
-                // this the rename could land before the bytes and a crash would leave an empty
-                // file under the finished name, which is what `.partial` exists to stop.
-                // Opened for WRITING, because Windows refuses FlushFileBuffers on a read-only
-                // handle, which failed every backup there after the whole archive was written.
+                // `Write::flush` on a `File` is a no-op, so without `sync_all` the rename
+                // can land before the bytes and a crash leaves an empty finished file. The
+                // handle is writable, because Windows refuses to flush a read-only one.
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(partial_path)
@@ -93,11 +83,10 @@ impl Destination {
     }
 }
 
-/// Fsync the directory, so the rename that just happened survives a crash.
+/// Fsyncs the directory, so the rename survives a crash.
 ///
-/// Unix only: there is no portable way to open a directory as a file, and Windows does not
-/// need one, since NTFS orders the rename against the file's own flushed data. A failure is
-/// reported rather than swallowed, because the whole point of the rename was durability.
+/// Unix only, because no portable call opens a directory as a file and NTFS orders the rename
+/// after the file's flushed data. A failure prints a warning, because durability is the point.
 fn sync_directory(term: &Term, directory: Option<&Path>) {
     #[cfg(unix)]
     {
@@ -126,10 +115,9 @@ pub(super) fn prepare(
     stdout_is_terminal: bool,
 ) -> Result<Destination> {
     if args.stdout {
-        // An archive is compressed bytes, and a `--plaintext` one is the key among them. A
-        // terminal keeps what it is shown in scrollback that no zeroized buffer can reach, and
-        // some emulators log it to disk. Taken as a parameter rather than read here, so both
-        // answers are reachable from a test.
+        // A terminal keeps what it shows in scrollback that no zeroized buffer reaches, and a
+        // `--plaintext` archive holds the key. `stdout_is_terminal` is a parameter so a test
+        // reaches both answers.
         if stdout_is_terminal {
             return Err(Error::refused(
                 "an archive is binary, and stdout is a terminal",
@@ -163,12 +151,11 @@ pub(super) fn prepare(
     })
 }
 
-/// Whether a path names the archive itself rather than a directory to put it in.
+/// Whether `path` names the archive itself, judged by its extension unless it is an existing
+/// directory.
 ///
-/// An existing directory is a directory. Otherwise the extension decides: someone naming a
-/// file names it `.tar.zst` or `.age`, and someone naming a directory that does not exist yet
-/// does not. Guessing "file" for a bare name is the worse mistake, because it writes what the
-/// user reads as a folder as a single archive, and the next run silently replaces it.
+/// A bare name counts as a directory, because one archive written where the user expects a
+/// folder gets silently replaced by the next run.
 fn names_an_archive(path: &Path) -> bool {
     const ARCHIVE_SUFFIXES: [&str; 3] = [".age", ".zst", ".tar"];
 
@@ -224,7 +211,7 @@ mod tests {
         assert!(names_an_archive(Path::new("/backups/mine.tar.zst")));
         assert!(names_an_archive(Path::new("/backups/mine.tar.zst.age")));
         assert!(names_an_archive(Path::new("mine.age")));
-        // The trap this guards: a directory that does not exist yet, named like a directory.
+        // Directories that do not exist yet, named like directories
         assert!(!names_an_archive(Path::new("/backups")));
         assert!(!names_an_archive(Path::new("backups/radicle")));
         assert!(!names_an_archive(Path::new("/tmp")));
@@ -243,14 +230,14 @@ mod tests {
         };
 
         // A terminal keeps the bytes in scrollback, so the archive never goes there.
-        // `matches!` rather than `expect_err`, which would want Debug on Destination.
+        // `matches!` avoids needing Debug on Destination.
         let refused = prepare(&args, &identity, None, &now, &Encryption::Plaintext, true);
         assert!(
             matches!(refused, Err(Error::Refused { .. })),
             "a terminal should be refused"
         );
 
-        // A pipe or a redirect is the whole point of --stdout and must keep working.
+        // A pipe or a redirect is the whole point of --stdout and must keep working
         let allowed = prepare(&args, &identity, None, &now, &Encryption::Plaintext, false)
             .expect("a pipe is a destination");
         assert!(matches!(allowed, Destination::Stdout));

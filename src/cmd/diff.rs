@@ -1,8 +1,4 @@
-//! What has changed since the last archive.
-//!
-//! Answered from this tool's own record rather than by opening an archive, so it needs no
-//! passphrase and no decryption. A scheduled job can use it to skip a run that would archive
-//! nothing new: `rad-backup diff || rad-backup`.
+//! Reports what changed since the last archive, read from the state record with no passphrase.
 
 use std::collections::BTreeSet;
 
@@ -17,24 +13,19 @@ use crate::rad::Rad;
 use crate::state;
 use crate::term;
 
-/// Describe the same set of repositories the archive described, so the two are comparable.
+/// The repository selection to list now, matching the one the archive recorded.
 ///
-/// A `--repos all` or `--repos seeded` archive describes repositories that are not this
-/// peer's. Comparing that against a listing of only this peer's own reported every one of
-/// them as gone, on every run, forever: a scheduled `diff` meant to say "nothing changed,
-/// skip the backup" answered "repositories are missing" instead, and exited `3` doing it.
-///
-/// A selection this version does not know is read as `all`, because the two ways of being
-/// wrong are not equal: describing too much makes a repository look newly added, and too
-/// little makes one look lost.
+/// A selection this version does not know reads as `all`, because describing too much makes a
+/// repository look newly added, and too little makes one look lost.
 fn comparison_selection(recorded: &str) -> RepoSelection {
+    // Listing fewer repositories than the archive described reports the rest as gone every run
     match RepoSelection::from_word(recorded) {
         RepoSelection::Unknown => RepoSelection::All,
         known => known,
     }
 }
 
-/// What one set of ids gained and lost since the last archive. Sorted, as the sets are.
+/// What one set of ids gained and lost since the last archive, each list sorted.
 #[derive(Debug, serde::Serialize)]
 struct SetChange<'a> {
     added: Vec<&'a str>,
@@ -54,8 +45,8 @@ impl<'a> SetChange<'a> {
     }
 }
 
-/// Every policy set compared by id. Equal counts are not enough, because seeding one
-/// repository and unseeding another leaves them equal while the archive no longer matches.
+/// The changes to every policy set, compared by id. Equal counts are not enough, because
+/// seeding one repository and unseeding another leaves them equal.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PolicyChanges<'a> {
@@ -83,7 +74,7 @@ impl<'a> PolicyChanges<'a> {
     }
 }
 
-/// "2 repositories newly seeded" and "1 repository no longer seeded", each over its names.
+/// Prints a set's changes, such as "2 repositories newly seeded", each over its names.
 fn say_set_change(
     term: &term::Term,
     change: &SetChange,
@@ -152,10 +143,9 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
     let added: Vec<&String> = rids_now.difference(&record.described).collect();
     let removed: Vec<&String> = record.described.difference(&rids_now).collect();
 
-    // A repository has moved on when the signed refs of this peer point somewhere else than
-    // they did. That is the only change that can cost work, so it is the one worth naming.
-    // A new repository is named once, as new: it has no archived signed refs either, so
-    // without the first check it was listed a second time as moved.
+    // A repository has moved on when this peer's signed refs point somewhere new, which can
+    // cost work. A new repository has no archived signed refs, so the first filter keeps it
+    // from being listed a second time as moved.
     let moved: Vec<&crate::manifest::RepoRecord> = inventory
         .records
         .iter()
@@ -169,8 +159,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
             }
         })
         .collect();
-    // Two spellings of the same list: rids for the report a machine reads, names for the
-    // lines a person reads.
+    // The JSON report lists moved repositories by rid, and the terminal lines by name
     let moved_rids: Vec<&String> = moved.iter().map(|repo| &repo.rid).collect();
     let moved_names: Vec<&str> = moved.iter().map(|repo| repo.display_name()).collect();
 
@@ -181,8 +170,8 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         .map(|then| PolicyChanges::between(then, &policies_now));
     let policy_drift = match &policy_changes {
         Some(changes) => !changes.is_empty(),
-        // A record written before the sets were kept has only counts, and a swap of one
-        // repository for another passes them.
+        // A record that predates the sets has only counts, which miss a swap of one repository
+        // for another
         None => {
             policies_now.seeded.len() != record.seeded
                 || policies_now.followed.len() != record.followed
@@ -192,9 +181,8 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
         !added.is_empty() || !removed.is_empty() || !moved_names.is_empty() || policy_drift;
 
     if ctx.global.json {
-        // By rid, and by rid only. This report named the added and gone repositories by rid
-        // and the moved ones by display name, so the one field a consumer would act on was
-        // the one it could not look anything up with.
+        // Every repository list here is by rid, because a consumer cannot look anything up by
+        // name
         ctx.term.print_json(&serde_json::json!({
             "since": record.created,
             "archive": record.archive,
@@ -203,7 +191,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
             "repositoriesGone": removed,
             "repositoriesMoved": moved_rids,
             "policiesChanged": policy_drift,
-            // `null` when the record predates the sets, and `policiesChanged` compared counts.
+            // `null` when the record predates the sets, and `policiesChanged` compared counts
             "policies": policy_changes,
         }))?;
     } else {
@@ -228,10 +216,8 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
                 "new repositories",
             ));
             for rid in &added {
-                // By name here and by rid in the JSON report, for the same reason each way
-                // round: a person cannot recognise a rid, and a machine cannot look anything
-                // up with a name. A repository that is new is in the inventory, so its name
-                // is known; one that has gone is not, which is why gone ones are only counted.
+                // A person cannot recognise a rid, so a new repository prints by name. A gone
+                // repository is not in the inventory, so it has no name and is only counted.
                 term.hint(&inventory.display_name(rid));
             }
         }
@@ -251,7 +237,7 @@ pub fn run(ctx: &Ctx) -> Result<std::process::ExitCode> {
             ));
         }
         let repo_name = |rid: &str| inventory.display_name(rid);
-        // The local alias beside the id when there is one, since an id alone is unrecognisable.
+        // A peer prints with its local alias beside its id, because an id alone means nothing
         let peer_name = |nid: &str| {
             let alias = policies
                 .following
@@ -315,8 +301,8 @@ mod tests {
 
     #[test]
     fn a_comparison_describes_what_the_archive_it_compares_against_described() {
-        // Not `None`. An archive taken with `--repos all` describes repositories this peer
-        // does not own, and a comparison blind to them called every one of them gone.
+        // An archive taken with `--repos all` describes repositories this peer does not own,
+        // and a comparison blind to them reports every one as gone
         assert_eq!(comparison_selection("all"), RepoSelection::All);
         assert_eq!(comparison_selection("seeded"), RepoSelection::Seeded);
         assert_eq!(comparison_selection("mine"), RepoSelection::Mine);
@@ -326,8 +312,8 @@ mod tests {
 
     #[test]
     fn a_selection_this_version_cannot_read_describes_everything_rather_than_nothing() {
-        // The safe direction: a repository that looks newly added is a curiosity, and one that
-        // looks lost sends somebody hunting for a backup they already have.
+        // A repository that looks newly added is a curiosity. One that looks lost sends
+        // somebody hunting for a backup they already have.
         assert_eq!(comparison_selection("some-later-word"), RepoSelection::All);
         assert_eq!(comparison_selection(""), RepoSelection::All);
     }

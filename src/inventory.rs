@@ -1,10 +1,4 @@
-//! Deciding which repositories an archive carries, and what it knows about them.
-//!
-//! Two costs are kept apart. Deciding what is yours costs two `rad ls` calls and then reads
-//! files, spawning nothing per repository, so it stays cheap on a seed holding twelve thousand
-//! repositories. Gathering the paperwork
-//! (name, delegates, visibility) asks `rad`, so it happens only for repositories that are
-//! actually yours.
+//! Deciding which repositories an archive carries and what it records about them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -16,11 +10,11 @@ use crate::home::Home;
 use crate::manifest::{RepoRecord, RepoSelection};
 use crate::rad::{Described, Listed, Listing, Rad};
 
-/// What the inventory pass worked out, before anything is written.
+/// The repositories a run will describe and carry, worked out before anything is written.
 pub struct Inventory {
     /// Every repository the archive will describe, whether or not it carries its data.
     pub records: Vec<RepoRecord>,
-    /// Repositories whose data the archive will carry, by identifier.
+    /// The ids of the repositories whose data the archive will carry.
     pub selected: BTreeSet<String>,
     pub warnings: Vec<String>,
 }
@@ -30,8 +24,7 @@ impl Inventory {
         self.records.iter().filter(|record| record.is_private())
     }
 
-    /// What to call a repository in a message: its name when the paperwork knows one, and its
-    /// identifier when it does not.
+    /// A repository's name for messages, or its id when its identity document gave none.
     pub fn display_name(&self, rid: &str) -> String {
         self.records
             .iter()
@@ -40,9 +33,10 @@ impl Inventory {
             .unwrap_or_else(|| rid.to_string())
     }
 
-    /// How many repositories nothing could read the identity document of, so their visibility
-    /// and delegate list are unknown rather than absent. Every one of them when `rad` was not
-    /// there at all.
+    /// The number of repositories whose identity document went unread, leaving their
+    /// visibility and delegates unknown.
+    ///
+    /// Counts every repository when `rad` is missing.
     pub fn identities_not_read(&self) -> usize {
         self.records
             .iter()
@@ -50,8 +44,9 @@ impl Inventory {
             .count()
     }
 
-    /// Repositories this identity is the only delegate of. Losing the key ends their
-    /// governance, which is the one loss a backup cannot undo.
+    /// The repositories this identity is the sole delegate of.
+    ///
+    /// Losing the key ends their governance.
     pub fn solely_delegated(&self) -> impl Iterator<Item = &RepoRecord> {
         self.records
             .iter()
@@ -62,27 +57,28 @@ impl Inventory {
 /// Whether a run could tell which stored repositories are private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrivateSight {
-    /// It could, or it was not asked to.
+    /// Every visibility was read, or the selection did not need it.
     Seen,
     /// A private selection with no `rad` to read visibility, over a storage that holds
-    /// repositories. The selection resolves to nothing, and that is never what was meant.
+    /// repositories. The selection resolves to nothing, which is never what was meant.
     Blind,
-    /// A `mine` or `private` selection built on a partial judgement of which repositories are
-    /// yours: no `rad` for `mine`, a `rad` listing that failed, or a repository that could not
-    /// be checked. It can miss a repository.
+    /// A `mine` or `private` selection built on a partial view of the user's repositories,
+    /// which can miss one.
+    ///
+    /// The causes are no `rad` for `mine`, a failed `rad` listing, or an unchecked repository.
     Guessed,
 }
 
 /// Whether the caller is choosing repositories for an archive it is about to write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
-    /// `backup`: the selection decides what the archive holds.
+    /// `backup`, where the selection decides what the archive holds.
     Archive,
-    /// `doctor` and `diff`: nothing is written, so no warning may talk about an archive.
+    /// `doctor` and `diff`, which write nothing, so no warning may mention an archive.
     Inspection,
 }
 
-/// Work out what is in storage, what of it is yours, and what the selection asks for.
+/// Works out what is in storage, which of it is the user's, and what the selection asks for.
 #[allow(clippy::too_many_arguments)]
 pub fn collect(
     home: &Home,
@@ -100,8 +96,7 @@ pub fn collect(
     .map(|(inventory, _)| inventory)
 }
 
-/// `collect`, and whether it could see which repositories are private, for a backup to turn
-/// into its exit code.
+/// Runs [`collect`] and also reports whether it could see which repositories are private.
 #[allow(clippy::too_many_arguments)]
 pub fn collect_with_sight(
     home: &Home,
@@ -126,10 +121,9 @@ pub fn collect_with_sight(
     let stored_ids: BTreeSet<&str> = stored.iter().map(String::as_str).collect();
     let selected: BTreeSet<String> = match selection {
         RepoSelection::None => BTreeSet::new(),
-        // `Private` is resolved further down, once the identity documents have been read.
-        // `Unknown` is a selection word written by a build this one does not know, and it
-        // carries nothing on purpose: guessing which repositories a stranger's word meant is
-        // how a private repository ends up in an archive nobody expected it in.
+        // `Private` resolves below, once the identity documents are read. `Unknown` comes from
+        // a newer build and carries nothing, because guessing its meaning can put a private
+        // repository in an archive nobody expected it in.
         RepoSelection::Private | RepoSelection::Unknown => BTreeSet::new(),
         RepoSelection::Mine => mine.clone(),
         RepoSelection::Seeded => policies
@@ -140,8 +134,8 @@ pub fn collect_with_sight(
         RepoSelection::All => stored.iter().cloned().collect(),
     };
 
-    // Paperwork is gathered for what is yours and for what is being carried, and for nothing
-    // else: on a seed, the other twelve thousand repositories are somebody else's paperwork.
+    // Identity documents are read only for the user's repositories and the carried ones,
+    // because a seed holds thousands of others and each read spawns `rad`
     let to_describe: BTreeSet<&String> = mine.iter().chain(selected.iter()).collect();
     let seeding = policies.seeding_by_rid();
     let mut records = Vec::with_capacity(to_describe.len());
@@ -163,18 +157,17 @@ pub fn collect_with_sight(
     }
     records.sort_by(|a, b| a.rid.cmp(&b.rid));
 
-    // The default selection is decided after the records exist, because "private" is a fact
-    // about a repository that only the paperwork knows.
+    // The private selection waits for the records, because only the identity document says
+    // what is private
     let selected = match selection {
         RepoSelection::Private => private_selection(&records, &undescribed),
         _ => selected,
     };
-    // Visibility lives in the identity document, which only `rad` reads. Without it every
-    // repository looks public, so a private selection resolves to nothing. That is the state
-    // tier's default, which the shipped systemd timer runs nightly. Not a refusal, because the
-    // archive still holds the identity. It is exit 3 instead, through `PrivateSight`.
+    // Visibility lives in the identity document, which only `rad` reads, so without `rad` a
+    // private selection resolves to nothing. The archive still holds the identity, so this
+    // run exits 3 through `PrivateSight` and does not refuse.
     let unaided = purpose == Purpose::Archive && rad.is_none() && !stored.is_empty();
-    // Both selections start from `mine`: `mine` carries it, and `private` describes only it.
+    // `mine` carries the user's repositories and `private` describes only them
     let partly_judged = purpose == Purpose::Archive
         && own_sight == OwnSight::Partial
         && matches!(selection, RepoSelection::Mine | RepoSelection::Private);
@@ -184,8 +177,8 @@ pub fn collect_with_sight(
         _ if partly_judged => PrivateSight::Guessed,
         _ => PrivateSight::Seen,
     };
-    // Said only where `rad` changes what an archive holds. `mine` falls back to refs alone,
-    // which can miss a repository `rad` would have listed. The other selections do not ask it.
+    // This warning appears only where `rad` changes what an archive holds. Without `rad`,
+    // `mine` falls back to refs alone and can miss a repository.
     if rad.is_none() && purpose == Purpose::Archive {
         let missing = crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref());
         match sight {
@@ -206,13 +199,9 @@ pub fn collect_with_sight(
         }
     }
 
-    // After the selection, because what either warning may promise depends on it: a `--tier
-    // identity` run carries no repositories at all, and telling somebody their unreadable one
-    // is "carried as though private" there is the same over-assurance the warning exists to
-    // prevent. One warning for all of them, not one each: a `rad` that has stopped answering
-    // fails for every repository at once, and a seed holding thousands would otherwise put
-    // thousands of lines into `manifest.warnings`, which is the same manifest the writer
-    // refuses its own archive over past `MAX_MANIFEST_BYTES`.
+    // These warnings follow the selection, because what they may promise depends on it. Each
+    // is one line for all repositories, because a dead `rad` fails them all at once and a
+    // line each would push the manifest past `MAX_MANIFEST_BYTES`.
     if let Some(why) = first_unreadable {
         warnings.push(unreadable_warning(&unreadable, &selected, purpose, &why));
     }
@@ -244,8 +233,8 @@ fn undescribed_warning(
     purpose: Purpose,
     why: &str,
 ) -> String {
-    // Carried as though private under a private selection, because a repository whose
-    // visibility cannot be read must not be left out for looking public.
+    // A private selection carries them as though private, because a repository whose
+    // visibility cannot be read must not be left out for looking public
     let fate = match (count_also_selected(undescribed, selected), selection) {
         _ if purpose == Purpose::Inspection => String::new(),
         (0, _) => left_out(undescribed.len()),
@@ -285,7 +274,7 @@ fn unreadable_warning(
     )
 }
 
-/// What a troubled repository the archive does not carry costs, as a sentence to append.
+/// The sentence appended when the archive does not carry the troubled repositories.
 fn left_out(troubled: usize) -> String {
     match troubled {
         1 => " It is not in this archive.".to_string(),
@@ -293,16 +282,16 @@ fn left_out(troubled: usize) -> String {
     }
 }
 
-/// How many of these this run will actually carry.
+/// The number of troubled repositories this run carries.
 fn count_also_selected(troubled: &BTreeSet<String>, selected: &BTreeSet<String>) -> usize {
     troubled.intersection(selected).count()
 }
 
-/// What a private-only archive carries: what the paperwork calls private, plus anything the
-/// paperwork could not be read for.
+/// The repositories a private-only archive carries, those whose identity document says
+/// private plus those whose document could not be read.
 ///
-/// Pure, because it is the decision that empties an archive when it is wrong, and the only way
-/// to hold it still is to be able to test it without a `rad` on PATH.
+/// A wrong answer here empties an archive, so the function stays pure and testable without
+/// `rad`.
 fn private_selection(records: &[RepoRecord], undescribed: &BTreeSet<String>) -> BTreeSet<String> {
     records
         .iter()
@@ -311,8 +300,8 @@ fn private_selection(records: &[RepoRecord], undescribed: &BTreeSet<String>) -> 
         .collect()
 }
 
-/// Repositories this identity has a stake in: ones it created or forked, ones marked private,
-/// and any whose storage holds refs under its own namespace.
+/// The repositories this identity has a stake in, those it created, forked or marked private,
+/// and any whose storage holds refs under its namespace.
 fn own_repository_ids(
     home: &Home,
     rad: Option<&Rad>,
@@ -323,13 +312,13 @@ fn own_repository_ids(
     let mut mine = BTreeSet::new();
     let mut sight = OwnSight::Whole;
 
-    // No `rad` is said by `collect`, which knows whether this run is blind to private ones.
+    // `collect` warns about a missing `rad`, because it knows whether the run is blind
     if let Some(rad) = rad {
         for listing in [Listing::Own, Listing::Private] {
             match rad.list(listing)? {
                 Listed::Ids(ids) => mine.extend(ids),
-                // A listing that failed is not a listing that came back empty, and the
-                // difference decides whether a repository is in the archive at all.
+                // A failed listing differs from an empty one, and decides whether a repository
+                // is archived at all
                 Listed::Unavailable { why } => {
                     sight = OwnSight::Partial;
                     warnings.push(format!(
@@ -343,16 +332,15 @@ fn own_repository_ids(
     }
 
     for rid in stored {
-        // Said out loud rather than propagated: one unreadable `packed-refs` must not stop a
-        // backup of everything else, and a repository this could not judge is one the reader
-        // has to decide about, not one to drop in silence.
+        // One unreadable `packed-refs` must not stop the backup, and the repository it hides
+        // is named in a warning, never dropped in silence
         match has_namespace_at(&home.repository_path(rid), node_id) {
             Ok(true) => {
                 mine.insert(rid.clone());
             }
             Ok(false) => {}
             Err(e) => {
-                // A listing that already named it has decided it is yours.
+                // A listing that already named it has decided it is the user's
                 if !mine.contains(rid) {
                     sight = OwnSight::Partial;
                 }
@@ -364,9 +352,8 @@ fn own_repository_ids(
             }
         }
     }
-    // A listing can name a repository that is no longer in storage; the archive can only carry
-    // what is there. Through a set, because a seed reaches five figures of repositories and
-    // this is a membership test per repository.
+    // A listing can name a repository no longer in storage, and the archive carries only what
+    // is there. The set keeps this check cheap at five figures of repositories.
     let stored_ids: BTreeSet<&str> = stored.iter().map(String::as_str).collect();
     mine.retain(|rid| stored_ids.contains(rid.as_str()));
     Ok((mine, sight))
@@ -390,10 +377,8 @@ fn describe(
     routing: &BTreeMap<String, u64>,
 ) -> Result<(RepoRecord, Trouble)> {
     let path = home.repository_path(rid);
-    // Not `?`. A repository `git` cannot read is exactly the situation a backup exists for,
-    // and failing here meant a home with one damaged repository could not be archived at all.
-    // `archive_repositories` already refuses to let one bad repository cost the others; this
-    // is the same rule one stage earlier, where it was missing, and where it ran first.
+    // A repository `git` cannot read is recorded as trouble, because one damaged repository
+    // must not stop the whole home from being archived
     let (refs, unreadable) = match git.refs(&path) {
         Ok(refs) => (refs, None),
         Err(e) => (Vec::new(), Some(e.one_line())),
@@ -401,8 +386,7 @@ fn describe(
     let sigrefs = sigrefs_by_peer(&refs);
     let head = match unreadable {
         None => git.head_target(&path)?,
-        // Asking a repository whose refs would not list where its HEAD points fails the same
-        // way, for the same reason, and there is nothing more to learn from hearing it twice.
+        // A repository whose refs would not list fails the HEAD query for the same reason
         Some(_) => None,
     };
 
@@ -411,8 +395,8 @@ fn describe(
         Some(rad) => Some(rad.describe_repo(rid)?),
         None => None,
     };
-    // No `rad` at all is said once, by the collection or by its caller. Only a `rad` that was
-    // asked and could not answer is worth a line naming this repository.
+    // A missing `rad` is reported once by the caller. Only a `rad` that was asked and could
+    // not answer earns a line naming this repository.
     let (identity, unavailable) = match described {
         Some(Described::Identity(identity)) => (Some(identity), None),
         Some(Described::Unavailable { why }) => (None, Some(why)),
@@ -452,17 +436,17 @@ fn describe(
     ))
 }
 
-/// What could not be learned about one repository, when something could not. Both halves are
-/// reasons rather than flags, because the line a person acts on is the one that says why.
+/// What could not be learned about one repository.
+///
+/// Both fields hold reasons, because the line a user acts on is the one that says why.
 struct Trouble {
-    /// `rad` was asked about it and could not answer, so its visibility is unknown.
+    /// Why `rad` could not describe it, leaving its visibility unknown.
     undescribed: Option<String>,
-    /// `git` could not read it, so what is recorded about it is nearly empty.
+    /// Why `git` could not read it, leaving its record nearly empty.
     unreadable: Option<String>,
 }
 
-/// The signed refs each peer published, read out of the ref list we already have rather than
-/// asked of `rad` a second time.
+/// The signed refs each peer published, read from the ref list already in hand.
 fn sigrefs_by_peer(refs: &[git::Ref]) -> BTreeMap<String, String> {
     const PREFIX: &str = "refs/namespaces/";
     const SUFFIX: &str = "/refs/rad/sigrefs";
@@ -476,14 +460,11 @@ fn sigrefs_by_peer(refs: &[git::Ref]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Whether a repository directory holds refs under a given namespace, without running git.
+/// Whether a repository directory holds loose or packed refs under `node_id`'s namespace,
+/// read without spawning git.
 ///
-/// Loose refs are a directory; packed refs are one file. Checking both is what keeps this from
-/// spawning a process per repository on a seed.
-///
-/// An error when `packed-refs` is there and unreadable, which used to be a `false`: a
-/// repository whose refs are all packed then looked like a repository that is not ours, and
-/// with `rad` also unavailable `--repos mine` wrote an archive missing it and exited 0.
+/// Fails when `packed-refs` exists and cannot be read, so a repository whose refs are all
+/// packed never reads as someone else's.
 pub fn has_namespace_at(repo: &Path, node_id: &str) -> Result<bool> {
     let loose = repo.join("refs").join("namespaces").join(node_id);
     if loose.is_dir() {
@@ -492,7 +473,7 @@ pub fn has_namespace_at(repo: &Path, node_id: &str) -> Result<bool> {
     let packed = repo.join("packed-refs");
     match std::fs::read_to_string(&packed) {
         Ok(text) => Ok(text.contains(&format!("refs/namespaces/{node_id}/"))),
-        // No packed-refs at all means every ref is loose, and the check above already looked.
+        // No packed-refs means every ref is loose, and the check above already looked
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(Error::io(&packed, e)),
     }
@@ -556,14 +537,12 @@ mod tests {
             "fatal: not a git repository",
         );
 
-        // Same ceiling as the `rad` warning: a storage directory that has gone would fail for
-        // every repository at once, and one line each would fill the manifest that the writer
-        // then refuses its own archive over past `MAX_MANIFEST_BYTES`.
+        // A vanished storage directory fails every repository at once, and one line each
+        // would push the manifest past `MAX_MANIFEST_BYTES`
         assert_eq!(warning.lines().count(), 1);
         assert!(warning.contains("9 repositories"), "{warning}");
         assert!(warning.contains("and 4 more"), "{warning}");
-        // And it says what happens next, because "could not read" alone does not tell anyone
-        // whether they still have an archive.
+        // The warning says what happens next, so the user knows whether the archive is whole
         assert!(warning.contains("incomplete"), "{warning}");
     }
 
@@ -578,9 +557,8 @@ mod tests {
             "rad exited 1",
         );
 
-        // A `rad` that has stopped answering fails for every repository at once. One line per
-        // repository would put thousands of them in `manifest.warnings`, and that manifest is
-        // the one the writer refuses its own archive over past `MAX_MANIFEST_BYTES`.
+        // A dead `rad` fails every repository at once, and one line each would push the
+        // manifest past `MAX_MANIFEST_BYTES`
         assert_eq!(warning.lines().count(), 1);
         assert!(warning.contains("12 repositories"), "{warning}");
         assert!(warning.contains("and 7 more"), "{warning}");
@@ -608,7 +586,7 @@ mod tests {
         const GIT_SAID: &str = "fatal: not a git repository";
 
         // `--repos seeded` carries only what is seeded, so the warning may not promise the
-        // repository a place, nor mark the archive incomplete over it.
+        // repository a place, nor mark the archive incomplete over it
         let undescribed = undescribed_warning(
             &troubled,
             &nothing,
@@ -622,8 +600,8 @@ mod tests {
         assert!(unreadable.contains("not in this archive"), "{unreadable}");
         assert!(!unreadable.contains("incomplete"), "{unreadable}");
 
-        // `doctor` and `diff` write no archive, so neither warning may talk about one, even
-        // over a repository their selection would carry.
+        // `doctor` and `diff` write no archive, so neither warning may mention one, even over
+        // a repository their selection would carry
         for said in [
             undescribed_warning(
                 &troubled,
@@ -649,9 +627,8 @@ mod tests {
 
         let selected = private_selection(&records, &undescribed);
 
-        // The one `rad` could not answer for is in, because a repository with no visibility
-        // reads as public, and reading it as public is how a private-only archive comes back
-        // empty on the day it is needed.
+        // The repository `rad` could not describe is carried, because one with no visibility
+        // reads as public and a private-only archive would then come back empty
         assert!(selected.contains("rad:zUnknown"));
         assert!(selected.contains("rad:zPrivate"));
         assert!(!selected.contains("rad:zPublic"));
@@ -660,8 +637,7 @@ mod tests {
     #[test]
     fn nothing_is_carried_when_every_repository_is_public_and_all_of_them_were_described() {
         let records = vec![record("rad:zA", Some("public")), record("rad:zB", None)];
-        // `rad` was not asked about B at all, which is not the same as being asked and
-        // failing: with no `rad` on PATH the archive says so once, up front.
+        // `rad` was never asked about B, which differs from being asked and failing
         assert!(private_selection(&records, &BTreeSet::new()).is_empty());
     }
 
@@ -687,9 +663,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// The bug: an unreadable `packed-refs` was read as "this repository is not ours". With
-    /// `rad` also unavailable, which is the same machine's likely second problem, `--repos
-    /// mine` wrote an archive missing that repository and exited 0.
     #[cfg(unix)]
     #[test]
     fn a_repository_whose_refs_cannot_be_read_is_not_reported_as_somebody_elses() {
@@ -709,8 +682,7 @@ mod tests {
         std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o600))
             .expect("mode is settable back");
 
-        // Root can read it whatever the mode says, and root is the one user the old bug was
-        // invisible to, so the assertion is skipped rather than made to lie.
+        // Root reads the file whatever its mode, and then the test checks the answer it found
         if let Ok(found) = answer {
             assert!(found, "root read it, so it is ours");
         } else {

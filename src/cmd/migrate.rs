@@ -1,9 +1,4 @@
 //! Moving an identity to another machine.
-//!
-//! This is the common case, and it is the one with the footgun: two nodes running one key sign
-//! conflicting histories for the same peer, and the network sees a fork that nothing resolves.
-//! So the source key is retired as part of the move by default, not left behind as a courtesy
-//! copy. `--keep-source` leaves it, and the archive says so, so the far end is warned.
 
 use std::path::{Path, PathBuf};
 
@@ -12,16 +7,17 @@ use crate::cmd::{Ctx, backup, verify};
 use crate::error::{Error, Result};
 use crate::perms::MODE_DOC;
 
-/// What the retired key is renamed to. It stays on disk rather than being deleted, because a
-/// move that goes wrong halfway needs a way back.
+/// The file name the retired key is renamed to.
+///
+/// The key stays on disk, so a move that goes wrong halfway has a way back.
 pub(crate) const RETIRED_KEY: &str = "radicle.retired";
 const RETIRED_NOTE: &str = "RETIRED.txt";
 
 pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     ctx.home.require_identity()?;
 
-    // Not "is it running" but "is it proven stopped": this run is about to retire the key on
-    // this machine, and a socket that could not be reached is not evidence of anything.
+    // The node must be proven stopped before its key is retired, because a socket that could
+    // not be reached is no evidence the node is down
     let state = ctx.home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
@@ -58,17 +54,13 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         keep: None,
         dry_run: false,
     };
-    // Decided here rather than inside `backup`, because it is what the archive claims about
-    // this machine's future, and this is where that future is chosen.
     let purpose = match args.keep_source {
         true => backup::Purpose::MoveKeepingSource,
         false => backup::Purpose::Move,
     };
     let outcome = backup::run(ctx, &create, purpose)?;
-    // A move retires the key on this machine, so an archive that is missing repositories must
-    // not be the one it is retired against. `backup` carries on past a repository it cannot
-    // bundle, which is right for a backup and wrong for the last copy before a machine is
-    // left.
+    // `backup` carries on past a repository it cannot bundle. A move retires the key here, so
+    // an archive missing repositories must not be the one the key is retired against.
     if outcome.is_incomplete {
         return Err(Error::refused(
             "the move stopped because the archive may be missing repositories",
@@ -130,16 +122,18 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     Ok(())
 }
 
-/// Rename the key so this node cannot start with it, and leave a note saying why.
+/// Renames the key so this node cannot start with it, and leaves a note saying why.
+///
+/// Two nodes running one key sign conflicting histories for the same peer, and the network
+/// sees a fork that nothing resolves.
 fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
     let question = format!(
         "Retire the key on this machine? The archive at {} will hold the only usable copy.",
         archive.display()
     );
     if !ctx.term.confirm(&question)? {
-        // The archive is already written, and it says this machine retires its key, because
-        // that is what the command was asked to do. Saying so is the whole of the remedy: a
-        // home restored from it will be told the source is safe, and it is not.
+        // The written archive already says this machine retired its key, so a home restored
+        // from it would be told the source is safe
         let remedy = match ctx.term.is_interactive() {
             true => {
                 "delete that archive, then run the move again. Answer yes, or add \
@@ -161,28 +155,22 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
 
     let from = ctx.home.secret_key();
     let to = retired_path(&ctx.home.keys_dir());
-    // Named for the source: a rename fails on either path, and the one a reader can act on
-    // is the key that is still where it was.
+    // The error names the source, because the key still in place is the one a user can act on
     std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e))?;
 
-    // The name the rename actually used, not `RETIRED_KEY`: a second move puts its key at
-    // `radicle.retired.2`, and a note pointing at `radicle.retired` sends the one person who
-    // ever reads this file to the key from the move before. Read at 3am, that is the wrong key
-    // put back on a machine whose node is about to sign under a peer id another node holds.
+    // The note names the file the rename produced. A second move puts its key at
+    // `radicle.retired.2`, and a note naming `radicle.retired` sends its reader to the key of
+    // the move before.
     let retired_as = to
         .file_name()
         .unwrap_or(RETIRED_KEY.as_ref())
         .to_string_lossy();
     let note_path = ctx.home.keys_dir().join(RETIRED_NOTE);
-    // Every failure from here on is reported and none of it propagates. The rename above has
-    // already happened, so an error out of this block hands a machine whose key IS retired a
-    // message saying the move failed, and withholds the one line naming the file it went to.
-    // The note is a courtesy for whoever finds these files years later; where the key is now
-    // is what the person standing here needs.
+    // Every failure from here on is reported and none propagates. The key is already renamed,
+    // so an error here would report a failed move and withhold the line naming where it went.
     match read_former_note(&note_path) {
-        // Left exactly as it is. Writing a fresh note over it would drop whatever it holds,
-        // which is the record of an earlier retirement, and this command is not the one that
-        // gets to decide that is worth less than a tidy file.
+        // The note stays as it is, because writing over it drops the record of an earlier
+        // retirement
         FormerNote::Unreadable(e) => {
             ctx.term.warn(&format!(
                 "could not read {}: {e}. The note was left unchanged",
@@ -215,13 +203,11 @@ fn retire(ctx: &Ctx, archive: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Whatever `RETIRED.txt` held before this retirement.
+/// What `RETIRED.txt` held before this retirement.
 enum FormerNote {
-    /// No note yet, which is every first move.
     Absent,
-    /// What it said, to be carried into the note this move writes.
+    /// The text, carried into the note this move writes.
     Said(String),
-    /// There, and this run could not read it.
     Unreadable(std::io::Error),
 }
 
@@ -242,12 +228,7 @@ fn read_former_note(path: &Path) -> FormerNote {
     }
 }
 
-/// What `RETIRED.txt` says after this retirement, given whatever it said before.
-///
-/// Pure, so the two things that were wrong about it can be tested without a home: it named
-/// `RETIRED_KEY` rather than the file the rename produced, so a second move sent its reader to
-/// the key from the move before, and it was written rather than appended, so that second move
-/// took the only record of which archive the first key had left with.
+/// The text of `RETIRED.txt` after this retirement, appended to what it `already` said.
 fn retirement_note(already: Option<&str>, retired_as: &str, when: &str, archive: &Path) -> String {
     let addition = format!(
         "This identity was moved to another machine on {when}.\n\
@@ -268,44 +249,32 @@ fn retirement_note(already: Option<&str>, retired_as: &str, when: &str, archive:
     }
 }
 
-/// Where a first retirement puts the key it displaced.
+/// The path a first retirement moves the key to.
 ///
-/// Separate from `retired_path` below, which answers "where would the NEXT one go" and so
-/// returns a name nothing is at. Asking that one whether a home holds a retired key can only
-/// ever be answered no: the arm in `what_a_restore_would_overwrite` that did was unreachable.
+/// `retired_path` always returns a name nothing is at, so asking it whether a home holds a
+/// retired key always answers no.
 pub(crate) fn first_retired_path(keys_dir: &Path) -> PathBuf {
     keys_dir.join(RETIRED_KEY)
 }
 
-/// Whether this home holds a key some earlier retirement displaced, under any of its names.
+/// Whether `keys_dir` holds a key some earlier retirement displaced, under any of its names.
 ///
-/// The directory rather than the first name, because `retired_path` never reuses a freed one:
-/// a home whose `radicle.retired` was moved away by hand still holds `radicle.retired.2`, and
-/// a probe that asked only for the first would read that home as empty and let a restore
-/// write over the key in it. A directory that cannot be listed counts as holding one, for the
-/// reason `what_a_restore_would_overwrite` gives: being wrong towards "present" costs one
-/// `--force` and being wrong the other way costs somebody's only key.
+/// Returns `true` when the directory cannot be listed, because a wrong yes costs one `--force`
+/// and a wrong no lets a restore write over the user's only key.
 pub(crate) fn holds_a_retired_key(keys_dir: &Path) -> bool {
     let entries = match std::fs::read_dir(keys_dir) {
         Ok(entries) => entries,
         Err(e) => return e.kind() != std::io::ErrorKind::NotFound,
     };
+    // `retired_path` never reuses a freed name, so `radicle.retired.2` can stand alone
     entries.into_iter().any(|entry| match entry {
         Ok(entry) => entry.file_name().to_string_lossy().starts_with(RETIRED_KEY),
-        // An entry that will not read is a name this cannot rule out, and `flatten` dropped
-        // it silently: a directory listing that failed halfway through then read as one
-        // holding nothing, which is the answer that lets a restore write over the key.
+        // An entry that will not read may be a retired key, so it counts as one
         Err(_) => true,
     })
 }
 
-/// Where the next retirement should put the key it displaces: the first name free.
-///
-/// A second move does not write over the first one's key: the same file name twice would mean
-/// a key nobody meant to destroy is gone, which is the one outcome this whole tool exists to
-/// prevent. The `unwrap_or` below cannot be reached, because the range it searches has no end;
-/// it is there because the type says the search may fail and returning the occupied path is
-/// the answer a caller can at least see going wrong.
+/// The first free path for the next retired key, so no retirement writes over an earlier one.
 pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
     let first = first_retired_path(keys_dir);
     if !first.exists() {
@@ -314,6 +283,7 @@ pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
     (2..)
         .map(|n| keys_dir.join(format!("{RETIRED_KEY}.{n}")))
         .find(|path| !path.exists())
+        // The search range has no end, so this fallback is unreachable
         .unwrap_or(first)
 }
 
@@ -321,12 +291,6 @@ pub(crate) fn retired_path(keys_dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    /// The bug, twice over: the note named `RETIRED_KEY` while the rename had produced
-    /// `radicle.retired.2`, so it sent its reader to the key the move before had displaced,
-    /// and it was written over the first note, taking the only record of which archive that
-    /// key had left with. Both matter at the one moment this file is ever read, which is
-    /// somebody deciding whether to put a key back on a machine whose peer id another node is
-    /// signing under.
     #[test]
     fn a_second_move_names_its_own_key_and_keeps_the_first_note() {
         let first = retirement_note(
@@ -345,7 +309,6 @@ mod tests {
             Path::new("/backups/second.tar.zst"),
         );
         assert!(second.contains("as radicle.retired.2.\n"), "{second}");
-        // The first paragraph and its archive are still there to be read.
         assert!(second.contains("/backups/first.tar.zst"), "{second}");
         assert!(second.contains("/backups/second.tar.zst"), "{second}");
         assert!(second.starts_with(&first), "{second}");
@@ -364,7 +327,7 @@ mod tests {
     #[test]
     fn a_second_move_retires_beside_the_first_rather_than_over_it() {
         let dir = std::env::temp_dir().join(format!("rad-backup-retire-{}", std::process::id()));
-        // Whatever a previous run left behind would change the answer this asks about.
+        // Leftovers from a previous run would change the answer
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("the scratch directory is creatable");
         let first = retired_path(&dir);

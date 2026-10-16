@@ -8,20 +8,19 @@ charset = utf-8
 trim_trailing_whitespace = true
 insert_final_newline = true
 
-# What rustfmt does anyway. Here so an editor agrees with it before the formatter runs.
+# Matches rustfmt, so an editor agrees with it before the formatter runs
 [*.rs]
 indent_size = 4
 max_line_length = 100
 
-# just recipes are shell, and just is whitespace-sensitive about how they are indented.
+# just is whitespace-sensitive about how recipes are indented
 [justfile]
 indent_size = 4
 
-# Tabs, because the shell scripts here were lifted out of `just` recipes, which are tab
-# indented, and `assets/restore.sh` is read back by a test that matches on its indentation.
+# Tabs, because a test reads `assets/restore.sh` back and matches on its indentation
 [*.sh]
 indent_style = tab
 
-# A trailing double space is a line break in markdown, so trimming it changes the text.
+# A trailing double space is a line break in markdown, so trimming it changes the text
 [*.md]
 trim_trailing_whitespace = false

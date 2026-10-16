@@ -1,16 +1,6 @@
 #!/usr/bin/env sh
 
-# Numbers and calls that mean one thing and are written in several files, held to each other.
-#
-# Every pin here is a fact one file owns and others repeat: the first git that checks a bundle,
-# how many checks `doctor` runs. A repeated fact drifts, and each of these drifted somewhere a
-# test could not see. The version boundary lives in Rust, in the shipped shell script and in
-# the sheet beside it, and the two readers of an archive are meant to warn about exactly the
-# same gits; the check count lives in a constant, in the command, and in what the integration
-# suite asks the real binary for.
-#
-# A pin is only worth what its extraction is worth, so every one refuses an empty read rather
-# than comparing nothing to nothing, and the count at the end refuses a run that lost a pin.
+# Facts one file owns and others repeat, held to each other
 
 set -eu
 
@@ -20,9 +10,8 @@ set -eu
 wrong=0
 pins=0
 
-# Whatever `grep` found, or an empty string, and never the exit status of a grep that could
-# not open the file: `|| true` maps "no such file" to success just as happily as "no match",
-# which is how a gate comes to report a clean tree having read nothing.
+# Whatever `grep` found, or an empty string. A missing file fails, because `|| true` would map
+# "no such file" to a clean tree.
 found() {
 	pattern=$1
 	file=$2
@@ -33,8 +22,8 @@ found() {
 	grep -oE "$pattern" "$file" || [ $? -eq 1 ]
 }
 
-# The first git that runs `fsck` over a bundle. `src/git.rs` owns it; `assets/restore.sh` is
-# the reader that runs when this tool is not installed, and it has to warn about the same gits.
+# The first git that runs `fsck` over a bundle. `src/git.rs` owns it, and `assets/restore.sh`
+# runs without this tool and has to warn about the same gits.
 pins=$((pins + 1))
 boundary=$(found 'FSCK_ON_A_BUNDLE_SINCE: \(u32, u32\) = \([0-9]+, [0-9]+\)' src/git.rs)
 boundary=$(echo "$boundary" | grep -oE '[0-9]+, [0-9]+' || [ $? -eq 1 ])
@@ -62,8 +51,7 @@ for claim in \
 	fi
 done
 
-# The warning itself, which no test can watch fire on a machine whose git is new enough. The
-# wording is covered by `bundle_check_notice`; this is the half that says it is still called.
+# The call that raises the old-git warning, which no test can watch fire on a new git
 pins=$((pins + 1))
 if [ -z "$(found 'fsck_reaches_a_bundle' src/cmd/restore.rs)" ]; then
 	echo "src/cmd/restore.rs no longer asks whether this git checks a bundle, so a restore on" \
@@ -71,12 +59,9 @@ if [ -z "$(found 'fsck_reaches_a_bundle' src/cmd/restore.rs)" ]; then
 	wrong=1
 fi
 
-# The settings a restore takes out of an archive, which three readers each spell for
-# themselves: `src/cmd/restore.rs`, the `restore.sh` that rides inside every archive, and the
-# commands `RESTORE.md` gives somebody to paste. All three say they apply the same allowlist,
-# and a key added to one of them is a setting one reader of an archive puts back and another
-# does not, which is the drift these gates exist to end. A repository config is where git
-# looks for the settings whose values it RUNS, so the list is also the security boundary.
+# The config keys a restore takes from an archive, spelled by `src/cmd/restore.rs`,
+# `restore.sh` and `RESTORE.md`. Git runs some config values, so this allowlist is a security
+# boundary and all three readers must apply the same one.
 pins=$((pins + 1))
 allowed=$(found 'CONFIG_ALLOWED: &\[&str\] = &\[[^]]*\]' src/cmd/restore.rs |
 	grep -oE '"[a-z.]+"' | tr -d '"' | sort | tr '\n' ' ')
@@ -96,7 +81,7 @@ for reader in assets/restore.sh assets/RESTORE.md; do
 	fi
 done
 
-# How many checks `doctor` runs, which three places state and none derives.
+# How many checks `doctor` runs, which three places state and none derives
 pins=$((pins + 1))
 defined=$(found '^fn check_[a-z_]+' src/cmd/doctor.rs | grep -c '' || [ $? -eq 1 ])
 pinned=$(found 'CHECKS_THE_COMMAND_RUNS: usize = [0-9]+' src/cmd/doctor.rs | grep -oE '[0-9]+$' ||
@@ -114,29 +99,23 @@ if [ "$defined" != "$pinned" ] || [ "$defined" != "$asked" ]; then
 	wrong=1
 fi
 
-# What `just check` runs, which the README and CONTRIBUTING each describe in the same sentence
-# beside the same command. A gate added to the recipe and to one of them leaves the other
-# telling a contributor the run covers less than it does, which is the half nobody re-reads.
+# The sentence describing `just check`, which README and CONTRIBUTING each carry
 pins=$((pins + 1))
 recipe=$(found 'just check +# [^|]*' README.md)
 if [ -z "$recipe" ]; then
 	echo "README.md no longer shows the 'just check' line this gate reads" | complain
 	exit 1
 fi
-# Read out of both files the same way, rather than looking the README's sentence up inside
-# CONTRIBUTING.md: a match found there is only ever as long as what was searched for, so a
-# clause added to the end of one of the two sentences would be found in the other and pass.
+# Both are read out the same way, because a search for one sentence inside the other passes
+# when a clause is added only to its end
 if [ "$(found 'just check +# [^|]*' CONTRIBUTING.md)" != "$recipe" ]; then
 	echo "README.md and CONTRIBUTING.md describe 'just check' differently, so one of them is" \
 		"telling a contributor the run covers something other than what it covers" | complain
 	wrong=1
 fi
 
-# The gates themselves, in the order the justfile's `check` recipe runs them and the order the
-# workflow's test job does. Moving them into `ci/` stopped the two spelling a gate's RULES
-# differently; which gates each side runs is still written twice, and it drifted twice in one
-# session before the move. A gate only one side runs is one that lands broken on whichever
-# side nobody ran.
+# The gates, in the order the `check` recipe and the workflow's test job each run them. A gate
+# only one side runs lands broken on whichever side nobody ran.
 pins=$((pins + 1))
 recipe_gates=$(grep -m1 '^check:' justfile | tr ' ' '\n' | sed 's/:$//' |
 	while read -r name; do
@@ -156,11 +135,9 @@ if [ "$recipe_gates" != "$workflow_gates" ]; then
 	wrong=1
 fi
 
-# Every value `RESTORE.md` interpolates into a command it prints, quoted. Those `rad seed` and
-# `rad follow` lines are built out of `policies.json`, which is whatever the archive says, and
-# the reader is told to run them: unquoted, an id reading `x; curl ... | sh` is a second
-# command on a line that otherwise looks ordinary. `@sh` on each one is the whole defence, and
-# nothing else in the suite reads a document nobody executes.
+# Every value `RESTORE.md` interpolates into a printed `rad` command is quoted with `@sh`. The
+# values come from the archive and the reader is told to run the line, so an id reading
+# `x; curl ... | sh` would run a second command.
 pins=$((pins + 1))
 built=$(found '"rad [^"]*"' assets/RESTORE.md)
 if [ -z "$built" ]; then
@@ -175,23 +152,16 @@ if [ -n "$bare" ]; then
 	wrong=1
 fi
 
-# The three moments a restore looks at whether the home's own directories point into it. `run`
-# settles it with the person there; the other two refuse outright, which is why each site is
-# pinned to its OWN function rather than to either: turning a later look into a second ask
-# would let a link planted mid-restore be consented to, which is the whole thing this stops.
-# They exist because
-# unpacking a large archive takes minutes and a link planted during them is followed by the
-# `create_dir_all` that comes next. No test can plant a link mid-run, so what holds the second
-# and third looks is this: each is a call inside a named function, and losing one is losing
-# the part of the check that is about time rather than about layout.
+# Each of the three looks at whether the home's directories point elsewhere stays in its own
+# function. A link planted while a large archive unpacks is followed by the next write, and no
+# test can plant one mid-run. Only `run` may ask, because nobody can consent to a later link.
 pins=$((pins + 1))
 for pair in "run settle_directories_that_point_elsewhere" \
 	"install refuse_a_link_that_appeared_mid_restore" \
 	"restore_repositories refuse_a_link_that_appeared_mid_restore"; do
 	asked_in=${pair% *}
 	asks=${pair#* }
-	# The function body, from its signature to the next line starting at column zero, which is
-	# how every item in this file ends.
+	# The function body, from its signature to the next line starting at column zero
 	body=$(awk -v want="fn $asked_in(" '
 		index($0, want) { inside = 1 }
 		inside { print }
@@ -211,7 +181,7 @@ for pair in "run settle_directories_that_point_elsewhere" \
 	fi
 done
 
-# A pin that stopped running is a pin that stopped holding, and it would do it quietly.
+# A pin that stopped running reports nothing, so the count of pins run is checked too
 if [ "$pins" -ne 8 ]; then
 	echo "$pins pins ran, not the 8 this gate has. One was lost rather than deleted." | complain
 	wrong=1

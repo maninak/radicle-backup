@@ -1,4 +1,4 @@
-//! Showing what is inside an archive.
+//! Prints what an archive holds.
 
 use crate::cli::ArchiveArg;
 use crate::cmd::Ctx;
@@ -73,8 +73,8 @@ pub fn run(ctx: &Ctx, args: &ArchiveArg) -> Result<()> {
             .flatten()
             .collect::<Vec<_>>()
             .join(", ");
-            // The name column stays empty when there is no name, rather than repeating the
-            // identifier that is already in the next column.
+            // An unnamed repository leaves the name column empty, because the next column
+            // already shows its identifier
             term.print(&format!(
                 "{:<24} {:<40} {marks}",
                 truncate(repo.name.as_deref().unwrap_or(""), 24),
@@ -93,8 +93,8 @@ pub fn run(ctx: &Ctx, args: &ArchiveArg) -> Result<()> {
         manifest.policies.blocked_peers
     ))?;
 
-    // Under a heading and without `!`, because these describe the run that took the archive
-    // and not anything wrong now.
+    // Archive warnings print under a heading with no `!`, because they describe the run that
+    // took the archive, not a fault now
     if !manifest.warnings.is_empty() {
         term.blank();
         term.headline("noted when this archive was taken");
@@ -105,12 +105,10 @@ pub fn run(ctx: &Ctx, args: &ArchiveArg) -> Result<()> {
     Ok(())
 }
 
-/// Read an archive end to end and hand back what it says it holds.
-///
-/// The whole archive is read even for a listing, because the manifest is the last entry: it
-/// carries the digest of every entry as written, which is a claim that can only be made once
-/// the entries exist.
+/// Reads an archive end to end and returns its manifest.
 pub fn read_manifest(ctx: &Ctx, args: &ArchiveArg) -> Result<Manifest> {
+    // The manifest carries the digest of every entry as written, so it is the last entry and
+    // even a listing reads the whole archive
     let archive = crate::cmd::resolve_archive(ctx, args.archive.as_deref())?;
     let passphrase = crate::cmd::read_archive_passphrase(ctx, &archive)?;
     let reader = Reader::open(&archive, passphrase.as_ref(), &ctx.identities())?;

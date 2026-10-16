@@ -1,20 +1,16 @@
-//! Making files unreadable by anyone but their owner, on systems that can say that.
-//!
-//! Every path that has held key material goes through here, so there is exactly one place that
-//! knows what "owner only" means on this platform, and exactly one place that has to be honest
-//! when the platform cannot promise it.
+//! Owner-only files and directories, on systems that can express it.
 
 use std::path::Path;
 
 use crate::error::{Error, Result};
 
-/// Make a directory readable only by its owner, before anything is written into it.
+/// Restricts a directory to its owner. Call it before anything is written into it.
 pub fn set_dir_owner_only(path: &Path) -> Result<()> {
     set_mode(path, MODE_DIR)
 }
 
-/// Copy a file that may hold key material, landing it owner-only. Missing sources are not an
-/// error: an archive of one tier does not carry what another tier would.
+/// Copies a file that may hold key material, landing it owner-only. A missing source is
+/// skipped, because an archive of one tier does not carry what another tier would.
 pub fn copy_secret(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
@@ -23,24 +19,23 @@ pub fn copy_secret(from: &Path, to: &Path) -> Result<()> {
     write_atomically(to, &bytes, MODE_SECRET)
 }
 
-/// Copy a file that holds nothing secret, landing it at the mode a home `rad` built itself
-/// would have. The staging copy is owner-only because it sat beside a private key, and
-/// carrying that mode through would leave a restored home subtly unlike a native one.
+/// Copies a file that holds nothing secret, landing it at the mode `rad` gives it in a home.
+/// The staging copy sat owner-only beside a private key, and that mode must not carry over.
 pub fn copy_doc(from: &Path, to: &Path) -> Result<()> {
     if !from.is_file() {
         return Ok(());
     }
-    // Through the same staged replacement as a key: `config.json` half written over is a
-    // home that will not start, and this runs while a restore is putting one back together.
+    // Staged like a key, because a half-written `config.json` leaves a home that will not
+    // start
     let bytes = std::fs::read(from).map_err(|e| Error::io(from, e))?;
     write_atomically(to, &bytes, MODE_DOC)
 }
 
-/// A private key, and the archives that carry one.
+/// The mode of a private key, and of the archives that carry one.
 pub const MODE_SECRET: u32 = 0o600;
-/// A public key, a config, a manifest: what a Radicle home keeps world-readable itself.
+/// The mode of what a Radicle home keeps world-readable, such as a public key or a config.
 pub const MODE_DOC: u32 = 0o644;
-/// A working directory, or a home.
+/// The mode of a working directory, or a home.
 pub const MODE_DIR: u32 = 0o700;
 
 #[cfg(unix)]
@@ -50,11 +45,9 @@ mod platform {
     pub fn create_private_file(path: &Path) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
 
-        // Unlink first, then `create_new`, because open(2) applies its mode argument ONLY when
-        // it creates the file. Under `create` the mode was silently ignored whenever the path
-        // already existed, so restoring over a 0644 key left it 0644, and an existing symlink
-        // was followed and the key written to its target instead. `create_new` then fails
-        // rather than races if something recreates the path in between.
+        // open(2) applies its mode only when it creates the file, and follows an existing
+        // symlink, so the path is unlinked first. `create_new` then fails if something
+        // recreates the path in between.
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -84,9 +77,9 @@ mod platform {
         std::fs::set_permissions(path, permissions).map_err(|e| Error::io(path, e))
     }
 
-    /// Whether two paths sit on the same filesystem. A different one is proof that a backup
-    /// outlives the disk holding the home; the same one proves nothing either way, because a
-    /// synced directory is off the machine whatever `dev` says.
+    /// Whether two paths sit on the same filesystem. `false` proves a backup outlives the
+    /// disk holding the home, and `true` proves nothing, because a synced directory leaves the
+    /// machine whatever `dev` says.
     pub fn same_device(left: &Path, right: &Path) -> Option<bool> {
         use std::os::unix::fs::MetadataExt;
 
@@ -104,11 +97,9 @@ mod platform {
 
     static ANNOUNCED: Once = Once::new();
 
-    /// Windows has no mode bits, and restricting an ACL from here would mean a Windows API
-    /// dependency. So the file inherits the permissions of the folder it is written into, and
-    /// this says so once, out loud, rather than letting a caller believe in a `0600` that is
-    /// not there. The same holds for any other platform that cannot express "mine alone".
-    /// Revisit if a dependency-free way to set an ACL turns up.
+    /// Warns once that this platform cannot restrict a file to one user, so the file inherits
+    /// its folder's permissions. Setting an ACL needs a Windows API dependency. Revisit if a
+    /// dependency-free way to set an ACL turns up.
     fn announce(path: &Path) {
         ANNOUNCED.call_once(|| {
             eprintln!(
@@ -141,9 +132,8 @@ mod platform {
         Ok(())
     }
 
-    /// The best a filesystem-agnostic check can do here: two paths are on the same device when
-    /// they are on the same volume. A junction or a mapped drive can still fool it, so an
-    /// undecidable answer is `None` rather than a guess.
+    /// Whether two paths sit on the same volume, or `None` when either cannot be resolved. A
+    /// junction or a mapped drive can still fool it.
     pub fn same_device(left: &Path, right: &Path) -> Option<bool> {
         use std::path::Component;
 
@@ -163,26 +153,18 @@ mod platform {
 
 pub use platform::{create_private_file, same_device, set_mode};
 
-/// Create a directory only its owner can enter, with that mode from the moment it exists.
+/// Creates a directory only its owner can enter, with that mode from the moment it exists.
 ///
-/// Two things a `create_dir_all` followed by a `chmod` does not give: between those two calls
-/// anything on the machine can read what lands inside, and `create_dir_all` succeeds on a
-/// directory that is already there. A working directory whose name someone else guessed and
-/// created first, with permissions of their choosing, is exactly the one this must refuse, so
-/// an existing path is an error here rather than a reuse. The parent must exist already.
+/// Refuses an existing path, because a directory someone else created first carries their
+/// permissions. The parent must exist already.
 pub use platform::create_private_dir;
 
-/// Put `bytes` at `path` so that whatever happens, the path holds either what was there
-/// before or the whole of the new content, and never a prefix of it or nothing at all.
+/// Puts `bytes` at `path` so the path holds either its old content or all of the new, never a
+/// prefix or nothing.
 ///
-/// `create_private_file` unlinks the target before creating it, which is what makes the mode
-/// argument mean anything and what makes writing in place dangerous: a `restore --force` over
-/// an occupied home has already destroyed the old secret key by the time the first byte of the
-/// new one is written, so a crash, a full disk or a killed run leaves a home with no identity
-/// at all. Staged beside the target and renamed over it, the
-/// same failure leaves the old file exactly as it was, because a rename within a directory is
-/// atomic. There is no corresponding fsync of the parent: a crash may lose the rename, but
-/// losing the rename means keeping the old file, which is the promise this function makes.
+/// `create_private_file` unlinks the target first, so writing in place would lose the old key
+/// on a crash. The content is staged beside the target and renamed over it. The parent is not
+/// fsynced, because a lost rename keeps the old file.
 pub fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let mut staging_path = path.as_os_str().to_os_string();
     staging_path.push(".partial");
@@ -191,13 +173,13 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let staged = (|| -> Result<()> {
         use std::io::Write as _;
 
-        // Owner-only from its first byte whatever the final mode is, so key material is never
-        // briefly readable under a name a watcher can predict.
+        // Owner-only from its first byte, so key material is never readable under a
+        // predictable name
         let mut file = create_private_file(&staging_path)?;
         file.write_all(bytes)
             .map_err(|e| Error::io(&staging_path, e))?;
-        // Before the rename that publishes it: a rename is atomic against a crash, but only
-        // over content the filesystem has been told to keep.
+        // Synced before the rename, because a rename is atomic against a crash only over
+        // content already on disk
         file.sync_all().map_err(|e| Error::io(&staging_path, e))?;
         drop(file);
         set_mode(&staging_path, mode)?;
@@ -205,22 +187,20 @@ pub fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     })();
 
     if staged.is_err() {
-        // Best effort, and deliberately not reported: the error being returned is the one
-        // worth reading, and a leftover staging file changes nothing about the target.
+        // Cleanup is best effort, because the error being returned is the one worth reading
         let _ = std::fs::remove_file(&staging_path);
     }
     staged
 }
 
-/// Write a file only its owner can read, creating it with those permissions rather than
-/// fixing them afterwards: a private key that is briefly world-readable has been read.
+/// Writes a file only its owner can read, created with those permissions, because a private
+/// key that is briefly world-readable has been read.
 pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
 
     let mut file = create_private_file(path)?;
-    // Named, not bare: this lands private keys and archives, and "No space left on device"
-    // with no path attached is the message somebody reads while trying to work out which of
-    // their files did not survive.
+    // The path is attached, because a bare "No space left on device" does not say which key or
+    // archive failed
     file.write_all(bytes).map_err(|e| Error::io(path, e))?;
     file.flush().map_err(|e| Error::io(path, e))
 }
@@ -231,21 +211,17 @@ mod tests {
 
     #[test]
     fn a_replacement_that_cannot_even_be_staged_leaves_the_original_alone() {
-        // Owner-only, like every other fixture in this crate that writes a file named after a
-        // key: this one is a placeholder, and a directory anyone can read is the habit that
-        // puts a real one there.
+        // Owner-only, like every fixture that writes a file named after a key
         let scratch = crate::key::tests::TestScratch::create("perms-keeps-the-original");
         let path = scratch.path_of("radicle");
         std::fs::write(&path, b"the identity already here").expect("a file worth protecting");
-        // Nothing can be created under the staging name, so the replacement fails at its
-        // first step, which is the earliest a failure can happen.
+        // The staging name is occupied, so the replacement fails at its first step
         std::fs::create_dir(scratch.path_of("radicle.partial"))
             .expect("the staging name is occupied");
 
         assert!(write_atomically(&path, b"the identity being restored", MODE_SECRET).is_err());
 
-        // Writing in place unlinked the target first, so any failure after that left a home
-        // holding neither the old identity nor the new one.
+        // Writing in place would unlink the target first and lose both identities
         assert_eq!(
             std::fs::read(&path).expect("the original is still readable"),
             b"the identity already here"
@@ -269,10 +245,8 @@ mod tests {
         );
     }
 
-    /// The values, not the names. Every other test in the tree compares a mode it read back
-    /// with the constant it was written from, which passes just as well when the constant is
-    /// wrong: turning `MODE_DIR` into `0o755` leaves the whole suite green. This is the one
-    /// place the numbers are written down a second time.
+    /// Pins the mode values themselves, because a test comparing a mode read back with the
+    /// constant it was written from still passes when the constant is wrong.
     #[test]
     fn a_secret_and_a_directory_are_owner_only_and_a_document_is_not() {
         assert_eq!(MODE_SECRET, 0o600);
@@ -280,10 +254,8 @@ mod tests {
         assert_eq!(MODE_DOC, 0o644);
     }
 
-    /// The staging file is created owner-only whatever the caller asked for, so the mode the
-    /// caller asked for is applied afterwards or not at all. Dropping that one line left the
-    /// suite green while every `config.json` a restore put back came out `0600`, which is a
-    /// home subtly unlike one `rad` built.
+    /// The staging file is created owner-only, so the requested mode is applied afterwards or
+    /// not at all. Without that step every restored `config.json` comes out `0600`.
     #[cfg(unix)]
     #[test]
     fn a_document_lands_at_the_mode_a_native_home_would_have() {

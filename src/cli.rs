@@ -1,8 +1,4 @@
-//! The command line.
-//!
-//! `rad` runs `rad-backup` for `rad backup`, so every verb here reads as the second word of a
-//! `rad backup ...` sentence. Creating an archive is what an unqualified `rad backup` does,
-//! because that is the thing people came for.
+//! The command line, whose verbs read as the second word of `rad backup <verb>`.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -33,19 +29,13 @@ pub struct Cli {
     #[command(flatten)]
     pub create: Create,
 
-    /// Under a heading of their own, so that neither `--help` nor the man page mixes them in
-    /// with the options that shape an archive and mean nothing to any other command. Last,
-    /// because clap files every field declared after it under the same heading.
+    /// The flags every command takes, under a help heading of their own. This field stays
+    /// last, because clap files every field declared after it under the same heading.
     #[command(flatten, next_help_heading = "Global options")]
     pub global: Global,
 }
 
-/// The flags that shape an archive, and so mean nothing to any other verb.
-///
-/// Asked of clap rather than written out. It was a fixed-length array kept by hand, so every
-/// new `create` flag had to be remembered in a second place, and one that was not stopped
-/// being recognised here: the flag was accepted before the verb, quietly ignored, and nobody
-/// was told where it belonged.
+/// The ids of the archive-shaping flags, read from clap so a new `create` flag is covered.
 fn create_only_flag_ids() -> Vec<String> {
     use clap::CommandFactory as _;
 
@@ -56,13 +46,10 @@ fn create_only_flag_ids() -> Vec<String> {
         .collect()
 }
 
-/// Parse the command line, then enforce the one rule clap cannot state here.
-///
-/// `args_conflicts_with_subcommands` would reject `--tier full doctor`, which is right, but
-/// it also rejects `--home /srv/radicle doctor`, which is how every other tool in this
-/// ecosystem is used. So the global flags stay usable in either position and the
-/// archive-shaping ones are checked by hand.
+/// Parses the command line, then refuses an archive-shaping flag placed before another verb.
 pub fn parse_from_env() -> Cli {
+    // `args_conflicts_with_subcommands` would also reject `--home /srv/radicle doctor`, so
+    // global flags stay usable in either position and archive-shaping ones are checked here
     let called = invocation_as_called(std::env::args_os());
     let mut command = Cli::command();
     if let Some(name) = called.bin_name {
@@ -83,10 +70,8 @@ pub fn parse_from_env() -> Cli {
 
 /// The command line as the name it was started under implies.
 ///
-/// Installed beside the binary, a `rad-restore` symlink makes `rad restore <archive>` work,
-/// because `rad` runs `rad-<name>` from `PATH` for any subcommand it does not know. That is
-/// the command somebody reaches for when something has already gone wrong, and it should not
-/// depend on their remembering that it lives under `rad backup`.
+/// A `rad-restore` symlink beside the binary makes `rad restore <archive>` work, because `rad`
+/// runs `rad-<name>` from `PATH` for a subcommand it does not know.
 fn invocation_as_called<I: Iterator<Item = OsString>>(args: I) -> Invocation {
     let mut argv: Vec<OsString> = args.collect();
     let called_restore = argv
@@ -106,8 +91,7 @@ fn invocation_as_called<I: Iterator<Item = OsString>>(args: I) -> Invocation {
     argv.insert(1, OsString::from("restore"));
     Invocation {
         argv,
-        // So the help and the usage line say `rad restore`, which is what was typed, rather
-        // than the `rad-restore restore` that the rewritten argv would otherwise spell out.
+        // The help and the usage line say `rad restore`, which is what the user typed
         bin_name: Some("rad"),
     }
 }
@@ -118,11 +102,10 @@ struct Invocation {
     bin_name: Option<&'static str>,
 }
 
-/// The complaint to make when an archive-shaping flag was passed to a verb that makes no
-/// archive, or `None` when there is nothing to complain about.
+/// The complaint about an archive-shaping flag passed to a verb that makes no archive.
 ///
-/// Only flags given on the command line count. A `RAD_BACKUP_TIER` in the environment is
-/// there for every run, and failing `doctor` because of it would be absurd.
+/// Only flags given on the command line count, because a `RAD_BACKUP_TIER` in the environment
+/// is there for every run.
 fn misplaced_create_flag_complaint(matches: &ArgMatches) -> Option<String> {
     let verb = matches.subcommand_name()?;
     let flags = create_only_flag_ids();
@@ -130,10 +113,8 @@ fn misplaced_create_flag_complaint(matches: &ArgMatches) -> Option<String> {
         .iter()
         .find(|id| matches.value_source(id) == Some(ValueSource::CommandLine))?;
     let flag = id.replace('_', "-");
-    // The verb may declare the same flag itself, and the top-level copy is not the one
-    // dispatch reads, so the flag would be accepted and then quietly ignored. Saying where to
-    // put it beats telling somebody that `create` does not create an archive, or that
-    // `schedule` does not take the `--output` it plainly has.
+    // A verb may declare the same flag itself, and dispatch reads the verb's copy, so the
+    // top-level one would be silently ignored. The complaint then says where the flag belongs.
     if declares(verb, id) {
         return Some(format!("`--{flag}` belongs after `{verb}`, not before it"));
     }
@@ -204,9 +185,8 @@ pub struct Global {
     /// A private key file (age or ssh) that opens an archive encrypted to its public key.
     /// Repeatable.
     //
-    // The flag stays `--identity`, which is what age and `age-keygen` call this and what every
-    // recipe on the internet spells; the field is named for what it holds, because "identity"
-    // in every other line of this tool means the Radicle identity, which this is not.
+    // The flag is `--identity`, the name age uses. The field says `age_identity`, because
+    // "identity" elsewhere in this tool means the Radicle identity.
     #[arg(long = "identity", global = true, value_name = "PATH", action = ArgAction::Append)]
     pub age_identity_files: Vec<PathBuf>,
 
@@ -337,8 +317,7 @@ pub struct Ls {
     #[arg(long, short = 'd', value_name = "PATH", env = "RAD_BACKUP_DIR")]
     pub dir: Option<PathBuf>,
 
-    /// Caught rather than rejected, so that naming an archive here is answered with the verb
-    /// that does what was meant instead of with a usage dump.
+    /// An archive named by mistake, caught so the refusal points at `show`.
     #[arg(value_name = "ARCHIVE", hide = true)]
     pub mistaken: Option<PathBuf>,
 }
@@ -467,10 +446,8 @@ pub struct Doctor {
 pub struct Paper {
     /// Where to write the sheet. Defaults to stdout. RAD_BACKUP_DIR is not consulted.
     //
-    // Not read from `RAD_BACKUP_DIR`, unlike the other `--output` flags: that variable names a
-    // directory to keep archives in, and honouring it here wrote the sheet to a file named
-    // after somebody's archive directory, skipping the refusal that keeps a key off a terminal
-    // because stdout was no longer the destination.
+    // This flag never reads `RAD_BACKUP_DIR`, which names an archive directory. Read here, it
+    // would write the key to a file nobody named.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub output: Option<PathBuf>,
 
@@ -526,8 +503,8 @@ impl From<TierArg> for Tier {
 }
 
 impl TierArg {
-    /// What each tier carries when the user did not say. State takes private repositories
-    /// because nothing else on earth has them; full takes everything of yours.
+    /// The repositories each tier carries when `--repos` is not given. `state` takes the
+    /// private ones, because the network may not hold them.
     pub fn default_repos(self) -> RepoSelection {
         match self {
             Self::Identity => RepoSelection::None,
@@ -568,11 +545,9 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// clap_mangen renders these only with its `env` feature, which is off by default. Without
-    /// it the man page loses every `RAD_BACKUP_*` line and says nothing about it, so the loss
-    /// is invisible until somebody reads `man rad-backup` looking for the variable. The list
-    /// is walked off the command rather than written out here, so a new `env = ` argument is
-    /// covered from the moment it is added.
+    /// `clap_mangen` renders env lines only with its `env` feature, and without it the man
+    /// page drops every `RAD_BACKUP_*` line silently. The list is walked off the command, so a
+    /// new `env =` argument is covered as soon as it is added.
     #[test]
     fn every_option_that_reads_an_environment_variable_says_so_in_the_man_page() {
         let command = Cli::command();
@@ -580,7 +555,7 @@ mod tests {
             .expect("roff is text");
 
         // The page documents the top level's options, then each command's own, except
-        // `create`'s, which are the top level's.
+        // `create`'s, which are the top level's
         let own = |arg: &&clap::Arg| !arg.is_hide_set() && !arg.is_global_set();
         let documented = command.get_arguments().chain(
             command
@@ -610,18 +585,11 @@ mod tests {
         }
     }
 
-    /// A flag whose help names a `RAD_BACKUP_*` variable has to declare one, so that `--help`
-    /// and the man page say which flags read the environment.
+    /// A flag that names a `RAD_BACKUP_*` variable in its help must declare one, or `--help`
+    /// and the man page do not say it reads the environment.
     ///
-    /// `prune --dir` and `doctor --dir` both promised `RAD_BACKUP_DIR` in their help while
-    /// declaring no `env` at all. They honoured it anyway, because the command reads the
-    /// variable itself when the flag is absent, so the behaviour was right and only the
-    /// documentation was wrong: `man rad-backup` listed the variable under `ls --dir` and not
-    /// under theirs, so a reader of the prune entry concluded it was not honoured there.
-    ///
-    /// Which variable is not asserted, because a help text may name one it does not read:
-    /// `--passphrase-file` describes the whole precedence chain, `RAD_BACKUP_PASSPHRASE`
-    /// included, while reading only `RAD_BACKUP_PASSPHRASE_FILE`.
+    /// The test does not assert which variable, because `--passphrase-file` describes the
+    /// whole precedence chain while reading only `RAD_BACKUP_PASSPHRASE_FILE`.
     #[test]
     fn every_flag_that_names_an_environment_variable_declares_one() {
         fn walk(command: &clap::Command, checked: &mut usize) {
@@ -635,7 +603,7 @@ mod tests {
                         .map(|help| help.to_string())
                         .unwrap_or_default()
                 );
-                // The one flag that names the variable in order to say it is not consulted.
+                // A help text saying "not consulted" names a variable its flag skips
                 if !help.contains("RAD_BACKUP_") || help.contains("not consulted") {
                     continue;
                 }
@@ -731,8 +699,8 @@ mod tests {
 
     #[test]
     fn a_shaping_flag_from_the_environment_never_refuses_another_verb() {
-        // RAD_BACKUP_TIER is set for every run in a shell that exports it; failing `doctor`
-        // because of it would make the variable unusable.
+        // RAD_BACKUP_TIER is set for every run in a shell that exports it, so refusing
+        // `doctor` over it would make the variable unusable
         let matches = Cli::command()
             .try_get_matches_from(["rad-backup", "doctor"])
             .expect("it parses");
@@ -753,16 +721,15 @@ mod tests {
             .get_arguments()
             .find(|arg| arg.get_id() == "output")
             .expect("`paper` has an --output");
-        // RAD_BACKUP_DIR names a directory to keep archives in. Read here it became the file
-        // path of a sheet holding the key as 24 words, and took the run off the stdout path
-        // where the refusal to print a key at a terminal lives.
+        // RAD_BACKUP_DIR names an archive directory. Read here, it would write the key to a
+        // file nobody named.
         assert_eq!(output.get_env(), None);
     }
 
     #[test]
     fn the_archive_and_the_json_report_cannot_both_own_stdout() {
-        // Accepted, they interleaved: the JSON report went out after the archive bytes, so
-        // `rad-backup --stdout --json > x.age` produced a file age refuses at restore time.
+        // Together, the JSON report would follow the archive bytes, so `rad-backup --stdout
+        // --json > x.age` would write a file age refuses at restore time
         assert!(Cli::try_parse_from(["rad-backup", "--stdout", "--json"]).is_err());
     }
 
@@ -799,7 +766,7 @@ mod tests {
                 .contains(crate::credits::DONATE)
         );
         let mut checked = 0;
-        // Built, so each command carries the global options its own arguments refer to.
+        // A built command gives each subcommand the global options its arguments refer to
         let mut built = Cli::command();
         built.build();
         for verb in built.get_subcommands() {
@@ -819,9 +786,8 @@ mod tests {
     fn the_archive_shaping_flags_are_the_ones_create_declares_and_no_others() {
         let flags = create_only_flag_ids();
 
-        // Derived from `Create`, not from the top-level command: a global belongs before any
-        // verb, and reporting `--home doctor` as a misplaced archive flag would be worse than
-        // the drift this replaced.
+        // The flags come from `Create`, because a global belongs before any verb and must
+        // never be reported as a misplaced archive flag
         for global in ["home", "json", "yes", "quiet", "passphrase_file"] {
             assert!(
                 !flags.iter().any(|id| id == global),
@@ -840,9 +806,8 @@ mod tests {
     fn a_create_flag_before_the_create_verb_is_told_where_it_belongs() {
         let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "create"]);
         let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
-        // Not "`create` does not create an archive", which is what the general wording said
-        // here and which is nonsense. The flag cannot be allowed through either: the
-        // subcommand's own defaulted copy is the one dispatch reads, so it would be ignored.
+        // `create` does create an archive, so the complaint says where the flag belongs.
+        // Letting the flag through fails too, because dispatch reads the verb's own default.
         assert!(complaint.contains("belongs after `create`"), "{complaint}");
     }
 
@@ -850,8 +815,7 @@ mod tests {
     fn a_flag_the_verb_itself_has_is_told_where_it_belongs_rather_than_denied() {
         let matches = Cli::command().get_matches_from(["rad-backup", "--output", "/x", "schedule"]);
         let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
-        // `schedule --output` is a real flag. "`schedule` does not create one" is what the
-        // general wording said, and it reads as a denial of a flag the verb documents.
+        // `schedule --output` is a real flag, so the complaint must not deny it
         assert!(
             complaint.contains("belongs after `schedule`"),
             "{complaint}"

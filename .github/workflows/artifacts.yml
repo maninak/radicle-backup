@@ -1,13 +1,6 @@
 name: Artifacts
 
-# Every binary and package a release ships, built exactly as a release builds them.
-#
-# Extracted so that this runs on ordinary pushes to master, not only on a tag. v0.1.0's first
-# attempt failed in four different jobs at once (a pinned toolchain missing a target, BSD `cp`
-# following a dangling symlink, Windows unable to make one, and lintian grading a static musl
-# binary an error on a foreign architecture). None of them were reachable from CI, because CI
-# only ever built natively for the host, so the tag push was simultaneously the first run of
-# this code and the irreversible act. Building it continuously is what makes a tag boring.
+# Every binary and package a release ships, built exactly as a release builds them
 
 on:
   workflow_call:
@@ -32,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # musl, so one Linux binary runs on every distribution and inside scratch images.
+          # musl, so one Linux binary runs on every distribution and inside scratch images
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
@@ -45,13 +38,12 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             cross: false
-          # Radicle itself does not run on Windows, so this binary is for reading and checking
-          # archives there, not for backing up a home that cannot exist.
+          # Radicle does not run on Windows, so this binary only reads and checks archives
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             cross: false
-          # Cross-built and never executed by CI, because GitHub has no FreeBSD runner. It
-          # ships labelled as untested until somebody who runs FreeBSD reports back.
+          # Cross-built and never executed, because GitHub has no FreeBSD runner. This binary
+          # ships labelled as untested.
           - target: x86_64-unknown-freebsd
             os: ubuntu-latest
             cross: true
@@ -63,12 +55,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # The line above adds the target to `stable`, but `rust-toolchain.toml` pins the
-      # toolchain that actually builds, and rustup says so in its own log: "note that the
-      # toolchain '1.96.0-...' is currently in use (overridden by rust-toolchain.toml)". The
-      # pinned one had no std for a target that is neither this host nor inside a cross
-      # container, so x86_64-apple-darwin failed with "can't find crate for `core`". This adds
-      # it where the build will look. A cross target lives in the container, not here.
+      # The step above adds the target to `stable`, but `rust-toolchain.toml` pins the
+      # toolchain that builds, which fails with "can't find crate for `core`" without this
+      # target's std. A cross target lives in the container.
       - name: Give the pinned toolchain this target
         if: ${{ !matrix.cross }}
         run: rustup target add ${{ matrix.target }}
@@ -78,15 +67,14 @@ jobs:
           key: ${{ matrix.target }}
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
 
-      # A pinned release, not git master: an unpinned build tool is a build that changes
-      # underneath a tag nobody touched.
+      # A pinned release, because an unpinned build tool changes the build under an old tag
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --version 0.2.5 --locked
 
       # Every release binary is built the way `just repro` builds one, so a rebuilder gets the
-      # bytes the release announced instead of something that merely behaves the same. Inside
-      # a cross container the source is already at a fixed path, so only the epoch travels.
+      # announced bytes. Inside a cross container the source is already at a fixed path, so
+      # only the epoch travels.
       - name: Pin the build to the commit, not to this machine
         shell: bash
         run: |
@@ -107,9 +95,8 @@ jobs:
             cargo build --release --locked --target ${{ matrix.target }}
           fi
 
-      # The same recipe a local build uses, so the names in a tarball, a .deb and a Homebrew
-      # formula cannot drift apart. A cross-built binary cannot run here, so this builds a
-      # host one to describe itself; the two are the same source at the same commit.
+      # The same recipe a local build uses, so a tarball, a .deb and a Homebrew formula agree.
+      # A cross-built binary cannot run here, so this builds a host one from the same commit.
       - name: Man page and completions
         run: just generated
 
@@ -123,11 +110,10 @@ jobs:
           [ -f "$binary" ] || binary="$binary.exe"
           cp "$binary" "dist/$name/"
           cp README.md ARCHIVE-FORMAT.md SECURITY.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
-          # -R, not -r: `packaging/generated/rad-restore` is a symlink to the binary as it
-          # will be INSTALLED, so inside that directory it dangles by design. GNU cp -r copies
-          # the link; BSD cp -r follows it and dies, which is how both macOS jobs failed.
+          # `packaging/generated/rad-restore` is a symlink that dangles until installed. BSD
+          # `cp -r` follows it and fails, and `-R` copies the link on GNU and BSD alike.
           cp -R packaging/generated "dist/$name/generated"
-          # Windows gets a .zip, because a .tar.gz there needs a tool the machine may not have.
+          # Windows gets a .zip, because a .tar.gz there needs a tool the machine may not have
           if [ "${{ runner.os }}" = "Windows" ]; then
             (cd dist && 7z a -bso0 "$name.zip" "$name" > /dev/null)
             artifact="$name.zip"
@@ -139,10 +125,8 @@ jobs:
           cd dist && sha256sum "$artifact" > "$artifact.sha256" 2>/dev/null \
             || shasum -a 256 "$artifact" > "$artifact.sha256"
 
-      # Transport only, not the durable copy: `publish the release` downloads these in the same
-      # run and re-uploads them to the GitHub Release, which outlives any retention setting.
-      # Fourteen days so a re-run of the apt publish a week or two later still finds its input,
-      # and so master pushes stop filling the artifact list for a quarter each.
+      # Transport only. `publish the release` re-uploads these to the GitHub Release in the
+      # same run. Fourteen days lets a re-run of the apt publish find its input.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist-${{ matrix.target }}
@@ -173,8 +157,8 @@ jobs:
       - run: cargo install cross --version 0.2.5 --locked
       - run: sudo apt-get update && sudo apt-get install -y lintian
 
-      # cargo-deb reads SOURCE_DATE_EPOCH for the timestamps inside the archive, so two builds
-      # of one tag produce one .deb rather than two that differ only in when they were made.
+      # cargo-deb stamps SOURCE_DATE_EPOCH inside the archive, so two builds of one tag produce
+      # the same .deb
       - name: Pin the build to the commit, not to this machine
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 

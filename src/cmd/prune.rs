@@ -1,8 +1,4 @@
-//! Deleting older archives, on purpose rather than as a side effect.
-//!
-//! `--keep` on a backup run prunes as it goes, which is what a timer wants. This is the same
-//! rule with nothing else happening around it, for someone who has just noticed that a disk is
-//! full and wants to see what would go before it goes.
+//! Deletes the archives past `--keep`, by the same rule a backup run with `--keep` applies.
 
 use crate::archives::sidecar_path;
 use crate::archives::{self, Archive, Completeness, Fate};
@@ -13,12 +9,11 @@ use crate::key::Identity;
 use crate::state;
 use crate::term;
 
-/// The failure to remove the note beside an archive, if there is one to report.
+/// Deletes the note at `path` beside a deleted archive, and returns the error if it stays.
 ///
-/// The note describes an archive that is no longer there, so it goes with it. Missing is the
-/// ordinary case, because most archives never had one. Anything else leaves a note standing
-/// over a deletion, which is the one state a reader of that directory is misled by, so it is
-/// said out loud rather than swallowed.
+/// Returns `None` when the note is missing, the ordinary case. Any other failure leaves a note
+/// describing an archive that is gone, which misleads a reader of the directory, so callers
+/// report it.
 pub(crate) fn unremoved_sidecar(path: &std::path::Path) -> Option<std::io::Error> {
     match std::fs::remove_file(path) {
         Ok(()) => None,
@@ -100,8 +95,8 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         "Delete them and free {}?",
         term::human_bytes(freed)
     ))? {
-        // Two different noes, as in `restore`: somebody who typed `n` has decided, and a run
-        // with nobody to ask needs to be told how to say yes, not to decide.
+        // A typed `n` is a decision, so its remedy says how to try again. A run with nobody to
+        // ask is told how to say yes.
         let remedy = match ctx.term.is_interactive() {
             true => "run the same command again when you want them deleted",
             false => "rad-backup could not ask for confirmation. Add --yes to delete them",
@@ -126,7 +121,7 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
     Ok(())
 }
 
-/// Name the older archives kept past `--keep`, so a count that does not add up says why.
+/// Names the older archives kept past `--keep`, so a count that does not add up says why.
 fn say_spared(ctx: &Ctx, spared: &[&Archive]) {
     if spared.is_empty() {
         return;
@@ -135,8 +130,8 @@ fn say_spared(ctx: &Ctx, spared: &[&Archive]) {
         "also keeping {}. No newer archive is known to have everything they may have",
         term::count(spared.len(), "older archive", "older archives")
     ));
-    // On stderr, never through `print`: stdout lists only what is deleted, and a script may
-    // delete whatever it lists. Not dropped by `--quiet`, which every scheduled run passes.
+    // Spared archives never go through `print`, because a script may delete whatever stdout
+    // lists. `detail` writes to stderr and survives `--quiet`, which scheduled runs pass.
     for archive in spared {
         ctx.term.detail(&format!(
             "  {}  {}",
@@ -151,19 +146,14 @@ fn say_spared(ctx: &Ctx, spared: &[&Archive]) {
 mod tests {
     use super::unremoved_sidecar;
 
-    /// A note that is not there is the ordinary case and says nothing. A note that is
-    /// there and would not go is a note left standing over a deleted archive, and `prune` used
-    /// to drop that error on the floor, so the directory kept a description of something it no
-    /// longer held and nobody was told why.
     #[test]
     fn a_note_that_would_not_go_is_reported_and_one_that_was_never_there_is_not() {
         let scratch = crate::key::tests::TestScratch::create("prune-sidecar");
 
         assert!(unremoved_sidecar(&scratch.path_of("absent.txt")).is_none());
 
-        // A directory where the note should be: `remove_file` refuses it for a reason that is
-        // not `NotFound`, which is the whole class this guards, without needing a mode change
-        // that a root-run test would not feel.
+        // `remove_file` refuses a directory with an error other than `NotFound`, and needs no
+        // mode change, which a test run as root would ignore
         let occupied = scratch.path_of("occupied.txt");
         std::fs::create_dir(&occupied).expect("a directory in the scratch");
         let reported = unremoved_sidecar(&occupied).expect("it is reported");

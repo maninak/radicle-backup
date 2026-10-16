@@ -1,7 +1,4 @@
-//! `rad-backup`: back up, restore and move a Radicle identity.
-//!
-//! `rad` runs `rad-<name>` from `PATH` for any subcommand it does not know, so installing this
-//! binary is all it takes for `rad backup` to work.
+//! `rad-backup`, which `rad` runs from `PATH` as `rad backup`.
 
 mod archives;
 mod cli;
@@ -64,10 +61,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// Write generated output to stdout, treating a closed pipe as the success it is.
-///
-/// `| head` closes the pipe on purpose, and a tool that reports that as a failure is a tool
-/// nobody can pipe.
+/// Writes generated output to stdout, treating a closed pipe as success, because `| head`
+/// closes it on purpose.
 fn emit(stdout: &mut dyn Write, bytes: &[u8]) -> Result<ExitCode> {
     match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
         Ok(()) => Ok(ExitCode::SUCCESS),
@@ -77,14 +72,14 @@ fn emit(stdout: &mut dyn Write, bytes: &[u8]) -> Result<ExitCode> {
 }
 
 fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
-    // Generating completions and the manual page needs no home, and must work on a machine
-    // that has never run Radicle: package builds do exactly that.
+    // Completions and the manual page need no home, because package builds generate them on
+    // machines that have never run Radicle
     match &cli.command {
         Some(Command::Completions(args)) => {
             let mut command = Cli::command();
             let name = command.get_name().to_string();
-            // Rendered into memory first: clap_complete panics rather than returning when the
-            // writer fails, and `rad-backup completions bash | head` is a writer that fails.
+            // Rendered into memory first, because clap_complete panics when the writer
+            // fails, and `| head` makes it fail
             let mut rendered = Vec::new();
             clap_complete::generate(args.shell, &mut command, name, &mut rendered);
             return emit(&mut std::io::stdout(), &rendered);
@@ -101,13 +96,9 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
 
     let outcome = dispatch(&ctx, cli);
 
-    // Every verb, not just `backup`: drift is a fact about the run rather than about the verb,
-    // and a reader who is told "the routing table is empty" has to be told that the table this
-    // build asks for is not the one that is there, or they go and start a node that is already
-    // running. `backup` drains it first, to put the same fact in the manifest.
-    // Set off by a blank line, because this lands after whatever the verb printed last. Under
-    // `doctor` that is the tally, and a line flush against it reads as one more check the
-    // tally forgot to count rather than as a note about the run.
+    // Schema drift is reported after every verb, or a reader told "the routing table is empty"
+    // starts a node that is already running. A blank line keeps it from reading as one more
+    // line of what the verb printed last, such as the `doctor` tally.
     let drift = db::drain_schema_drift();
     if !drift.is_empty() {
         ctx.term.blank();
@@ -120,9 +111,8 @@ fn run(cli: &Cli, term: Term) -> Result<ExitCode> {
 
 fn dispatch(ctx: &Ctx, cli: &Cli) -> Result<ExitCode> {
     match &cli.command {
-        // Exit 3 when a run wrote an archive but lost a repository doing it, the same code
-        // `doctor` and `diff` use for "it worked and you should look". A timer that only reads
-        // the exit status could not otherwise tell a complete backup from a gutted one.
+        // Exit 3 when a run wrote an archive but lost a repository, the code `doctor` and
+        // `diff` use for "it worked and you should look", so a timer can tell the two apart
         None => {
             cmd::backup::run(ctx, &cli.create, cmd::backup::Purpose::Backup).map(backup_exit_code)
         }

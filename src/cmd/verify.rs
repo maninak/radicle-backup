@@ -1,9 +1,4 @@
-//! Checking that an archive is what it claims to be.
-//!
-//! Two depths, because they answer different questions. The shallow pass answers "did these
-//! bytes survive": every entry is read and digested and compared with the manifest. The deep
-//! pass answers "would this actually restore": the archive is unpacked into a throwaway home
-//! and the identity is rebuilt from it and compared with the one on the label.
+//! Checks an archive's digests, and with `--deep` rebuilds it in a throwaway home.
 
 use std::path::Path;
 
@@ -17,18 +12,16 @@ use crate::key::{Identity, SecretKey};
 use crate::manifest::Manifest;
 use crate::term;
 
-/// A check's stable identity, printed as `checkId` so a script matches on it and not on the
-/// message. Ids are frozen once released. Messages are wording and may change.
+/// A check's stable id, printed as `checkId` for scripts to match on.
 ///
-/// One id per thing looked at, never per outcome: `passed` carries how it went and `problems`
-/// says why, so a script asks one question of one id. Never carries a count or a DID the way
-/// the message beside it can, since those vary between runs.
+/// Ids are frozen once released, and messages may change. An id names one thing looked at,
+/// never one outcome, and never carries a count or a DID, because those vary between runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckId {
     /// Every entry's digest against the archive's own record.
     Files,
-    /// The private key's entry exists, asked of every run. The deep pass's `PrivateKey` reads
-    /// it, which a shallow run never does, so the two cannot share an id.
+    /// The presence of the private key's entry, checked on every run. Only a deep run reads
+    /// the key, under `PrivateKey`.
     PrivateKeyPresent,
     PublicKey,
     PrivateKey,
@@ -37,8 +30,8 @@ pub enum CheckId {
 }
 
 impl CheckId {
-    /// Spelled out rather than derived from the variant name, so renaming a variant cannot
-    /// change a string scripts already match on.
+    /// The id string scripts match on. Each one is spelled out, so renaming a variant cannot
+    /// change it.
     fn id(self) -> &'static str {
         match self {
             Self::Files => "files",
@@ -51,13 +44,12 @@ impl CheckId {
     }
 }
 
-/// What a verification found. Empty problems is the only passing result.
+/// What a verification found. It passes when `problems` is empty.
 pub struct Report {
     pub manifest: Manifest,
     pub problems: Vec<String>,
     pub checks: Vec<(CheckId, String, bool)>,
-    /// The archive that was checked, which is not always the one the caller named: with no
-    /// argument this is whichever one was newest.
+    /// The archive that was checked. With no archive named, it is the newest one.
     pub archive: std::path::PathBuf,
 }
 
@@ -187,7 +179,7 @@ fn unreadable(e: &crate::error::Error) -> String {
     }
 }
 
-/// Rebuild what the archive holds and compare it with what the archive claims.
+/// Compares what the unpacked home holds with what the manifest claims.
 fn check_unpacked_home(
     staging: &Path,
     manifest: &Manifest,
@@ -298,12 +290,9 @@ fn check_unpacked_home(
         .filter(|repo| repo.bundle.is_some())
         .count();
     if !git.is_available() {
-        // Not a silent return: without git the bundles are never opened, and a report that
-        // said "complete" over an unopened bundle is the same report a fully verified archive
-        // gets. The archive may be fine; this run cannot say so.
-        //
-        // No `repositories` check here: a failed one reads the same as a broken archive, and
-        // an absent one is what a check that did not run looks like.
+        // Without git no bundle is opened, so the run reports a problem. A "complete" over
+        // unopened bundles would read like a fully verified archive. No `repositories` check
+        // is pushed, because a failed one reads as a broken archive.
         if carried > 0 {
             problems.push(format!(
                 "git was not found, so {} in this archive could not be checked. Install git \
@@ -334,15 +323,16 @@ fn check_unpacked_home(
 }
 
 /// The check over the archived repositories, passed only when every one opened with work in
-/// it. Present whenever the archive carries any, so one bad repository among good ones fails
-/// it. `None` when it carries none, since there is nothing to report on.
+/// it.
+///
+/// Returns `None` when the archive carries no repository.
 fn repositories_check(opened: usize, carried: usize) -> Option<(CheckId, String, bool)> {
     if carried == 0 {
         return None;
     }
     let passed = opened == carried;
-    // One wording for both outcomes, naming only what was tested: git lists each bundle's
-    // refs and never unpacks it, so "restored" would claim more.
+    // The wording names only what was tested. `git` lists each bundle's refs and never
+    // unpacks it, so "restored" would claim more.
     let can_be_opened = crate::term::count(
         carried,
         "archived repository can be opened",
@@ -360,9 +350,8 @@ fn repositories_check(opened: usize, carried: usize) -> Option<(CheckId, String,
 mod tests {
     use super::*;
 
-    /// Every check id, as the exact string a script matches on. A second copy on purpose: an
-    /// edit to `CheckId::id` has to be made twice to ship. Nothing notices a variant left out
-    /// of this list, so a new id needs a line here too.
+    /// The ids are spelled a second time here, so an edit to `CheckId::id` has to be made
+    /// twice to ship. A new variant needs a line here, because nothing notices one left out.
     #[test]
     fn check_ids_are_pinned_because_scripts_match_on_them() {
         let pinned = [

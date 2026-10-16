@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 #
-# Check a downloaded release: that the files are the ones the checksum file names, and that
-# the checksum file was signed by a key this project says signs releases.
+# Check a downloaded release against its checksum file, signed by a key this project names.
 #
 #   ./verify.sh <directory of downloaded files>
 #
-# Needs nothing but openssh and either coreutils or the `shasum` macOS ships. It does not fetch
-# anything: point it at what you already downloaded, including allowed_signers from the
-# repository.
+# Needs only openssh and either coreutils or the `shasum` macOS ships. It fetches nothing, so
+# point it at what you downloaded, including allowed_signers from the repository.
 set -euo pipefail
 
 DIR="${1:?usage: verify.sh <directory of downloaded files>}"
-# Absolute before the `cd` below, because `dirname "$0"` is relative to where this was
-# invoked from and would then be resolved inside the download directory instead. Called
-# as `./packaging/release/verify.sh release`, every run exited 1 with "no allowed_signers".
+# Made absolute before the `cd` below, because a relative `dirname "$0"` would then resolve
+# inside the download directory
 SIGNERS="${ALLOWED_SIGNERS:-$(cd "$(dirname "$0")" && pwd)/allowed_signers}"
 NAMESPACE="radicle.tools"
 
@@ -22,10 +19,9 @@ cd "$DIR"
 [ -f sha256sums.txt.sig ] || { echo "no sha256sums.txt.sig here" >&2; exit 1; }
 [ -f "$SIGNERS" ] || { echo "no allowed_signers at $SIGNERS" >&2; exit 1; }
 
-# Who signed it, and is that somebody this project names? This is the whole point: a checksum
-# file anyone can rewrite proves nothing on its own.
-# shellcheck disable=SC2013 # one signer per word is the shape of an allowed_signers file,
-# and a key blob cannot hold whitespace, so words and lines are the same list here.
+# A checksum file anyone can rewrite proves nothing, so a signer this project names must sign
+# shellcheck disable=SC2013 # a key blob cannot hold whitespace, so words and lines are the
+# same list here
 for signer in $(awk '{print $1}' "$SIGNERS" | sort -u); do
   if ssh-keygen -Y verify -f "$SIGNERS" -I "$signer" -n "$NAMESPACE" \
        -s sha256sums.txt.sig < sha256sums.txt > /dev/null 2>&1; then
@@ -36,8 +32,7 @@ for signer in $(awk '{print $1}' "$SIGNERS" | sort -u); do
 done
 [ "${signed:-0}" = 1 ] || { echo "the signature is not from a key this project names" >&2; exit 1; }
 
-# Only the lines for files that are actually here, so verifying one downloaded artifact does
-# not fail over the seven you did not want.
+# Only the lines for files that are here, so verifying one downloaded artifact passes
 present=$(mktemp)
 trap 'rm -f "$present"' EXIT
 while read -r sum name; do
@@ -45,9 +40,7 @@ while read -r sum name; do
 done < <(sed 's/^\\//' sha256sums.txt)
 [ -s "$present" ] || { echo "none of the files in sha256sums.txt are here" >&2; exit 1; }
 
-# macOS ships `shasum` and no GNU coreutils, and this project publishes two darwin binaries and
-# a Homebrew formula, so the one script that tells a downloader whether to trust them must run
-# there. The release workflow already falls back the same way.
+# macOS ships `shasum` and no GNU coreutils
 if command -v sha256sum > /dev/null 2>&1; then
   sha256sum -c "$present"
 else

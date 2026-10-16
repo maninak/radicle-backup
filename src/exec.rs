@@ -1,11 +1,7 @@
-//! Running the programs this tool delegates to: `rad` and `git`, and `systemctl` and `uname`
-//! for the two commands that need them.
-//!
-//! Delegated rather than linked, because the user's own `rad` and `git` are by definition the
-//! right versions for the home being backed up: an archive taken by an old build of this tool
-//! still reads a new storage format, and a new build still reads an old one. Revisit when
-//! heartwood publishes a stable on-disk format guarantee that makes linking `radicle` safe
-//! across versions.
+//! Spawning `rad`, `git` and the system helpers with a scrubbed environment.
+
+// Never link the `radicle` crate in place of spawning the user's `rad`, because that ties
+// every archive to one `rad` version. Revisit if heartwood publishes a stable archive API.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -14,54 +10,53 @@ use std::process::{Command, Output, Stdio};
 
 use crate::error::{Error, Result};
 
-/// What a child process is allowed to inherit of the passphrases this tool may hold.
+/// The passphrases a child process may inherit.
 ///
-/// A child inherits the whole environment unless something takes things out of it, and an
-/// environment is readable by anything that process goes on to run: a git hook, a credential
-/// helper, a pager. So each spawn says out loud which secrets it needs, and everything else
-/// is removed rather than left there because nobody thought about it.
+/// A child's environment is readable by anything it runs, such as a git hook, a credential
+/// helper or a pager. So every passphrase a spawn does not name is removed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Secrets {
-    /// Nothing. What `git` and every other helper gets.
+    /// No passphrase.
     None,
-    /// One passphrase, and nothing else. `rad node start`, `rad seed` and `rad follow` sign
-    /// with the Radicle key, so `rad` is the one program that has a use for one.
+    /// One passphrase. `rad` gets the Radicle key's, because `rad node start`, `rad seed` and
+    /// `rad follow` sign with that key.
     Only(crate::crypt::Protects),
 }
 
-/// What a program said, kept apart from whether it succeeded.
+/// The trimmed stdout and stderr of a finished program, whatever its exit status.
 pub struct Spoken {
     pub stdout: String,
     pub stderr: String,
 }
 
-/// A program we shell out to, with the environment it needs to see.
+/// A program to spawn, with the Radicle home and passphrases its environment carries.
 pub struct Tool {
     program: OsString,
     home: Option<String>,
     secrets: Secrets,
 }
 
-/// What a probe said, when it was in a position to say anything.
+/// The result of a yes-or-no probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
     Yes,
     No,
-    /// The command failed rather than answered. `said` is whatever it wrote to stderr, so the
-    /// report can name the reason instead of inventing one.
+    /// The probe failed to answer. `said` holds its stderr, so a report can name the reason.
     CouldNotAsk {
         said: String,
     },
 }
 
-/// `RAD`, when it names a binary to run in place of `rad` from PATH. Empty counts as unset.
-/// Read as an `OsString`, so a path that is not UTF-8 still names the binary it names.
+/// The binary `RAD` names, to run in place of `rad` from PATH.
+///
+/// An empty `RAD` counts as unset. The value stays an `OsString`, so a non-UTF-8 path works.
 pub fn rad_override_from_env() -> Option<OsString> {
     std::env::var_os("RAD").filter(|rad| !rad.is_empty())
 }
 
-/// Why `rad` could not be run, for a caller whose probe said no. It names `RAD` when that is
-/// set, because PATH was never searched and pointing the user at it sends them the wrong way.
+/// Explains why `rad` could not be run.
+///
+/// The message names `RAD` when it is set, because PATH is never searched then.
 pub fn rad_missing(rad_override: Option<&OsStr>) -> String {
     match rad_override {
         Some(rad) => format!("RAD is set to {}, but it could not be run", rad.display()),
@@ -70,8 +65,7 @@ pub fn rad_missing(rad_override: Option<&OsStr>) -> String {
 }
 
 impl Tool {
-    /// `rad`, pointed at a specific Radicle home. Honours `RAD` so an operator can name a
-    /// specific binary, the same way radicle-seed-prune does.
+    /// `rad` pointed at the Radicle home `home`, honouring a `RAD` override.
     pub fn rad(home: &Path) -> Self {
         Self {
             program: rad_override_from_env().unwrap_or_else(|| OsString::from("rad")),
@@ -80,7 +74,7 @@ impl Tool {
         }
     }
 
-    /// Any other program on PATH, with no Radicle home to point it at.
+    /// A program on PATH, with no Radicle home and no passphrase.
     pub fn on_path(program: &str) -> Self {
         Self {
             program: OsString::from(program),
@@ -89,7 +83,7 @@ impl Tool {
         }
     }
 
-    /// `git`, which needs no Radicle home of its own.
+    /// `git`, honouring a `GIT` override.
     pub fn git() -> Self {
         Self {
             program: std::env::var_os("GIT").unwrap_or_else(|| OsString::from("git")),
@@ -98,7 +92,7 @@ impl Tool {
         }
     }
 
-    /// Run and capture stdout, failing when the program does.
+    /// Runs the program and returns its stdout, failing on a non-zero exit.
     pub fn output<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<String> {
         let finished = self.raw(args)?;
         if !finished.status.success() {
@@ -107,13 +101,9 @@ impl Tool {
         Ok(String::from_utf8_lossy(&finished.stdout).into_owned())
     }
 
-    /// Run and capture stdout, treating a non-zero exit as "no answer" rather than as a
-    /// failure. For queries whose absence is a legitimate result, such as a ref that does not
-    /// exist.
+    /// Runs the program and returns its stdout, or `None` on a non-zero exit.
     ///
-    /// Named for what it returns rather than for the capture, because `raw` beside it is the
-    /// plumbing every one of these sits on and sharing that word said the wrong thing about
-    /// which of them is the low-level one.
+    /// Suits queries where absence is a legitimate result, such as a ref that does not exist.
     pub fn answer<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
         let finished = self.raw(args)?;
         if !finished.status.success() {
@@ -122,17 +112,12 @@ impl Tool {
         Ok(Some(String::from_utf8_lossy(&finished.stdout).into_owned()))
     }
 
-    /// Run a program whose OUTPUT is secret, and answer one question about it without handing
-    /// the bytes back.
+    /// Runs a program whose output is secret and returns `ask`'s verdict on it, never the
+    /// text.
     ///
-    /// `systemctl --user show-environment` prints systemd's whole environment, and when the
-    /// archive passphrase is kept there, it prints that too. Every other buffer in this tool
-    /// that touches a passphrase is wiped on the way out, and a `String` returned from here
-    /// would be dropped intact for the next allocation to read. So the caller gets the answer
-    /// and never the text.
-    ///
-    /// What this cannot reach: the pipe buffer `Command::output` reads the child through is
-    /// private to the standard library. What this function owns, it wipes.
+    /// `systemctl --user show-environment` prints the archive passphrase when systemd holds
+    /// it. Every buffer this function owns is wiped on drop. The pipe buffer inside
+    /// `Command::output` is private to the standard library and stays out of reach.
     pub fn confided<S: AsRef<OsStr>>(
         &self,
         args: &[S],
@@ -144,12 +129,10 @@ impl Tool {
         Ok(ask(&text))
     }
 
-    /// Run and keep what the program said, whatever it exited with.
+    /// Runs the program and returns what it printed, whatever it exited with.
     ///
-    /// For programs that print their answer and then exit non-zero to express it, such as
-    /// `systemctl is-enabled`, which writes "disabled" and exits 1. Reading those through
-    /// `answer` threw the word away and left the caller unable to tell a real answer from
-    /// a systemd that could not be reached at all.
+    /// Suits programs that answer through a non-zero exit, such as `systemctl is-enabled`,
+    /// which prints `disabled` and exits 1.
     pub fn spoken<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Spoken> {
         let finished = self.raw(args)?;
         Ok(Spoken {
@@ -158,12 +141,10 @@ impl Tool {
         })
     }
 
-    /// Run a command whose failure is not the run's failure, and keep what it said about it.
+    /// Runs a command whose failure is not the run's failure, and returns why it failed.
     ///
-    /// `None` when it worked. Otherwise whatever it wrote to stderr, because the caller is
-    /// about to tell somebody mid-recovery that one thing did not go, and the program's own
-    /// sentence is the difference between that being actionable and being a shrug. A program
-    /// that failed silently gets its exit code said for it, so the report is never empty.
+    /// Returns `None` on success. Otherwise it returns the program's stderr, or a sentence
+    /// naming the exit code when stderr is empty, so the report is never blank.
     pub fn refused<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
         let finished = self.raw(args)?;
         if finished.status.success() {
@@ -185,33 +166,28 @@ impl Tool {
         }))
     }
 
-    /// Run a probe whose non-zero exit is an answer, and keep "it could not answer" apart
-    /// from "no".
+    /// Runs a probe that exits 0 for yes and 1 for no, and keeps any other exit apart as
+    /// [`Answer::CouldNotAsk`].
     ///
-    /// `git merge-base --is-ancestor` exits 0 for yes and 1 for no, and 128 when it could not
-    /// answer at all: an oid it cannot resolve, an object it cannot read, a repository it
-    /// will not open. Folded into a `bool` that third case reads as "no", and "no" in both
-    /// directions is what a restore reports as a fork of the user's own peer history, which
-    /// is the most alarming thing this tool ever says. A verdict that severe must not rest on
-    /// an error nobody looked at.
+    /// `git merge-base --is-ancestor` exits 128 when it cannot resolve an oid or open the
+    /// repository. Read as `No`, that exit would make a restore report a fork of the user's
+    /// own peer history.
     pub fn answers<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Answer> {
         let finished = self.raw(args)?;
         Ok(match finished.status.code() {
             Some(0) => Answer::Yes,
             Some(1) => Answer::No,
-            // `None` is a signal, which is no more an answer than exit 128 is.
+            // A signal (`None`) is no answer either
             _ => Answer::CouldNotAsk {
                 said: String::from_utf8_lossy(&finished.stderr).trim().to_string(),
             },
         })
     }
 
-    /// Run the child with its output visible, returning whether it exited successfully.
+    /// Runs the program with its output visible and returns whether it succeeded.
     ///
-    /// Its stdout goes to our stderr, not to stdout: with `--stdout` this process's stdout IS
-    /// the archive, and a line of `rad node stop` chatter written into it produces a file that
-    /// decrypts, fails to decompress, and is discovered at restore time. Everything a child
-    /// says here is narration, which is where narration goes anyway.
+    /// The child's stdout goes to this process's stderr, because under `--stdout` this
+    /// process's stdout is the archive, and a stray line there corrupts it unnoticed.
     pub fn passthrough<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<bool> {
         let status = self
             .command(args)
@@ -226,9 +202,8 @@ impl Tool {
     }
 
     pub fn is_available(&self) -> bool {
-        // Through `command`, not `Command::new`, so the probe drops the passphrases like every
-        // other spawn. Built by hand it inherited the whole environment, and a shimmed `git`
-        // read the archive passphrase out of its own environ.
+        // The probe goes through `command`, so a shimmed `git` cannot read a passphrase
+        // from its environment
         self.command(&["--version"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -243,17 +218,12 @@ impl Tool {
         if let Some(home) = &self.home {
             cmd.env("RAD_HOME", home);
         }
-        // No pager and no credential prompt, because this tool parses git's output and runs
-        // unattended: a `[pager] log = less` in the user's config, or a prompt for a password,
-        // would hang the run. The system-wide config is skipped for the same reason; the
-        // user's own config, aliases and hooks are still read.
+        // A pager or a password prompt hangs an unattended run, so git gets neither. The
+        // system-wide config is skipped for the same reason. The user's config still applies.
         cmd.env("GIT_PAGER", "cat");
         cmd.env("GIT_CONFIG_NOSYSTEM", "1");
         cmd.env("GIT_TERMINAL_PROMPT", "0");
-        // Removed here, in the one place every spawn goes through, and by walking `Protects`
-        // rather than by naming variables: a secret added to that enum is scrubbed by this
-        // loop on the day it appears, where a list here would have to be remembered. The
-        // walk is a `match` chain and not an array precisely so the compiler asks.
+        // Walking `Protects` scrubs a secret added to that enum with no second list to update
         for protects in crate::crypt::Protects::all() {
             if self.secrets == Secrets::Only(protects) {
                 continue;
@@ -300,9 +270,10 @@ impl Tool {
 mod tests {
     use super::*;
 
-    /// `Command::get_envs` reports a removal as a key with no value, which is how the
-    /// scrubbing can be checked without a spawn and without touching this process's own
-    /// environment.
+    /// The variables `tool`'s command removes from its environment.
+    ///
+    /// `Command::get_envs` reports a removal as a key with no value, so the check needs no
+    /// spawn.
     fn removed_by(tool: &Tool) -> Vec<String> {
         tool.command(&["--version"])
             .get_envs()

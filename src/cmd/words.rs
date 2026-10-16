@@ -1,8 +1,4 @@
-//! Rebuilding an identity from the 24 words on a recovery sheet.
-//!
-//! The other half of `paper`, which prints the sheet. It shares nothing with restoring an
-//! archive but the home it writes into: there is no archive, no manifest and no repository
-//! here, only a seed that a key is derived back from.
+//! Rebuilding an identity from the 24 words on a recovery sheet that `paper` prints.
 
 use zeroize::Zeroizing;
 
@@ -11,8 +7,7 @@ use crate::crypt;
 use crate::error::{Error, Result};
 use crate::perms::{MODE_DOC, set_dir_owner_only, write_atomically, write_owner_only};
 
-/// Room for the longest 24-word BIP-39 line in English, so the buffer it is read into never
-/// grows: 24 words of 8 letters, 23 spaces, and a line ending.
+/// The byte length of the longest 24-word English BIP-39 line, with spaces and line ending.
 const TYPED_LINE: usize = 24 * 8 + 23 + 2;
 
 /// Rebuild an identity from a mnemonic, for when the paper sheet is all that is left.
@@ -26,20 +21,14 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
             "pass --home with an empty directory, or move the existing identity aside first",
         ));
     }
-    // Read from stdin whether a person is typing or a script is piping. The words are secret,
-    // but a pipe keeps them out of the process table and out of shell history, which is more
-    // than a command-line argument would do.
+    // The words arrive on stdin, which keeps them out of the process table and shell history
     if ctx.term.is_interactive() {
         ctx.term
             .headline("Type the 24 words from your recovery sheet, separated by spaces:");
     }
-    // Zeroizing, like every other buffer that holds key material: these 24 words ARE the key,
-    // so the line they arrive on cannot be left in freed heap for a later allocation to see.
-    //
-    // Sized before the first byte, because `read_line` grows a buffer that starts empty, and
-    // every growth frees a block still holding the words read so far, which the `Zeroizing`
-    // around the final buffer never reaches. Room for the longest mnemonic English spells: 24
-    // words of at most 8 letters, their separators, and a line ending.
+    // The line holds the key itself, so it is zeroized and sized before the first byte. Each
+    // growth of a buffer in `read_line` frees a block still holding the words read so far, and
+    // the `Zeroizing` around the final buffer never wipes that block.
     let mut line = Zeroizing::new(String::with_capacity(TYPED_LINE));
     std::io::stdin()
         .lock()
@@ -76,8 +65,8 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
 
     let passphrase = crypt::read_passphrase(
         crypt::Protects::RadicleKey,
-        // No file: `--passphrase-file` holds the ARCHIVE passphrase, and reading it here gave
-        // the restored key the same secret, silently, without ever asking for a new one.
+        // `--passphrase-file` holds the archive passphrase, so reading it here would silently
+        // give the restored key the same secret
         None,
         "New passphrase for the restored key: ",
         crypt::Purpose::Sealing,
@@ -87,15 +76,13 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
 
     std::fs::create_dir_all(home.keys_dir()).map_err(|e| Error::io(home.keys_dir(), e))?;
     set_dir_owner_only(home.path())?;
-    // The keys directory too, and before the key is written into it. `create_dir_all` takes
-    // the umask, so `keys/` came out world-listable on a default one while the key inside it
-    // was owner-only: a home this tool rebuilt was subtly less private than one `rad` made.
+    // `keys/` is tightened before the key lands in it, because `create_dir_all` takes the
+    // umask and leaves the directory world-listable on a default one
     set_dir_owner_only(&home.keys_dir())?;
     write_owner_only(&home.secret_key(), openssh.as_bytes())?;
-    // Through the same writer as the key beside it, rather than `fs::write`, which follows a
-    // symlink standing at the name and truncates whatever it points at. `write_atomically`
-    // unlinks first, so a link there is replaced rather than written through, and the file
-    // lands at `0644` instead of at whatever the umask allowed.
+    // `fs::write` follows a symlink at the name and truncates its target. `write_atomically`
+    // unlinks first, so a link there is replaced and its target left alone, and the file
+    // lands at `0644` whatever the umask.
     write_atomically(
         &home.public_key(),
         identity.to_openssh()?.as_bytes(),
@@ -115,8 +102,6 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// The constant against the word list itself, not against a number typed twice. A buffer
-    /// one byte short still grows, and growing is the whole of what it is there to stop.
     #[test]
     fn the_typed_line_has_room_for_the_longest_words_english_spells() {
         let longest = bip39::Language::English

@@ -1,7 +1,4 @@
-//! Terminal output.
-//!
-//! Every line the tool prints goes through here, so that `--quiet`, `--json` and colour
-//! detection are decided in one place instead of at each call site.
+//! Terminal output, where `--quiet`, `--json` and colour detection are decided.
 
 use std::io::{self, IsTerminal, Write};
 
@@ -22,15 +19,11 @@ pub struct Term {
 
 impl Term {
     pub fn new(assumes_yes: bool, verbosity: Verbosity, force_no_colour: bool) -> Self {
-        // Both, and deliberately not `/dev/tty`, which is what rpassword would actually read
-        // from and which stays open through a redirect. A tool that opened `/dev/tty` would
-        // prompt a person who redirected stderr, which is friendlier, and would also HANG
-        // forever in any unattended run that happens to keep a controlling terminal, which
-        // for a backup means the backups quietly stop. Failing fast with a remedy line is the
-        // trade this makes. Revisit if a `--batch` flag ever gives unattended runs their own
-        // way to say there is nobody here.
+        // Both stdin and stderr, never `/dev/tty`, which stays open through a redirect and
+        // would hang an unattended run that keeps a controlling terminal. Revisit if a
+        // `--batch` flag ever gives unattended runs their own way to say nobody is there.
         let is_interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
-        // NO_COLOR is honoured for any non-empty value, per the no-color.org convention.
+        // NO_COLOR is honoured for any non-empty value, per the no-color.org convention
         let no_colour_env = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
         Self {
             uses_colour: io::stderr().is_terminal() && !no_colour_env && !force_no_colour,
@@ -40,17 +33,17 @@ impl Term {
         }
     }
 
-    /// Progress and status go to stderr, so that `--stdout` archives and `--json` reports can
-    /// be piped without the narration mixing in.
+    /// Prints progress and status to stderr, so `--stdout` archives and `--json` reports pipe
+    /// clean. `--quiet` drops it.
     fn narrate(&self, line: &str) {
         if self.verbosity == Verbosity::Normal {
             self.always(line);
         }
     }
 
-    /// For lines `--quiet` must not swallow. A warning is not narration: the shipped systemd
-    /// unit and the crontab in the README both pass `--quiet`, so routing warnings through
-    /// `say` meant an unattended run could narrow what it archived and still look clean.
+    /// Prints a line `--quiet` must not swallow. The shipped systemd unit and the README's
+    /// crontab pass `--quiet`, so a swallowed warning would let an unattended run narrow what
+    /// it archived and still look clean.
     fn always(&self, line: &str) {
         let mut stderr = io::stderr();
         let _ = writeln!(stderr, "{line}");
@@ -92,21 +85,19 @@ impl Term {
         self.always(&format!("{} {text}", self.paint("33", "!")));
     }
 
-    /// For a question that could not be answered. `·` would read as a neutral bullet, and a
-    /// reader is owed the difference between "this is fine" and "this could not be looked at".
-    /// Never swallowed: an unanswerable check is a diagnostic, not narration.
+    /// Marks a question that could not be answered, apart from the neutral `·` of a check that
+    /// passed. Never swallowed, because an unanswerable check is a diagnostic.
     pub fn unknown(&self, text: &str) {
         self.always(&format!("{} {text}", self.dim("?")));
     }
 
-    /// A hint attached to a step that went fine. Narration, and `--quiet` drops it.
+    /// A hint attached to a step that went fine, which `--quiet` drops.
     pub fn hint(&self, text: &str) {
         self.narrate(&self.dim(&format!("  {text}")));
     }
 
-    /// The lines under a `warn` or a `fail` that carry the substance: which repositories are
-    /// at risk, what to run next, where to look. Printed like a hint and never swallowed,
-    /// because `--quiet` otherwise reported that something was wrong and withheld what.
+    /// The lines under a `warn` or a `fail` that say which repositories are at risk, what to
+    /// run next or where to look. Printed like a hint and never swallowed by `--quiet`.
     pub fn detail(&self, text: &str) {
         self.always(&self.dim(&format!("  {text}")));
     }
@@ -115,13 +106,13 @@ impl Term {
         self.narrate("");
     }
 
-    /// Anything a machine consumes goes to stdout: JSON reports, listings, recovery sheets.
+    /// Prints machine output (JSON reports, listings, recovery sheets) to stdout.
     ///
-    /// Unlike the narration above, a failure here is the failure of the thing the command was
-    /// asked to produce, so it is returned rather than dropped: half a JSON report, written
-    /// onto a full disk under an exit code that said success, is output no consumer can tell
-    /// from the real thing. A closed pipe is the one exception, because `... | head` closes it
-    /// on purpose and the run did nothing wrong.
+    /// # Errors
+    ///
+    /// Returns a failed write, because half a JSON report under a success exit code is
+    /// indistinguishable from a whole one. A closed pipe is not an error, since `| head`
+    /// closes it on purpose.
     pub fn print(&self, line: &str) -> Result<()> {
         let mut stdout = io::stdout();
         match writeln!(stdout, "{line}").and_then(|()| stdout.flush()) {
@@ -139,9 +130,8 @@ impl Term {
         self.is_interactive
     }
 
-    /// Ask a yes/no question. With nobody to ask (cron, a pipe) the answer is no unless
-    /// `--yes` was passed, because a backup tool that guesses "yes" for someone who is not
-    /// there can overwrite a home nobody meant to touch.
+    /// Asks a yes/no question. With nobody to ask (cron, a pipe) the answer is no unless
+    /// `--yes` was passed, because a guessed yes can overwrite a home nobody meant to touch.
     pub fn confirm(&self, question: &str) -> Result<bool> {
         if self.assumes_yes {
             return Ok(true);
@@ -161,7 +151,7 @@ impl Term {
     }
 }
 
-/// Render a byte count the way a person reads it, not the way a computer stores it.
+/// Renders a byte count in the largest binary unit that keeps a whole part.
 pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut size = n as f64;
@@ -177,7 +167,7 @@ pub fn human_bytes(n: u64) -> String {
     }
 }
 
-/// A count with the right noun beside it. One place, so no line ever reads "1 repositories".
+/// A count with the noun that agrees with it, so no line reads "1 repositories".
 pub fn count(n: usize, singular: &str, plural: &str) -> String {
     if n == 1 {
         format!("{n} {singular}")
@@ -186,8 +176,8 @@ pub fn count(n: usize, singular: &str, plural: &str) -> String {
     }
 }
 
-/// A few named and the rest counted: identifiers stop being readable well before they stop
-/// being numerous, while the count is what says how much of the home this is about.
+/// Names the first five ids and counts the rest, because a long list of identifiers stops
+/// being readable while the count still says how much of the home is affected.
 pub fn shortlist<S: AsRef<str>>(ids: impl IntoIterator<Item = S>) -> String {
     const NAMED: usize = 5;
     let all: Vec<S> = ids.into_iter().collect();
@@ -203,27 +193,26 @@ pub fn shortlist<S: AsRef<str>>(ids: impl IntoIterator<Item = S>) -> String {
     }
 }
 
-/// The verb that agrees with a count, so no line ever reads "1 of 3 are in no archive".
+/// The verb that agrees with a count, so no line reads "1 of 3 are in no archive".
 pub fn is_or_are(n: usize) -> &'static str {
     if n == 1 { "is" } else { "are" }
 }
 
 /// Whole days between two instants, negative when `from` is ahead of `to`.
 ///
-/// One place, because an archive's age is read off two different stamps (the one inside the
-/// state file and the one in the file name) and two roundings would make the same archive
-/// stale in one report and fresh in the other.
+/// An archive's age is read off two stamps (the state file and the file name), and both go
+/// through this, so one archive is never stale in one report and fresh in the other.
 pub fn days_between(from: jiff::Timestamp, to: jiff::Timestamp) -> i64 {
     to.duration_since(from).as_secs().div_euclid(60 * 60 * 24)
 }
 
-/// Render a duration in whole days, for "this backup is 40 days old" style reporting.
+/// Renders a day count for "this backup is 40 days old" style reporting.
 pub fn days_ago(days: i64) -> String {
     match days {
         0 => "today".to_string(),
         1 => "yesterday".to_string(),
-        // A clock that ran fast on the machine that took it, so the age is not a fact about
-        // the archive. "-36 days ago" reads as a typo; this reads as what it is.
+        // A clock that ran fast on the machine that took it, where "-36 days ago" would read
+        // as a typo
         n if n < 0 => "at a time in the future".to_string(),
         n => format!("{n} days ago"),
     }

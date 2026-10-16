@@ -3,32 +3,32 @@
 default:
     @just --list
 
-# What CI runs on every push, in the order that fails fastest. The shell gates live in `ci/`
-# and both this file and the workflow call them there: spelled out in two places they drifted,
-# and a gate only one side enforces is one that lands broken on whichever side nobody ran.
+# The workflow runs these same `ci/` gates, and `ci/pins.sh` holds the two lists equal
+
+# What CI runs on every push, in the order that fails fastest
 check: fmt-check audit-map names messages shell pins lint nonunix test
 
-# Every file SECURITY.md sends a reviewer to still exists. Why, in `ci/audit-map.sh`.
+# Every file SECURITY.md sends a reviewer to still exists
 audit-map:
     ci/audit-map.sh
 
-# No user-facing message has a hole in the middle of it. Why, in `ci/messages.sh`.
+# No user-facing message has a run of spaces left by a dropped line continuation
 messages:
     ci/messages.sh
 
-# Six naming rules a reviewer kept having to enforce by hand. Why, in `ci/names.sh`.
+# Seven naming and gating rules over the Rust tree
 names:
     ci/names.sh
 
-# Every tracked shell script, through shellcheck. Why, in `ci/shell.sh`.
+# Every tracked shell script through shellcheck
 shell:
     ci/shell.sh
 
-# One fact, written in several files, still says one thing. Why, in `ci/pins.sh`.
+# Facts written in several files still agree
 pins:
     ci/pins.sh
 
-# Compile the suite the way a target that is not unix sees it. Why, in `ci/nonunix.sh`.
+# Compile the suite the way a target that is not unix sees it
 nonunix:
     ci/nonunix.sh
 
@@ -38,52 +38,49 @@ fmt:
 fmt-check:
     cargo fmt --check
 
-# `--locked` on both, matching CI: a Cargo.toml requirement widened without updating
-# Cargo.lock is an error here rather than a silent re-resolve that only CI notices.
-#
-# `-D warnings` likewise, because CI sets it for every job and this recipe claims to be what
-# CI runs. Without it an unused import passed here and failed there, which is the worst thing
-# a local gate can do: report a safety it is not providing. Passing it through RUSTFLAGS is
-# safe despite the splitting note in `repro` below, because neither word is a path.
+# `--locked` and `-D warnings` match CI, so a widened Cargo.toml requirement or a warning fails
+# here too. RUSTFLAGS splits on whitespace, which is safe here because neither word is a path.
+
+# Clippy over every target, as CI runs it
 lint:
     RUSTFLAGS="-D warnings" cargo clippy --all-targets --locked
 
 test:
     RUSTFLAGS="-D warnings" cargo test --locked
 
-# Generate the man page, shell completions and the Debian changelog.
+# Generate the man page, shell completions and the Debian changelog
 generated: build
     mkdir -p packaging/generated
     ./target/release/rad-backup man > packaging/generated/rad-backup.1
     ./target/release/rad-backup completions bash > packaging/generated/rad-backup.bash
     ./target/release/rad-backup completions zsh > packaging/generated/_rad-backup
     ./target/release/rad-backup completions fish > packaging/generated/rad-backup.fish
-    # `rad restore` is the same binary under the name someone in trouble reaches for, and a
-    # roff include so `man rad-restore` answers rather than saying there is no such page.
-    # Windows cannot make this link without developer mode, and has no man pages to read the
-    # include either, so it says so and carries on rather than failing the whole release.
+    # `rad restore` is the same binary, and a roff include makes `man rad-restore` answer.
+    # Windows cannot make the link without developer mode, so the failure is reported and the
+    # release carries on.
     ln -sfn rad-backup packaging/generated/rad-restore \
         || echo "no rad-restore symlink on this platform; a packager must create it" >&2
     printf '.so man1/rad-backup.1\n' > packaging/generated/rad-restore.1
     printf 'radicle-backup (%s-1) stable; urgency=medium\n\n  * Upstream release %s. The changelog for it is at\n    https://github.com/maninak/radicle-backup/blob/master/CHANGELOG.md\n\n -- Konstantinos Maninakis <info@radicle.tools>  %s\n' "$(just version)" "$(just version)" "$(just rfc-date)" > packaging/generated/changelog.Debian
 
-# The version in Cargo.toml, which is the one every artifact is named after.
+# The version in Cargo.toml, which names every artifact
 version:
     @grep -m1 '^version' Cargo.toml | cut -d'"' -f2
 
-# The one timestamp every generated artifact uses: SOURCE_DATE_EPOCH if the caller set one,
-# else the commit being built. Reading the clock instead would make two builds of one commit
-# produce two different .deb files.
+# Reading the clock would make two builds of one commit produce two different .deb files
+
+# The timestamp every generated artifact uses: SOURCE_DATE_EPOCH, else the commit's time
 epoch:
     @echo "${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}"
 
-# That same instant as an RFC 2822 date, which is the only format a Debian changelog accepts.
-# UTC, because the builder's timezone would otherwise end up in the package. GNU and BSD
-# `date` spell "this epoch second" differently, and macOS builds run this too.
+# UTC keeps the builder's timezone out of the package. GNU and BSD `date` spell "this epoch
+# second" differently, and macOS builds run this too.
+
+# The epoch as an RFC 2822 date in UTC, the format a Debian changelog requires
 rfc-date:
     @TZ=UTC date -R -d "@$(just epoch)" 2>/dev/null || TZ=UTC date -R -r "$(just epoch)"
 
-# Build twice from scratch and prove the two binaries are the same file.
+# Build twice from scratch and prove the two binaries are the same file
 repro:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -97,71 +94,68 @@ repro:
     echo "second $b"
     [ "$a" = "$b" ] && echo "reproducible" || { echo "NOT reproducible" >&2; exit 1; }
 
-# A release build with every source of build-machine noise removed.
+# A release build with every source of build-machine noise removed
 build-repro:
     #!/usr/bin/env bash
     set -euo pipefail
     export SOURCE_DATE_EPOCH="$(just epoch)"
-    # CARGO_ENCODED_RUSTFLAGS, not RUSTFLAGS: the latter is split on whitespace, so a checkout
-    # in a directory whose name has a space in it would break the flags rather than the build,
-    # which is a confusing way to find out.
+    # CARGO_ENCODED_RUSTFLAGS, because RUSTFLAGS splits on whitespace and a checkout path with
+    # a space in it would break the flags
     export CARGO_ENCODED_RUSTFLAGS="$(printf -- '--remap-path-prefix=%s=/build\x1f--remap-path-prefix=%s=/cargo' "$PWD" "${CARGO_HOME:-$HOME/.cargo}")"
     cargo build --release --locked
 
 build:
     cargo build --release
 
-# Build a .deb of the working tree.
+# Build a .deb of the working tree
 deb: generated
     cargo deb --no-build
 
-# An .rpm of the same.
+# Build an .rpm of the working tree
 rpm: generated
     cargo generate-rpm
 
-# Run lintian over the package this repository builds natively.
+# Run lintian over the package this repository builds natively
 lint-deb: deb
     just lint-deb-at target/debian
 
-# Run lintian over a package built anywhere, which is how the release checks a cross-built one.
-#
-# The suppressed tags, in order. Uploading to Debian itself is not what this is. A static
-# binary is the entire point of a musl build, which lintian grades as an error on a foreign
-# architecture and a warning on the native one, so one release built the same package twice
-# and only the arm64 half failed. And a static-pie binary is an ET_DYN ELF, which lintian
-# reads as a shared library and then faults for declaring no dependencies, which is the same
-# fact about the same build said a third way.
+# The suppressed tags, in order. This package is not uploaded to Debian. A musl build is
+# static by design, and lintian grades that an error on a foreign architecture. A static-pie
+# binary is an ET_DYN ELF, which lintian reads as a shared library with no dependencies.
+
+# Run lintian over a package built anywhere, which is how the release checks a cross-built one
 lint-deb-at dir:
     lintian --suppress-tags initial-upload-closes-no-bugs \
         --suppress-tags statically-linked-binary \
         --suppress-tags shared-library-lacks-prerequisites \
         {{dir}}/*.deb
 
-# Build the release tarball for one target, as CI does.
+# Build the release tarball for one target, as CI does
 dist target=`rustc -vV | sed -n 's|host: ||p'`: generated
     cargo build --release --target {{target}}
     mkdir -p dist
     tar -czf dist/rad-backup-{{target}}.tar.gz -C target/{{target}}/release rad-backup
     cd dist && sha256sum rad-backup-{{target}}.tar.gz >> sha256sums.txt
 
-# Install into ~/.local/bin with completions and the man page.
+# Install into ~/.local/bin with completions and the man page
 install-local: generated
     install -Dm755 target/release/rad-backup ~/.local/bin/rad-backup
     ln -sfn rad-backup ~/.local/bin/rad-restore
     install -Dm644 packaging/generated/rad-backup.1 ~/.local/share/man/man1/rad-backup.1
     install -Dm644 packaging/generated/rad-backup.bash ~/.local/share/bash-completion/completions/rad-backup
     install -Dm644 packaging/generated/_rad-backup ~/.local/share/zsh/site-functions/_rad-backup
-    # No backticks in this message: just evaluates them as a command, and the one that reads
-    # naturally here would have run a real backup of the caller's home.
+    # No backticks in this message, because they run as a command, and the natural one here
+    # would run a real backup of the caller's home
     @echo "installed; 'rad backup' works once ~/.local/bin is on PATH"
 
 clean:
     cargo clean
     rm -rf packaging/generated dist
 
-# Everything a release needs before the tag exists, which is the part CI cannot do for itself:
-# the version bump, the changelog section CI quotes, and the tag. Stops there. Pushing the tag
-# is what starts the publish, and crates.io cannot take one back, so that stays a separate act.
+# Pushing the tag starts the publish, and crates.io cannot take one back, so this stops
+# before the push
+
+# Bump the version, stamp the changelog and tag the release locally
 release version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -174,32 +168,29 @@ release version:
         || { echo "uncommitted changes; the release commit carries only the bump" >&2; exit 1; }
     ! git rev-parse -q --verify "refs/tags/v$v" > /dev/null \
         || { echo "v$v already exists as a tag" >&2; exit 1; }
-    # An empty [Unreleased] is a release with nothing in it, and the release page would quote
-    # the blank section rather than say so.
+    # An empty [Unreleased] would make the release page quote a blank section
     awk '/^## \[Unreleased\]/ { p = 1; next } p && /^## / { exit } p && NF { hit = 1 }
          END { exit !hit }' CHANGELOG.md \
         || { echo "CHANGELOG.md has no '## [Unreleased]' section with anything in it. Write" \
                   "what changed there first: a release renames that heading and leaves none" \
                   "behind, so the next change to land is what opens the next one." >&2; exit 1; }
 
-    # A failure past this point puts the four files back, so the next run starts where this
-    # one did instead of failing its own clean-tree check on the half-release it left behind.
+    # A failure past this point puts the four files back, so the next run passes its own
+    # clean-tree check
     trap 'git checkout -- Cargo.toml Cargo.lock CHANGELOG.md ARCHIVE-FORMAT.md' ERR
 
-    # awk rather than `sed -i`, which spells its backup suffix differently on GNU and BSD.
+    # `sed -i` spells its backup suffix differently on GNU and BSD
     awk -v v="$v" '!done && /^version = / { print "version = \"" v "\""; done = 1; next } { print }' \
         Cargo.toml > Cargo.toml.next && mv Cargo.toml.next Cargo.toml
-    # --offline so a release bump cannot also drag in a dependency update nobody asked for.
+    # --offline, so a release bump pulls in no dependency update
     cargo update --workspace --offline
-    # [Unreleased] becomes the released heading, and nothing takes its place: a shipped
-    # changelog should not open with a heading that has nothing under it. The first change to
-    # land after a release adds it back. `## [<version>]` is the shape release.yml greps for.
+    # [Unreleased] becomes the released heading, and the next change to land adds it back.
+    # release.yml greps for the `## [<version>]` shape.
     awk -v v="$v" -v day="$(date -u +%F)" \
         '!done && /^## \[Unreleased\]/ { print "## [" v "] - " day; done = 1; next } { print }' \
         CHANGELOG.md > CHANGELOG.md.next && mv CHANGELOG.md.next CHANGELOG.md
-    # Two package versions in ARCHIVE-FORMAT.md derive from nothing: the version-history row
-    # naming the release that first shipped the current format, and the sample manifest, which
-    # shows what this build writes. The format version is a different number and is left alone.
+    # Two package versions in ARCHIVE-FORMAT.md derive from nothing, the version-history row
+    # for the current format and the sample manifest. The format version is left alone.
     awk -v v="$v" '/^\| *[0-9]+ *\| *unreleased *\|/ { sub(/unreleased/, v) } { print }' \
         ARCHIVE-FORMAT.md > ARCHIVE-FORMAT.md.next && mv ARCHIVE-FORMAT.md.next ARCHIVE-FORMAT.md
     awk -v v="$v" '/"tool": *\{ *"name": *"rad-backup", *"version":/ {
@@ -207,7 +198,7 @@ release version:
         ARCHIVE-FORMAT.md > ARCHIVE-FORMAT.md.next && mv ARCHIVE-FORMAT.md.next ARCHIVE-FORMAT.md
 
     just check
-    # The commit is about to take these four, so a failure after it must not put them back.
+    # The commit takes these four, so a later failure must not put them back
     trap - ERR
     git add Cargo.toml Cargo.lock CHANGELOG.md ARCHIVE-FORMAT.md
     git commit -m "chore: release $v"

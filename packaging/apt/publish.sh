@@ -4,15 +4,10 @@
 #
 #   ./packaging/apt/publish.sh <directory of .deb files>
 #
-# The repository is a plain static tree in a Cloudflare R2 bucket, so it can be served with no
-# server to run, mirrored with a recursive fetch, and read by apt with nothing but HTTP.
+# Every run rebuilds the indexes from the whole pool, pulled down first, because an index
+# that drifts from the pool gives apt clients an unexplained hash mismatch.
 #
-# Every run rebuilds the indexes from the whole pool rather than appending to them, because an
-# index that drifts from the pool is an apt client that gets a hash mismatch and no way to tell
-# why. The existing pool is pulled down first for the same reason: an index must describe every
-# package that is there, not only the ones this run happened to upload.
-#
-# Needs: apt-utils (apt-ftparchive), gpg, rclone. In CI, APT_GPG_PRIVATE_KEY and
+# Needs apt-utils (apt-ftparchive), gpg and rclone. In CI, APT_GPG_PRIVATE_KEY and
 # APT_GPG_PASSPHRASE hold the signing key, and R2_* the bucket credentials.
 set -euo pipefail
 
@@ -34,13 +29,13 @@ mapfile -t debs < <(find "$INCOMING" -type f -name '*.deb' | sort)
 [ "${#debs[@]}" -gt 0 ] || { echo "no .deb files under $INCOMING" >&2; exit 1; }
 log "publishing ${#debs[@]} package(s)"
 
-# rclone reads its remote from the environment, so nothing has to be written to disk.
+# rclone reads its remote from the environment, so nothing is written to disk
 export RCLONE_CONFIG_R2_TYPE=s3
 export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
 export RCLONE_CONFIG_R2_ENDPOINT="${R2_ENDPOINT:?R2_ENDPOINT is not set}"
 export RCLONE_CONFIG_R2_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID is not set}"
 export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY is not set}"
-# R2 has no ACLs and returns an error for the header rclone sends by default.
+# R2 has no ACLs and returns an error for the header rclone sends by default
 export RCLONE_S3_NO_CHECK_BUCKET=true
 export RCLONE_S3_ACL=
 
@@ -51,13 +46,10 @@ if [ -n "${APT_GPG_PRIVATE_KEY:-}" ]; then
   chmod 700 "$GNUPGHOME"
   printf '%s' "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
 fi
-# Signing key selection. Only one that can sign and is not expired, revoked, disabled or
-# invalid: the fresh GNUPGHOME above exists only when CI supplies the key, so a local run reads
-# whatever the keyring already holds and the first entry there is rarely this repository's.
-# Several candidates refuse rather than pick, because an index signed by the wrong key is
-# rejected by every client holding the right one, with nothing in between to say why.
-# Capability matches in either case: gpg writes it lowercase for the primary and uppercase for
-# the whole key.
+# The one secret key that can sign and is not expired, revoked, disabled or invalid. A local
+# run reads the existing keyring, so several candidates are refused, because an index signed
+# by the wrong key fails on every client with no hint which key was wrong. gpg writes the
+# capability in either case.
 if [ -n "${APT_GPG_KEY_ID:-}" ]; then
   KEY_ID="$APT_GPG_KEY_ID"
 else
@@ -84,9 +76,8 @@ log "signing with $KEY_ID"
 
 log "fetching the current pool"
 mkdir -p "$ROOT/pool/$COMPONENT"
-# `|| true` here swallowed every failure, so a rotated token or a 5xx rebuilt the indexes from
-# this run's .debs alone and delisted every version already published. rclone exits 3 for
-# "directory not found", which is the only case that legitimately starts from an empty pool.
+# rclone exits 3 for "directory not found", the only case that starts from an empty pool. Any
+# other failure would rebuild the indexes from this run's .debs and delist every published one.
 probe=0
 rclone lsf "$REMOTE/pool/$COMPONENT" > /dev/null 2>&1 || probe=$?
 if [ "$probe" -eq 0 ]; then
@@ -104,7 +95,7 @@ for arch in $ARCHITECTURES; do
   mkdir -p "$dir"
   ( cd "$ROOT" && apt-ftparchive --arch "$arch" packages "pool/$COMPONENT" ) > "$dir/Packages"
   gzip -9fkn "$dir/Packages"
-  # A client that speaks only the older index format still needs this to exist.
+  # A client that speaks only the older index format still needs this file
   cat > "$dir/Release" <<EOF
 Archive: $SUITE
 Component: $COMPONENT
@@ -133,7 +124,7 @@ gpg "${gpg_batch[@]}" --armor --detach-sign --output "$ROOT/dists/$SUITE/Release
 gpg "${gpg_batch[@]}" --clearsign --output "$ROOT/dists/$SUITE/InRelease" "$ROOT/dists/$SUITE/Release"
 gpg --armor --export "$KEY_ID" > "$ROOT/pubkey.asc"
 
-# So the tree is browsable, and so `curl $SITE` explains itself to whoever finds it.
+# Makes the tree browsable and `curl $SITE` self-explanatory
 cat > "$ROOT/index.html" <<EOF
 <!doctype html>
 <meta charset="utf-8">
@@ -148,9 +139,8 @@ sudo apt update && sudo apt install radicle-backup
 <p><a href="https://radicle.tools">radicle.tools</a> &middot; <a href="https://github.com/maninak/radicle-backup">source</a></p>
 EOF
 
-# The pool goes up before the indexes that name it: for the moments in between, a client that
-# reads an old index and fetches a package it names still finds it. The other order would
-# serve an index pointing at a .deb that is not there yet.
+# The pool goes up before the indexes that name it, so no index ever points at a .deb that is
+# not there yet
 log "uploading the pool"
 rclone copy "$ROOT/pool" "$REMOTE/pool" --checksum --quiet
 log "uploading the indexes"

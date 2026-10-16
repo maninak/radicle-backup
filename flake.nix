@@ -1,12 +1,8 @@
 {
-  # A build anyone can repeat. `nix build` here produces the same bytes on any machine that
-  # runs it, which is what makes "this binary is the one the release announced" checkable
-  # rather than a promise. The cargo build reproduces too, given the pinned toolchain in
-  # rust-toolchain.toml and the path remapping `just dist` sets, but nix is the reference.
+  # The reference reproducible build, producing the same bytes on any machine
   description = "Back up, restore and move a Radicle identity, node state and repositories";
 
-  # Pinned by revision rather than by branch, so a flake.lock is a convenience here and not
-  # the only thing standing between two builds and two different results.
+  # Pinned by revision, so two builds agree without a flake.lock
   inputs.nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=master&rev=0e251e24a4f24e036a084b6b4b2d2491af4167f4&shallow=1";
 
   outputs =
@@ -37,20 +33,18 @@
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
 
-            # rusqlite and zstd build their C from source, so there is nothing to find on the
-            # host and nothing that can differ between hosts.
+            # rusqlite and zstd build their C from source, so nothing differs between hosts
             nativeBuildInputs = [ pkgs.installShellFiles ];
 
-            # The suite drives the built binary against a real git, and `jq` because the
-            # shipped `restore.sh` reads the manifest with it: without one the script puts
-            # every repository back with no HEAD, and the test comparing it against this
-            # tool fails on a difference that is the build environment's, not the code's.
+            # The suite drives the built binary against a real git. The shipped `restore.sh`
+            # reads the manifest with `jq`, and without it restores every repository with no
+            # HEAD, failing the test that compares it against this tool.
             nativeCheckInputs = [ pkgs.git pkgs.jq ];
 
             postInstall = ''
               ln -s rad-backup $out/bin/rad-restore
-              # A real file, not <(...): installManPage reads the section number off the
-              # filename, and a process substitution is /dev/fd/63, which has none.
+              # A real file, because installManPage reads the section number off the filename
+              # and a process substitution is /dev/fd/63
               $out/bin/rad-backup man > "$TMPDIR/rad-backup.1"
               installManPage "$TMPDIR/rad-backup.1"
               installShellCompletion --cmd rad-backup \
@@ -97,7 +91,7 @@
         }
       );
 
-      # `nix flake check` builds the package and runs its tests.
+      # `nix flake check` builds the package and runs its tests
       checks = forEach (system: { inherit (self.packages.${system}) rad-backup; });
 
       apps = forEach (system: {

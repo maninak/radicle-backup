@@ -1,24 +1,17 @@
-//! What the tool promises, proven end to end against the binary that ships.
-//!
-//! Every fixture here is built by running `rad-backup` itself, so the tests need nothing on
-//! the machine that the tool does not already need: `git`, and nothing else. The identity
-//! comes from a fixed mnemonic, which makes every run produce the same DID and makes a
-//! failure reproducible from the test name alone.
-//!
-//! Two things are stood in for, because a test cannot have them: `rad`, by a shell script the
-//! fixture writes (see `stub_rad`), and the network it would talk to. Everything else is the
-//! real thing, down to the shipped `restore.sh` being run by `sh`.
+//! End-to-end tests against the shipped binary, with `rad` and the network stubbed out.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// BIP-39's all-zero entropy vector. A real key, deterministically.
+/// The BIP-39 mnemonic for all-zero entropy, which rebuilds the same key on every run.
 const WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
                      abandon abandon abandon abandon abandon abandon abandon abandon abandon \
                      abandon abandon abandon abandon abandon art";
 
-/// The identity those words rebuild. Hard-coded so that a change in key derivation, which
-/// would silently orphan every recovery sheet ever printed, fails a test instead.
+/// The identity `WORDS` rebuilds.
+///
+/// A change in key derivation would orphan every printed recovery sheet, so this DID is
+/// spelled out by hand.
 const DID: &str = "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
 
 const KEY_PASSPHRASE: &str = "the key passphrase";
@@ -28,15 +21,12 @@ const RID: &str = "z3gqcJUoA1n9HaHKufZs5FCSGazv5";
 
 /// A fixture root short enough that a control socket still fits under it.
 ///
-/// A restore asks whether a node is listening before it writes anything, and asking means a
-/// path to `<home>/node/control.sock` that fits in `sun_path`: 104 bytes on macOS, 108 on
-/// Linux. `std::env::temp_dir()` on macOS is `/var/folders/<x>/<y>/T/`, which has spent half
-/// of that before the fixture has named anything, so `/tmp` takes over when the name would
-/// not fit. A test whose node check could not run is not a test that checked.
+/// A restore probes `<home>/node/control.sock`, which must fit in `sun_path` (104 bytes on
+/// macOS, 108 on Linux). The macOS temp directory is long, so `/tmp` is used when it would
+/// not fit.
 #[cfg(unix)]
 fn scratch_root(name: &str) -> PathBuf {
-    // The deepest path any test builds under the root, so the fit is decided once here rather
-    // than test by test: the longest home a fixture names, plus the socket under it.
+    // The longest home a fixture names, plus the socket under it
     const DEEPEST: usize = "/identity-passphrase/node/control.sock".len();
     const SUN_LEN: usize = 104;
 
@@ -47,7 +37,6 @@ fn scratch_root(name: &str) -> PathBuf {
     }
 }
 
-/// Nothing off unix binds a socket, so the system temp directory is the only answer there.
 #[cfg(not(unix))]
 fn scratch_root(name: &str) -> PathBuf {
     std::env::temp_dir().join(name)
@@ -58,15 +47,12 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// A Radicle home with an identity, policies and one repository, built from nothing.
+    /// Builds a Radicle home with an identity, policies and one repository.
     fn create(name: &str) -> Self {
         let root = scratch_root(&format!("rad-backup-it-{name}-{}", std::process::id()));
-        // Owner-only, and never a directory that was already there, because the root holds a
-        // real Radicle home with a real secret key under a name guessable from the pid. A
-        // `create_dir_all` over a root somebody else planted first would have built that home
-        // under their permissions, and a leftover from a crashed run fails here on purpose.
-        // The guard is armed before the first file is written so that a panic partway through
-        // still removes what was written.
+        // The root holds a real secret key under a name guessable from the pid, so it must be
+        // new and owner-only. The guard is armed before the first write, so a panic partway
+        // through still cleans up.
         create_private_dir(&root).expect("the fixture root is creatable and was not already there");
         let fixture = Self { root };
 
@@ -125,7 +111,7 @@ impl Fixture {
         .expect("the fixture policies are writable");
     }
 
-    /// A bare repository holding this peer's namespace, which is what makes it "mine".
+    /// Writes a bare repository holding this peer's namespace.
     fn write_repository(&self) {
         let work = self.path("work");
         let storage = self.home().join("storage").join(RID);
@@ -151,9 +137,8 @@ impl Fixture {
             &["init", "--quiet", "--bare", &storage.to_string_lossy()],
             &work,
         );
-        // What `rad` puts in a storage config beyond what `git init` writes: the node's alias
-        // and its DID. They are the only settings a restore carries over from an archive, so
-        // a fixture without them makes every test about that carrying nothing at all.
+        // `rad` adds the node's alias and DID to a storage config, and a restore carries these
+        // settings over, so tests about that carrying need them here
         for (name, value) in [
             ("user.name", "fixture".to_string()),
             ("user.email", format!("fixture@{DID}")),
@@ -172,7 +157,7 @@ impl Fixture {
         self.publish(&work);
     }
 
-    /// Push the working copy into this peer's namespace and sign it, the way a node would.
+    /// Pushes the working copy into this peer's namespace and signs it, as a node would.
     fn publish(&self, work: &Path) {
         let storage = self.home().join("storage").join(RID);
         let node_id = DID.trim_start_matches("did:key:");
@@ -210,7 +195,7 @@ impl Fixture {
         );
     }
 
-    /// Add a commit and re-sign, so that the archive on disk is now behind this home.
+    /// Adds a commit and re-signs, so an archive taken earlier is behind this home.
     fn advance(&self) {
         let work = self.path("work");
         std::fs::write(work.join("a.txt"), b"hello again\n").expect("a file is writable");
@@ -254,13 +239,10 @@ impl Fixture {
         child.wait_with_output().expect("rad-backup finishes")
     }
 
-    /// Put a stand-in `rad` where this fixture's runs will find it.
+    /// Puts a stub `rad` where this fixture's runs find it, answering for a repository of
+    /// the given `visibility`.
     ///
-    /// Without one every test drives the no-`rad` path, which is the path that cannot see a
-    /// repository's visibility: the private selection, the delegate list and the name in the
-    /// manifest all come from `rad inspect`, and none of them was reachable from a test. The
-    /// stub answers only what these tests ask and shouts on stderr about anything else, so a
-    /// question nobody stubbed fails the test rather than quietly degrading to "no rad".
+    /// The stub prints `STUB-RAD-UNSTUBBED` on stderr and fails on any call it was not taught.
     #[cfg(unix)]
     fn stub_rad(&self, visibility: &str) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -306,13 +288,12 @@ esac
             .args(args)
             .arg("--home")
             .arg(home)
-            // Kept out of the real one, so a test run never rewrites what `doctor` reads.
+            // A test run must never rewrite the real state that `doctor` reads
             .env("XDG_STATE_HOME", self.path("state"))
             .env("RAD_PASSPHRASE", KEY_PASSPHRASE)
             .env("RAD_BACKUP_PASSPHRASE", ARCHIVE_PASSPHRASE)
             .env("NO_COLOR", "1")
-            // A real `rad` on PATH would reach for a node this fixture does not have, so the
-            // default is a path that cannot exist and the stub is opted into per test.
+            // A real `rad` on PATH would reach for a node this fixture does not have
             .env(
                 "RAD",
                 match stub.is_file() {
@@ -324,9 +305,7 @@ esac
     }
 }
 
-/// What `rad-backup` itself does for a working directory, spelled out here because an
-/// integration test cannot reach `crate::perms`. `create_dir` fails when the path exists,
-/// which is the property that matters on every platform; the mode is the part only unix has.
+/// Creates an owner-only directory, failing when the path exists, as `crate::perms` does.
 #[cfg(unix)]
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
@@ -386,12 +365,10 @@ fn assert_success(ran: &Output, what: &str) {
     );
 }
 
-/// A run that did what it was asked and could not finish a check, which is exit `3`.
+/// Asserts exit `3`, a run that did what it was asked and could not finish a check.
 ///
-/// Every restore in this suite is one: the fixtures carry no `rad`, so the comparison with
-/// the network never happens, and a restore that could not look at the fork hazard does not
-/// get to report success. Named rather than spelled inline three times, so the reason is
-/// written down once.
+/// A restore in this suite exits `3` whenever it reaches the network comparison, because the
+/// fixtures carry no `rad`.
 fn assert_checks_failed(ran: &Output, what: &str) {
     assert_eq!(
         ran.status.code(),
@@ -401,10 +378,7 @@ fn assert_checks_failed(ran: &Output, what: &str) {
     );
 }
 
-/// The comparison that did not happen is worth exactly what it is: `--no-reconcile` is a
-/// restore with the fork check declined, and it exits `0`; the same restore without the flag
-/// could not reach a `rad` and exits `3`. Told apart by what was asked for and not by the
-/// standings, which read the same either way, so this pins the pair rather than one side.
+/// A restore with `--no-reconcile` exits `0`, and the same restore without it exits `3`.
 #[test]
 fn a_comparison_that_was_declined_is_not_a_comparison_that_failed() {
     let fixture = Fixture::create("declined-comparison");
@@ -445,26 +419,15 @@ fn a_comparison_that_was_declined_is_not_a_comparison_that_failed() {
     );
 }
 
-/// Every shell on the machine the shipped script has to decide the same way under.
+/// The installed shells the shipped script must behave the same under.
 ///
-/// Not just `/bin/sh`: its patterns lean on bracket expressions and character classes, and
-/// this is the archive's reader of last resort, so it has to agree wherever somebody runs it.
-/// Spawning is the test for whether one is installed, because `--version` is not portable
-/// across them (dash has none) and a missing shell fails to spawn at all.
-///
-/// A shell that is not installed drops out of the list, and a check that quietly covers less
-/// than it claims is the thing these tests exist to prevent. So on Linux CI, whose workflow
-/// installs all four, a short list is a failure rather than a fact about the machine. Off CI
-/// the list is only printed, and only `--nocapture` or a failing assertion shows it: nothing
-/// there can insist on a shell the developer has not got.
-///
-/// Four names, not four implementations. On Debian and Ubuntu `/bin/sh` is `dash`, so the
-/// same shell is exercised twice; the run is worth what the distinct ones in it are worth.
-// Unix only, like its callers: they run a POSIX script Windows has no shell for.
+/// Fails on Linux CI when any is missing, because the workflow installs all four. Elsewhere
+/// the list is only printed. On Debian and Ubuntu `sh` is `dash`, so one shell runs twice.
 #[cfg(unix)]
 fn probe_shells() -> Vec<&'static str> {
     const WANTED: [&str; 4] = ["sh", "dash", "bash", "busybox"];
 
+    // A shell that fails to spawn is not installed. `--version` itself is not portable.
     let shells: Vec<&str> = WANTED
         .into_iter()
         .filter(|shell| Command::new(shell).arg("--version").output().is_ok())
@@ -488,13 +451,11 @@ fn probe_shells() -> Vec<&'static str> {
     shells
 }
 
-/// One shell running a fragment lifted out of the shipped script, with `variables` exported.
+/// Runs a fragment of the shipped script under `shell` and `set -eu`, with `variables`
+/// exported.
 ///
-/// Under `set -eu`, because that is the line the shipped script opens with and a fragment run
-/// without it cannot fail the way the real one would. An unset variable, or a command whose
-/// status nobody reads, aborts the restore there and passes here otherwise, which is the
-/// failure `restore.sh` has already been bitten by once.
-// Unix only, like its callers.
+/// The shipped script opens with `set -eu`, so a fragment run without it misses an unset
+/// variable or an unchecked status that aborts the real restore.
 #[cfg(unix)]
 fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Output {
     let mut command = Command::new(shell);
@@ -510,20 +471,10 @@ fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Outpu
         .unwrap_or_else(|e| panic!("{shell} runs: {e}"))
 }
 
-/// Whether this machine has `jq`, refusing on the CI leg whose workflow installs it.
+/// Whether this machine has `jq`, failing on Linux CI where the workflow installs it.
 ///
-/// The shipped script reads `head` out of the manifest with `jq`, so a machine without one
-/// restores every repository with no HEAD. That difference surfaces far from its cause, as a
-/// HEAD comparison the two readers appear to disagree on: nix hit exactly this, its check
-/// environment having no jq. Off CI it is a fact about the machine and the caller says what
-/// it skipped; on Linux CI the workflow installs jq, so an absence is a broken workflow and
-/// a silent skip there would report coverage nobody has.
-///
-/// One helper rather than three: the three callers had three different policies, and two of
-/// them skipped without a word.
-///
-/// Unix only, like every caller: each runs the shipped POSIX script, which Windows has no
-/// shell for.
+/// The shipped script reads `head` with `jq`, so without it every repository comes back with
+/// no HEAD. Elsewhere a missing `jq` prints what `what` skipped.
 #[cfg(unix)]
 fn probe_jq(what: &str) -> bool {
     if Command::new("jq").arg("--version").output().is_ok() {
@@ -552,11 +503,7 @@ fn only_archive(directory: &Path) -> PathBuf {
     archives.remove(0)
 }
 
-/// Exit 4 is documented as "everything is intact and nothing was written", and
-/// `--replay-policies` broke it. The flag asked for `rad` from inside the replay, which runs
-/// after the identity, the databases and every repository are already on disk, so the refusal
-/// arrived over a home the run had just rewritten, and it skipped the state record on the way
-/// out.
+/// `--replay-policies` needs `rad`, so without one the restore exits `4` before writing.
 #[test]
 fn a_restore_refused_for_want_of_rad_leaves_the_home_untouched() {
     let fixture = Fixture::create("restore-replay-without-rad");
@@ -624,13 +571,11 @@ fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_suc
         .expect("rad-backup runs");
     let said = stderr(&ran);
 
-    // The identity is genuinely back, so this is not a failed restore.
     assert!(
         restored.join("keys/radicle").is_file(),
         "the identity should still be restored: {said}"
     );
-    // But every repository the archive carried is missing, and a run that exits 0 over that
-    // is a scheduled restore nobody ever hears about again.
+    // A scheduled restore that exits 0 with every repository missing goes unnoticed
     assert_eq!(
         ran.status.code(),
         Some(3),
@@ -644,11 +589,8 @@ fn without_git_a_restore_says_no_repositories_came_back_instead_of_reporting_suc
         said.contains(RID),
         "the repositories it could not restore must be named: {said}"
     );
-    // It used to point at the staging directory inside the scratch this run deletes on its
-    // way out, so the bundles it named were gone before the shell prompt came back.
-    // The Windows-only warning about permissions names the scratch directory too, and it is
-    // not sending anybody there: it says what the platform could not promise about a file it
-    // just wrote. Only the lines that offer the reader somewhere to look are under test.
+    // The run deletes its scratch directory on the way out, so no hint may point there. The
+    // Windows permissions warning names it too, without sending the reader there.
     let scratch_hint = said
         .lines()
         .filter(|line| !line.contains("cannot restrict a file to one user"))
@@ -737,9 +679,8 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     assert_success(&ran, "taking a plaintext backup");
     let archive = only_archive(&backups);
 
-    // Plaintext, so the damage is caught by the manifest's digests rather than by age. A run
-    // of bytes rather than one: about one single-byte flip in five thousand still decodes, to
-    // a tar whose every file is intact, and an archive nothing was lost from verifies clean.
+    // The archive is plaintext, so the manifest's digests catch the damage. About one
+    // single-byte flip in five thousand still decodes to an intact tar, so a run is flipped.
     let mut bytes = std::fs::read(&archive).expect("the archive is readable");
     let middle = bytes.len() / 2;
     for byte in &mut bytes[middle..middle + 64] {
@@ -783,9 +724,7 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
         .expect("rad-backup runs");
     let said = stderr(&ran);
 
-    // A re-wrap once left the continuation indentation inside the string literal, so the line
-    // arrived with a run of eighteen spaces in the middle of a sentence. Neither `cargo fmt`
-    // nor clippy reads inside a literal, so nothing but a reader would ever have caught it.
+    // Neither `cargo fmt` nor clippy sees continuation indentation left inside a literal
     assert!(
         said.contains("1 repository in this archive could not be checked"),
         "the sentence has to read as one: {said}"
@@ -795,8 +734,8 @@ fn verify_deep_without_git_says_in_one_readable_sentence_what_it_could_not_open(
         "no run of spaces inside the sentence: {said}"
     );
 
-    // A script reads an unopened repository as a check that is absent, not as one that
-    // failed, which is what a broken archive reports.
+    // An unopened repository shows as an absent check, so a script cannot mistake it for a
+    // broken archive
     let ran = fixture
         .command(
             &["verify", "--deep", "--json", &archive.to_string_lossy()],
@@ -844,7 +783,7 @@ fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
     assert_success(&ran, "diffing an unchanged home");
 
     // One followed peer swapped for another leaves every count equal. A scheduled
-    // `diff || backup` still has to take the archive, since a restore would bring back the
+    // `diff || backup` must still take the archive, because a restore would bring back the
     // old peer.
     let db = rusqlite::Connection::open(fixture.home().join("node/policies.db"))
         .expect("the policy database opens");
@@ -885,7 +824,7 @@ fn diff_is_quiet_until_the_home_moves_on_and_then_says_which_repository_did() {
     );
 }
 
-/// What a `--repos private` run put in the archive, and what the run said while doing it.
+/// Takes a `--repos private` archive with a stub `rad`, returning its manifest and stderr.
 #[cfg(unix)]
 fn private_run(name: &str, visibility: &str) -> (serde_json::Value, String) {
     let fixture = Fixture::create(name);
@@ -908,8 +847,7 @@ fn private_run(name: &str, visibility: &str) -> (serde_json::Value, String) {
     assert_success(&ran, "taking a private-selection archive");
     let said = stderr(&ran).to_string();
 
-    // The stub shouts about anything it was not taught. Without this the test would pass just
-    // as happily against a `rad` that failed every call, which is the state it replaced.
+    // Without this check the test passes against a `rad` that fails every call
     assert!(!said.contains("STUB-RAD-UNSTUBBED"), "{said}");
 
     let archive = only_archive(&backups);
@@ -953,9 +891,7 @@ fn a_private_selection_leaves_out_the_repository_rad_calls_public() {
         "a public repository was carried by a --repos private archive: {manifest}"
     );
 
-    // And the summary says so in the line somebody actually reads, because an archive that
-    // quietly carries none of the repositories it was taken for is the failure this selection
-    // exists to avoid.
+    // An archive that carries none of the repositories it was taken for says so in the summary
     assert!(
         said.contains("saved: your key, 0 private repositories,"),
         "{said}"
@@ -971,8 +907,8 @@ fn a_state_archive_carries_the_paperwork_but_not_the_repositories() {
         &["--output", &backups.to_string_lossy(), "--yes"],
         &fixture.home(),
     );
-    // The fixture has no `rad`, so the default private selection cannot see which repository
-    // is private and carries none. That still writes the archive, and exits 3 so a timer hears.
+    // Without `rad` the default private selection cannot see which repository is private and
+    // carries none. The run still writes the archive, and exits 3 so a timer hears.
     assert_checks_failed(
         &ran,
         "a state backup that could not tell private repositories apart",
@@ -1004,15 +940,13 @@ fn a_state_archive_carries_the_paperwork_but_not_the_repositories() {
         "a state archive carried repository data: {entries:?}"
     );
 
-    // The repository is still described, because knowing what you had is most of a restore.
+    // The manifest still describes the repository it carries no bundle for
     let repos = manifest["repos"].as_array().expect("repos is an array");
     assert_eq!(repos.len(), 1);
     assert_eq!(repos[0]["rid"], format!("rad:{RID}"));
     assert!(repos[0]["bundle"].is_null());
 }
 
-/// Anyone who can write to the backup directory can plant a link at the name the note will
-/// get. Written through it, the note truncated whatever the link pointed at.
 #[cfg(unix)]
 #[test]
 fn the_note_beside_an_archive_replaces_a_symlink_at_its_name_and_not_its_target() {
@@ -1080,23 +1014,16 @@ fn restoring_into_an_occupied_home_is_refused_before_anything_is_overwritten() {
     assert_eq!(before, after, "a refused restore still touched the key");
 }
 
-/// A link at one of the home's own directories is asked about, not walked through.
+/// A link at `keys`, `node` or `storage` needs consent before a restore writes through it.
 ///
-/// Occupancy is asked about the names a restore writes, and every one of them sits inside
-/// `keys`, `node` or `storage`. A link at one of those three is followed by everything that
-/// writes, so an empty directory somebody else owns, pointed at from `keys`, took the private
-/// key while the checks upstream saw an empty home and said so. Pointing `storage` at a bigger
-/// disk is also an ordinary thing to have done, so the answer is a question rather than a
-/// refusal: `--yes` goes through, and a run with nobody to ask does not.
-// Unix only: it is about following a symlink, which is what `symlink` here needs to make.
+/// `--yes` gives that consent, `--force` does not, and a run with nobody to ask refuses.
 #[cfg(unix)]
 #[test]
 fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
     let fixture = Fixture::create("linked-dirs");
     let backups = fixture.path("backups");
 
-    // The full tier, so that an accepted restore has a repository to put through the link and
-    // the last assertion is about something rather than about an empty directory either way.
+    // The full tier gives an accepted restore a repository to write through the link
     let ran = fixture.run(
         &[
             "--tier",
@@ -1111,8 +1038,7 @@ fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
     let archive = only_archive(&backups);
     let named = archive.to_string_lossy().to_string();
 
-    // One link at a time, so the sentence has to agree with a count of one and so that a
-    // check firing for `keys` says nothing about the other two.
+    // One link at a time, so a check firing for `keys` proves nothing about the other two
     for name in ["keys", "node", "storage"] {
         let home = fixture.path(&format!("one-{name}"));
         let elsewhere = fixture.path(&format!("one-elsewhere-{name}"));
@@ -1120,7 +1046,7 @@ fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
         std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is creatable");
         std::os::unix::fs::symlink(&elsewhere, home.join(name)).expect("a symlink is creatable");
 
-        // No `--yes`, and the suite's runs are not interactive, so there is nobody to ask.
+        // The suite's runs are not interactive, so without `--yes` there is nobody to ask
         let ran = fixture.run(&["restore", &named], &home);
         let said = stderr(&ran);
         assert_eq!(ran.status.code(), Some(4), "{said}");
@@ -1138,8 +1064,7 @@ fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
         );
     }
 
-    // `--force` is a different question: it says this restore may overwrite what is in the
-    // home, never that it may write outside it, so it does not answer this one.
+    // `--force` lets a restore overwrite what is in the home, never write outside it
     let home = fixture.path("forced");
     let elsewhere = fixture.path("forced-elsewhere");
     std::fs::create_dir_all(&home).expect("the home is creatable");
@@ -1148,10 +1073,7 @@ fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
     let ran = fixture.run(&["restore", "--force", &named], &home);
     assert_eq!(ran.status.code(), Some(4), "{}", stderr(&ran));
 
-    // And `--yes` is how somebody who put that link there on purpose gets their home back.
-    // `assert_checks_failed`, not `assert_success`: the suite has no `rad`, so every restore
-    // that gets as far as the network comparison exits 3 for that reason alone. What this is
-    // about is that it got that far at all.
+    // `--yes` lets a user who made the link on purpose restore through it
     let ran = fixture.run(&["restore", "--yes", &named], &home);
     assert_checks_failed(&ran, "restoring through a link the run was told to accept");
     assert!(
@@ -1163,9 +1085,7 @@ fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
     );
 }
 
-/// `--words` writes a key into `keys` without reading an archive at all, so it reaches the
-/// same directory by a path that skips everything the archive-shaped restore checks.
-// Unix only: it is about following a symlink, which is what `symlink` here needs to make.
+/// `--words` writes into `keys` without an archive, so it skips the archive restore's checks.
 #[cfg(unix)]
 #[test]
 fn rebuilding_from_words_asks_about_a_linked_keys_directory_before_writing_a_key() {
@@ -1188,20 +1108,15 @@ fn rebuilding_from_words_asks_about_a_linked_keys_directory_before_writing_a_key
     );
 }
 
-/// A link one level further down, at the repository's own name inside a real `storage`.
-///
-/// The check over the home's three directories cannot see it, and `git init --bare` builds the
-/// repository at whatever it points at. The archive names the repositories, so whoever wrote
-/// one knows exactly which name to plant.
-// Unix only: it is about following a symlink, which is what `symlink` here needs to make.
+/// A link at the repository's own name inside a real `storage`, which the check over the
+/// home's three directories cannot see.
 #[cfg(unix)]
 #[test]
 fn a_repository_whose_directory_points_out_of_storage_is_dropped_and_not_restored() {
     let fixture = Fixture::create("linked-repo");
     let backups = fixture.path("backups");
 
-    // The full tier, because this is about a repository coming back and the default tier
-    // carries none.
+    // The default tier carries no repositories
     let ran = fixture.run(
         &[
             "--tier",
@@ -1222,9 +1137,7 @@ fn a_repository_whose_directory_points_out_of_storage_is_dropped_and_not_restore
     std::os::unix::fs::symlink(&elsewhere, home.join("storage").join(RID))
         .expect("a symlink is creatable");
 
-    // `--force`, because the link is an entry in `storage` and a home holding one of those is
-    // occupied, which is a different refusal reached first. Force is what takes the run past
-    // it and down to the repository this test is about.
+    // The link makes `storage` occupied, so `--force` is needed to reach the repository
     let ran = fixture.run(
         &["restore", "--force", "--yes", &archive.to_string_lossy()],
         &home,
@@ -1241,13 +1154,8 @@ fn a_repository_whose_directory_points_out_of_storage_is_dropped_and_not_restore
     );
 }
 
-/// A home with no key still holds everything a restore rewrites.
-///
-/// Occupancy was decided on `keys/radicle` alone, so a home whose key `move` retired, or whose
-/// key was deleted, answered "empty" and a restore went through with neither `--force` nor a
-/// confirmation. It fetches every bundle with `--force`, which rewinds every ref in every
-/// stored repository, other peers' namespaces included, to whatever the archive holds. For a
-/// private repository nobody else has, there is nothing to bring the newer refs back from.
+/// A restore fetches every bundle with `--force`, rewinding every stored ref, so stored
+/// repositories make a home occupied even with no key.
 #[test]
 fn a_home_with_repositories_and_no_key_is_still_occupied() {
     let fixture = Fixture::create("keyless-occupied");
@@ -1266,7 +1174,7 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     assert_success(&ran, "taking a backup");
     let archive = only_archive(&backups);
 
-    // Exactly what `move` leaves behind: no key, and every repository still there.
+    // `move` leaves no key and every repository still there
     std::fs::remove_file(fixture.home().join("keys/radicle")).expect("the key is removable");
     let repositories = files_under(&fixture.home().join("storage"));
     assert!(!repositories.is_empty(), "the fixture has repositories");
@@ -1285,12 +1193,7 @@ fn a_home_with_repositories_and_no_key_is_still_occupied() {
     );
 }
 
-/// Every directory this tool creates is owner-only, not just the files in it.
-///
-/// `create_dir_all` takes the umask, so `keys/` in a home rebuilt from a recovery sheet and the
-/// state directory the record is kept in both came out world-listable on a default umask. The
-/// files inside were owner-only, which is what made it easy to miss: the names are the leak,
-/// every DID this machine keeps a record for and every file a Radicle key directory holds.
+/// The file names leak, such as every DID this machine keeps a record for.
 #[cfg(unix)]
 #[test]
 fn a_directory_this_tool_makes_is_owner_only_and_not_only_the_files_in_it() {
@@ -1322,13 +1225,7 @@ fn a_directory_this_tool_makes_is_owner_only_and_not_only_the_files_in_it() {
     );
 }
 
-/// What each reader of an archive left in `storage/<rid>/config`, and what it said doing it.
-///
-/// Both are run over the same planted archive, because the whole point of the shipped script
-/// is that somebody with no `rad-backup` gets the same home out of the same file. The manifest
-/// is rewritten to match what was planted: a hostile archive is one somebody BUILT, the size
-/// and digest this tool checks are theirs to write, and an archive that failed that check
-/// would prove nothing about what happens when it passes.
+/// The homes this tool and the shipped script restored from one archive, with their stderr.
 #[cfg(unix)]
 struct BothWays {
     by_tool: PathBuf,
@@ -1339,14 +1236,12 @@ struct BothWays {
 
 #[cfg(unix)]
 impl BothWays {
-    /// What git makes of the config each side left, rather than what the file looks like: the
-    /// failures being guarded against include a file git refuses to read at all, which a text
-    /// assertion passes straight over.
+    /// The settings git reads from the restored repository's config.
+    ///
+    /// Fails on a config git refuses to read, which a text assertion would pass over.
     fn settings(&self, home: &Path) -> String {
         let repo = home.join(format!("storage/{RID}"));
-        // `--local`, or the answer carries whatever is in the config of whoever is running
-        // the suite, and a developer with a `core.pager` of their own fails a test about an
-        // archive.
+        // `--local` keeps the global git config of whoever runs the suite out of the answer
         let ran = Command::new("git")
             .args([
                 "--git-dir",
@@ -1393,6 +1288,7 @@ fn restore_with_planted_config(fixture: &Fixture, planted: &str) -> BothWays {
     );
     assert_success(&ran, "taking a full archive");
 
+    // A hostile archive carries a matching size and digest, so the manifest is rewritten too
     let archive = repack_with(fixture, &only_archive(&backups), |extracted| {
         let entry = format!("repos/{RID}.config");
         std::fs::write(extracted.join(&entry), planted).expect("the planted config is writable");
@@ -1434,21 +1330,14 @@ fn restore_with_planted_config(fixture: &Fixture, planted: &str) -> BothWays {
     }
 }
 
-/// A repository config out of an archive cannot make git run anything.
-///
-/// `storage/<rid>/config` is where git looks for `core.pager`, `core.fsmonitor` and
-/// `remote.<name>.url = ext::sh -c ...`, and it runs the value of each on an ordinary
-/// operation in that repository. An archive is a file somebody handed you, so the copy that
-/// went in verbatim handed whoever wrote it a command. Both readers are held to it: this tool
-/// and the script that rides inside the archive.
+/// git runs the value of `core.pager`, `core.fsmonitor` and an `ext::` remote URL on ordinary
+/// operations, so neither reader may restore them.
 #[cfg(unix)]
 #[test]
 fn a_repository_config_from_an_archive_cannot_carry_a_command_into_storage() {
     let fixture = Fixture::create("hostile-config");
-    // `[user] name` is on the allowlist, and it is the only planted setting whose arrival
-    // proves anything: `git init` writes `bare` and the format version by itself, so without a
-    // setting only the archive could have supplied, every assertion below would pass just as
-    // happily over a reader that skipped the config entirely.
+    // `[user] name` is allowed and only the archive can supply it, so its arrival proves the
+    // reader read the config
     let both = restore_with_planted_config(
         &fixture,
         "[core]\n\tbare = true\n\tpager = /tmp/rad-backup-pwn\n\
@@ -1472,18 +1361,15 @@ fn a_repository_config_from_an_archive_cannot_carry_a_command_into_storage() {
         );
         assert!(both.is_bare(home), "{} is not bare", home.display());
     }
-    // Named rather than counted, and by both readers: a restore that silently drops what
-    // somebody put in the file is one nobody can check.
+    // Both readers name each dropped setting
     for said in [&both.tool_said, &both.script_said] {
         assert!(said.contains("core.pager"), "{said}");
         assert!(said.contains("remote.rad.url"), "{said}");
     }
 }
 
-/// The settings `git init` works out for itself are dropped without a word about them.
-///
-/// Every honest archive carries them, so warning about `core.bare` on each of forty
-/// repositories is how a reader learns to skip past the line that says `core.pager`.
+/// Every archive carries these settings, and a warning per repository would bury the one
+/// about `core.pager`.
 #[cfg(unix)]
 #[test]
 fn what_git_decides_for_itself_is_left_out_of_an_archive_without_a_warning() {
@@ -1506,13 +1392,8 @@ fn what_git_decides_for_itself_is_left_out_of_an_archive_without_a_warning() {
     );
 }
 
-/// A repository config an archive mangled costs a line, never the repository.
-///
-/// One unbalanced quote is enough to make git refuse a whole config file, and a reader that
-/// writes such a file into `storage/<rid>/` leaves a repository where EVERY later git command
-/// answers `fatal: bad config line`. Both readers ask git to parse the archive's copy and
-/// carry settings onto the config `git init` wrote, so an unparseable one is a name that did
-/// not come back rather than a repository that will not open.
+/// One unbalanced quote makes git refuse a whole config file, which would break every later
+/// git command in that repository.
 #[cfg(unix)]
 #[test]
 fn a_repository_config_the_archive_mangled_still_leaves_a_repository_that_opens() {
@@ -1534,12 +1415,8 @@ fn a_repository_config_the_archive_mangled_still_leaves_a_repository_that_opens(
     }
 }
 
-/// A value aimed at git, and a key with no value at all, land the same way in both readers.
-///
-/// `--unset` reaching `git config` as a flag would take a setting away rather than write one,
-/// and a key with no value is one git reads as true and prints nothing for: written back it
-/// becomes a name set to the empty string, which is worse than the name that did not come
-/// back, and it is the one shape the two readers used to disagree about.
+/// A key with no value reads as true in git, and written back it would become a name set to
+/// the empty string.
 #[cfg(unix)]
 #[test]
 fn a_config_value_that_reads_as_a_flag_is_a_value_and_a_valueless_key_is_neither() {
@@ -1562,11 +1439,7 @@ fn a_config_value_that_reads_as_a_flag_is_a_value_and_a_valueless_key_is_neither
     }
 }
 
-/// A `move` whose note will not go still retires the key and still says where it went.
-///
-/// The rename happens before the note, so a failure reading or writing it left a machine whose
-/// key IS retired reading a message that says the move failed, and withheld the one line
-/// naming the file the key went to. A directory at the note's own name makes both fail.
+/// A directory at the note's name makes reading and writing the note fail after the rename.
 #[test]
 fn a_move_whose_note_cannot_be_written_still_says_where_the_key_went() {
     let fixture = Fixture::create("move-note");
@@ -1590,7 +1463,7 @@ fn a_move_whose_note_cannot_be_written_still_says_where_the_key_went() {
         said.contains("radicle.retired"),
         "the run must say where the key went: {said}"
     );
-    // Joined per component: Windows prints `keys/RETIRED.txt` with its slash unconverted.
+    // Windows prints `keys/RETIRED.txt` with its slash unconverted, so this joins per part
     let note = fixture.home().join("keys").join("RETIRED.txt");
     assert!(
         said.contains(&format!("could not read {}", note.display())),
@@ -1598,8 +1471,6 @@ fn a_move_whose_note_cannot_be_written_still_says_where_the_key_went() {
     );
 }
 
-/// Restoring over a home that holds a DIFFERENT identity must file the old key, not delete
-/// it: the key is the identity, and there is no way back from overwriting one.
 #[test]
 fn restoring_over_another_identity_keeps_the_key_it_displaces() {
     let fixture = Fixture::create("displaced");
@@ -1619,7 +1490,6 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
     assert_success(&ran, "taking an identity archive");
     let archive = only_archive(&backups);
 
-    // A home holding somebody else's key, which `--force` is about to restore over.
     let occupied = fixture.path("occupied");
     std::fs::create_dir_all(occupied.join("keys")).expect("the home is creatable");
     let stranger = b"a key belonging to another identity";
@@ -1647,10 +1517,8 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
         stranger,
         "the retired file is not the key that was displaced"
     );
-    // The public half too, and under the name the note beside it gives. `with_extension`
-    // turned `radicle.retired` into `radicle.pub`, so the rename that was meant to keep it
-    // renamed the file onto itself, succeeded, and left the restore to overwrite it seconds
-    // later. Nothing failed, and the note pointed at a file that was never written.
+    // `with_extension` on `radicle.retired` gives `radicle.pub`, which renames the public
+    // half onto itself and lets the restore overwrite it
     let retired_public = occupied.join("keys/radicle.retired.pub");
     assert_eq!(
         std::fs::read(&retired_public).expect("the retired public half is readable"),
@@ -1661,7 +1529,7 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
         std::fs::read_to_string(occupied.join("keys/DISPLACED.txt")).expect("the note is readable");
     assert!(note.contains("radicle.retired.pub"), "{note}");
 
-    // And the restore really did land, so this is not a refusal dressed up as a success.
+    // The restore landed, so the exit above is no refusal reported as success
     assert_eq!(
         std::fs::read(occupied.join("keys/radicle")).expect("the restored key is readable"),
         std::fs::read(fixture.home().join("keys/radicle")).expect("the archived key is readable")
@@ -1672,12 +1540,7 @@ fn restoring_over_another_identity_keeps_the_key_it_displaces() {
     );
 }
 
-/// A home restored from an archive that carried no policies is not a home that lost some.
-///
-/// Every tier carries the manifest's summary of the seeding and following policies, and only
-/// the tiers above `identity` carry the database holding them. The state record took its
-/// counts from the summary, so an identity-tier restore wrote down policies the home does not
-/// hold and the next `diff` reported the gap as drift, on a machine where nothing had drifted.
+/// Every tier's manifest summarises the policies, and only tiers above `identity` carry them.
 #[test]
 fn a_home_restored_without_policies_reports_no_drift_over_the_ones_it_never_got() {
     let fixture = Fixture::create("identity-tier-drift");
@@ -1696,14 +1559,11 @@ fn a_home_restored_without_policies_reports_no_drift_over_the_ones_it_never_got(
     assert_success(&ran, "taking an identity-tier backup");
     let archive = only_archive(&backups);
 
-    // The fixture seeds and follows, so the manifest's summary is not zero and the record
-    // taking it would be a difference this can see.
+    // The fixture seeds and follows, so a record that took the summary would show as drift
     let restored = fixture.path("restored");
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
     assert_success(&ran, "restoring an identity-tier archive");
 
-    // Exit 0 is the whole answer: an identity-tier archive carries no policies, so there is
-    // no drift to report.
     let ran = fixture.run(&["diff"], &restored);
     assert_success(
         &ran,
@@ -1716,8 +1576,7 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
     let fixture = Fixture::create("restored-state");
     let backups = fixture.path("backups");
 
-    // A `state` archive describes the repository without carrying it, which is the case that
-    // made a freshly restored home report the repositories it never asked for as missing.
+    // A `state` archive describes the repository without carrying it
     let ran = fixture.run(
         &[
             "--repos",
@@ -1739,14 +1598,11 @@ fn a_restored_home_knows_which_archive_it_came_from_and_reports_no_drift() {
     assert_success(&ran, "diffing a freshly restored home");
     let report: serde_json::Value =
         serde_json::from_str(&stdout(&ran)).expect("--json prints json");
-    // Not null: a restore records which policies it put back, so the next diff compares them
-    // by id and not only by count.
+    // A restore records which policies it put back, so the next diff compares them by id
     assert!(report["policies"].is_object(), "{report}");
 
-    // Asserted on the detail rather than the topic, because the topic prints whatever the
-    // verdict is: matching it would pass just as happily on "no archive has ever been taken".
-    // The file name too, since the check now reads the directory instead of trusting the
-    // state record, and naming the archive it actually found is the difference.
+    // The topic prints whatever the verdict is, so the detail and the archive's file name
+    // carry the assertion
     let ran = fixture.run(&["doctor"], &restored);
     let said = stderr(&ran);
     let name = archive
@@ -1770,7 +1626,7 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
         &fixture.home(),
     );
     assert_success(&ran, "taking the first archive");
-    // The name carries a whole-second stamp, so two archives need a second between them.
+    // The name carries a whole-second stamp, so two archives need a second between them
     std::thread::sleep(std::time::Duration::from_millis(1100));
     fixture.advance();
     let ran = fixture.run(
@@ -1789,7 +1645,7 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
     assert_eq!(archives.len(), 2, "two archives should exist");
     let newest = archives[1].to_string_lossy().into_owned();
 
-    // RAD_BACKUP_DIR is how a command with no argument knows where to look.
+    // RAD_BACKUP_DIR tells a command with no argument where to look
     let ran = fixture
         .command(&["show", "--json"], &fixture.home())
         .env("RAD_BACKUP_DIR", &dir)
@@ -1833,7 +1689,6 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
         assert_success(&ran, "taking an archive");
         std::thread::sleep(std::time::Duration::from_millis(1100));
     }
-    // A file this tool did not write, and one belonging to another identity.
     let bystander = backups.join("holiday-photos.tar.zst");
     let other = backups.join("someone-z6MkvAFBkdph-20200101T000000Z.tar.zst.age");
     std::fs::write(&bystander, b"not an archive").expect("the fixture file is writable");
@@ -1882,16 +1737,15 @@ fn keep_deletes_archives_missing_repositories_but_never_the_newest_complete_one(
         names
     };
 
-    // With `rad`, the default private selection carries the private repository.
+    // With `rad`, the default private selection carries the private repository
     fixture.stub_rad("private");
     let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
     assert_success(&ran, "taking the complete archive");
     let complete = archives();
     std::fs::remove_file(fixture.path("bin/rad")).expect("the stub is removable");
 
-    // Without it, the same selection cannot tell which repositories are private and carries
-    // none of them. Two such runs: the first proves the complete archive outlives `--keep 1`,
-    // the second that an archive missing repositories does not.
+    // Without `rad` the selection carries no repositories. The first run proves the complete
+    // archive outlives `--keep 1`, and the second that an incomplete one does not.
     let mut newest = Vec::new();
     for _ in 0..2 {
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -1908,7 +1762,7 @@ fn keep_deletes_archives_missing_repositories_but_never_the_newest_complete_one(
     expected.sort();
     assert_eq!(archives(), expected);
 
-    // `prune` agrees, and its stdout, which a script may feed to `rm`, names nothing it keeps.
+    // A script may feed `prune`'s stdout to `rm`, so it must name nothing `prune` keeps
     let ran = fixture.run(
         &["prune", "--keep", "1", "--dir", &dir, "--dry-run"],
         &fixture.home(),
@@ -1950,8 +1804,6 @@ fn a_dry_run_asked_for_json_answers_with_json() {
     );
     assert_success(&ran, "a dry run asked for json");
 
-    // `--json` was honoured by every reporting path except this one, which printed the human
-    // table on stdout. A consumer got something that parses as far as the first line.
     let report: serde_json::Value =
         serde_json::from_str(&stdout(&ran)).expect("--dry-run --json prints json");
     assert_eq!(report["dryRun"], serde_json::Value::Bool(true));
@@ -1962,16 +1814,14 @@ fn a_dry_run_asked_for_json_answers_with_json() {
     );
 }
 
-/// Exit `3` is the whole scheduling contract: a timer that only reads the status has no
-/// other way to tell a complete backup from one that lost a repository on the way.
+/// A timer that reads only the exit status tells an incomplete backup apart by exit `3`.
 #[test]
 fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
     let fixture = Fixture::create("incomplete");
     let backups = fixture.path("backups");
 
-    // Break the only repository in a way `git bundle` cannot work around: an `objects` that
-    // is a file rather than a directory. Deleting it would look like a repository that was
-    // never there, which is a different thing and is not an error.
+    // A file at `objects` breaks the repository for `git bundle`. A deleted repository would
+    // read as one that was never there, which is not an error.
     let objects = fixture.home().join("storage").join(RID).join("objects");
     std::fs::remove_dir_all(&objects).expect("the object directory is removable");
     std::fs::write(&objects, b"not a directory").expect("something else goes in its place");
@@ -1994,18 +1844,13 @@ fn a_backup_that_lost_a_repository_writes_the_archive_and_still_exits_three() {
         Some(3),
         "a backup missing a repository must not exit 0: {said}"
     );
-    // And the archive is still written, because everything else in the home is worth having.
     let archive = only_archive(&backups);
     assert!(archive.is_file(), "the archive should still exist: {said}");
     assert!(said.contains(RID), "it has to name what it lost: {said}");
 }
 
-// Unix only: it runs the shipped POSIX script, which Windows has no shell for.
+// Windows has no shell for the shipped POSIX script
 #[cfg(unix)]
-/// The shipped script and this tool are two implementations of one restore, kept in step by
-/// policy (guardrail: an archive never depends on this tool to be read). Nothing enforced that
-/// they stayed in step, so anything added to one side only, the way `repos/*.config` or the
-/// HEAD restore could have been, would have gone unnoticed until somebody needed the other.
 #[test]
 fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
     let fixture = Fixture::create("script-rid");
@@ -2037,9 +1882,7 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
         .expect("tar runs");
     assert_success(&ran, "extracting the archive");
 
-    // A name no `rad` would mint, planted the way a hostile archive would carry it. The tool
-    // refuses such an archive outright; the script has to refuse the one bundle and go on,
-    // because it is the path that runs when the tool is not there to refuse anything.
+    // A name no `rad` would mint. The script skips that one bundle and restores the rest.
     std::fs::write(extracted.join("repos/a..b.bundle"), b"not a bundle")
         .expect("the planted bundle is writable");
 
@@ -2062,12 +1905,10 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
         "the script made a repository out of a name that is not an id"
     );
 
-    // And the real repository still came back, so this is a skip and not a bail-out.
     assert!(target.join("storage").join(RID).is_dir());
 }
 
-// Unix only: it runs the shipped POSIX script and compares the mode bits it sets,
-// neither of which Windows has.
+// Windows has neither a shell for the shipped script nor the mode bits it sets
 #[cfg(unix)]
 #[test]
 fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
@@ -2118,8 +1959,7 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
         .expect("the restore script runs");
     assert_success(&ran, "restoring with the shipped script");
 
-    // Sqlite's own scratch files are not part of either restore: whichever side opens a
-    // database first makes them, and they say nothing about what was put back.
+    // SQLite makes its `-wal` and `-shm` files on whichever side opens a database first
     let names = |home: &Path| -> Vec<String> {
         let mut found: Vec<String> = files_under(home)
             .iter()
@@ -2180,10 +2020,8 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
         "the two restores left HEAD pointing at different places"
     );
 
-    // Through `git config --list`, not the file: the two readers reach the same settings by
-    // different routes, and the question is what git sees afterwards rather than which line
-    // came first. This is also the one comparison that would catch either side taking a
-    // setting out of an archived config that the other leaves behind.
+    // The two readers write settings in different orders, so the comparison is of what git
+    // reads back
     let settings = |home: &Path| -> Vec<String> {
         let mut lines: Vec<String> = git(
             &["--git-dir", &storage(home), "config", "--local", "--list"],
@@ -2210,8 +2048,7 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
     assert_eq!(seeded(&by_tool), seeded(&by_script));
 }
 
-/// Every file under a directory, so a test can look at what a run left behind rather than at
-/// what it meant to leave behind.
+/// Every file under `directory`, recursively.
 fn files_under(directory: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -2231,8 +2068,7 @@ fn files_under(directory: &Path) -> Vec<PathBuf> {
 #[test]
 fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_without_the_passphrase()
 {
-    // What a copy of an openssh private key looks like from the outside. Searching for this
-    // rather than for the key bytes keeps the test honest about what it is looking for.
+    // The armour line marks any openssh private key, whichever key it is
     const ARMOUR: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----";
     const AGE_MAGIC: &[u8] = b"age-encryption.org/";
 
@@ -2269,8 +2105,7 @@ fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_with
         );
     }
 
-    // Nothing found above would also be true of a merely compressed archive, so this is the
-    // half that says why: the payload is age, and age does not open without the passphrase.
+    // A merely compressed archive would also pass the search above, so this checks for age
     let archive = std::fs::read(only_archive(&backups)).expect("the archive is readable");
     assert!(archive.starts_with(AGE_MAGIC), "the archive is not age");
     let mut opened = Vec::new();
@@ -2279,8 +2114,7 @@ fn a_run_leaves_nothing_readable_behind_and_what_it_writes_cannot_be_opened_with
         "the archive decompressed without a passphrase"
     );
 
-    // And the search itself, against an archive that really does carry the key. Without this
-    // the assertions above would pass just as happily if they were looking for nothing.
+    // The search must find the key in an archive that carries it, or it proves nothing
     let plain = fixture.path("plaintext");
     let ran = fixture.run(
         &[
@@ -2309,8 +2143,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-// Unix only: it runs the shipped POSIX script and checks the mode bits it sets, neither
-// of which Windows has.
+// Windows has neither a shell for the shipped script nor the mode bits it sets
 #[test]
 #[cfg(unix)]
 fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
@@ -2344,11 +2177,8 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         .expect("tar runs");
     assert_success(&ran, "extracting the archive");
 
-    // Run it the way someone in trouble would: a shell, the extracted directory, and no
-    // rad-backup anywhere. The target is given as the argument the README documents, with
-    // HOME and RAD_HOME both pointed elsewhere: HOME so a bug in the script cannot reach
-    // the real home of whoever is running the tests, RAD_HOME so that the argument being
-    // ignored, which is what it used to be, shows up as a failure rather than as a pass.
+    // HOME is redirected so a script bug cannot reach the real home. RAD_HOME is a decoy, so a
+    // script that ignored its argument fails.
     let target = fixture.path("by-script");
     let decoy = fixture.path("decoy-home");
     let ran = Command::new("sh")
@@ -2359,9 +2189,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         .output()
         .expect("the restore script runs");
     assert_success(&ran, "restoring with the shipped script");
-    // The fixture home holds exactly one repository, and the closing line the script prints is
-    // the last thing somebody reads before deciding the restore worked. `term::count` is the
-    // rule this tool holds its own output to; the shipped script has to keep it too.
+    // The closing line counts as `term::count` does, over the fixture's one repository
     let said = String::from_utf8_lossy(&ran.stdout);
     assert!(said.contains("and 1 repository\n"), "{said}");
     assert!(
@@ -2405,11 +2233,8 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         .expect("the seeding table survives");
     assert_eq!(seeded, 2);
 
-    // The whole script, not only the two blocks the parity tests lift, under every shell on
-    // the machine. Those tests run the patterns; nothing ran the file, so a bashism anywhere
-    // else in it would have been found by whoever was mid-recovery on a busybox rescue image.
-    // Only the closing line is asserted here, because the run above already checked what the
-    // script produces and this is asking a different question: whether it runs at all.
+    // The whole script runs under every installed shell, so a bashism anywhere in it fails.
+    // The run above already checked what it produces.
     for shell in probe_shells() {
         if shell == "sh" {
             continue;
@@ -2434,8 +2259,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
         assert!(said.contains("and 1 repository\n"), "under {shell}: {said}");
     }
 
-    // And a second run over the home it just built, addressed the other way, refuses
-    // instead of overwriting the key.
+    // A second run into the home it built, named through RAD_HOME, must refuse
     let ran = Command::new("sh")
         .arg("restore.sh")
         .current_dir(&extracted)
@@ -2455,12 +2279,8 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     );
 }
 
-// Unix only: it runs the copy-paste block from `RESTORE.md` through a POSIX shell.
+// The copy-paste block from `RESTORE.md` needs a POSIX shell
 #[cfg(unix)]
-// `Command::output()` gives the child a pipe, which is the case this guards: the sheet is
-// the key in the clear, so `paper` refuses a terminal but must keep working when piped.
-// Written as "refuse whenever --output is absent" the guard would take piping away, and
-// this test is what goes red if anyone writes it that way.
 #[test]
 fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
     let fixture = Fixture::create("restore-md-guard");
@@ -2472,8 +2292,7 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
     std::fs::write(stage.join("keys/radicle.pub"), b"the archived public key").expect("a pub");
     std::fs::write(home.join("keys/radicle"), b"the key already here").expect("a key to guard");
 
-    // The block a reader in a recovery panic pastes whole. Its guard used to only echo, and
-    // the `cp` that ends whatever identity is already there was the very next line.
+    // A reader pastes this block whole, so its guard must stop the `cp` that follows it
     let sheet = include_str!("../assets/RESTORE.md");
     let block = sheet
         .split("```sh")
@@ -2497,11 +2316,8 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
-    // The other way the same paste loses the key: nothing is at `keys/radicle` to guard, and
-    // `keys` itself points at a directory somebody else owns. `mkdir -p` walks through the
-    // link without a word and the `cp` puts the private key on the far side of it.
-    // Each of the three the block names, on its own: a check that fires for `keys` says
-    // nothing about the other two, and the block is one paste for all of them.
+    // `mkdir -p` and `cp` walk through a linked directory. One link at a time, so a check
+    // firing for `keys` proves nothing about the other two.
     for name in ["keys", "node", "storage"] {
         let linked = fixture.path(&format!("linked-home-{name}"));
         let elsewhere = fixture.path(&format!("linked-elsewhere-{name}"));
@@ -2533,6 +2349,8 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
     }
 }
 
+/// `Command::output()` gives the child a pipe, which `paper` must accept while it refuses a
+/// terminal.
 #[test]
 fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
     let fixture = Fixture::create("paper-pipe");
@@ -2548,13 +2366,9 @@ fn a_recovery_sheet_still_pipes_even_though_it_refuses_a_terminal() {
     );
 }
 
-// Unix only: it runs the shipped POSIX script, which Windows has no shell for.
+// Windows has no shell for the shipped POSIX script
 #[cfg(unix)]
-/// A hostile manifest must not steer `git symbolic-ref` by way of the shipped script.
-///
-/// `symbolic-ref` accepts no `--`, so a `head` of `-d` is read as a flag rather than as the
-/// branch the repository is supposed to point at. `rad-backup` refuses such a manifest; this
-/// is the same refusal in the script that runs when `rad-backup` is not there.
+/// `git symbolic-ref` accepts no `--`, so a manifest `head` of `-d` would reach it as a flag.
 #[test]
 fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     if !probe_jq("the shipped script's refusal of a head that names no ref") {
@@ -2589,8 +2403,6 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
         .expect("tar runs");
     assert_success(&ran, "extracting the archive");
 
-    // Planted the way a hostile archive would carry it, on every repository the manifest
-    // names.
     let manifest_path = extracted.join("manifest.json");
     let text = std::fs::read_to_string(&manifest_path).expect("the manifest is readable");
     let mut manifest: serde_json::Value = serde_json::from_str(&text).expect("the manifest parses");
@@ -2624,8 +2436,7 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
         "{}",
         stderr(&ran)
     );
-    // A skip, not a bail-out: the refs are the repository, and HEAD is only a pointer into
-    // them, so refusing the pointer must not cost the history it points at.
+    // Refusing HEAD, a pointer into the refs, must not cost the history it points at
     assert!(stdout(&ran).contains("1 repository"), "{}", stdout(&ran));
     assert!(
         target
@@ -2635,15 +2446,9 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     );
 }
 
-// Unix only: it rebuilds the archive by shelling out to `tar`, and the entry names have to
-// stay `/`-separated for the reader to match them, which a Windows path does not give.
+// The repack shells out to `tar` and needs `/`-separated entry names
 #[cfg(unix)]
-/// This tool must make the same skip the shipped script makes, over the same planted `HEAD`.
-///
-/// It did not. `set_head` returned an error from inside the closure that puts a repository
-/// back, so a `head` of `-d` failed the whole `restore_one`, the freshly unbundled history was
-/// swept, and the repository landed in the dropped list. The refusal that was there to keep a
-/// hostile value away from `git symbolic-ref` was costing the repository it protected.
+/// The same skip the shipped script makes over a planted `HEAD` of `-d`.
 #[test]
 fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
     let fixture = Fixture::create("tool-head");
@@ -2677,18 +2482,8 @@ fn a_head_that_does_not_name_a_ref_costs_the_pointer_and_not_the_repository() {
     );
 }
 
-/// The two readers of an archive must refuse the same `HEAD` values.
-///
-/// A symlink at a name the script writes sends an archive's contents out of the home.
-///
-/// `cp` follows a symlink at its destination, so a home seeded with one at `config.json` or
-/// at a database name is a home that redirects what an archive holds to wherever that link
-/// points. The key's own name is the sharpest case: a DANGLING symlink there is not `-f`, so
-/// the guard that refuses an occupied home walked past it and the private key landed at
-/// whatever it named, outside the home and at that path's permissions.
-///
-/// The whole shipped script, run as somebody in trouble would run it, stopped at its guard
-/// before it writes anything, so the fixture is a `manifest.json` and the home to refuse.
+/// `cp`, `mkdir -p` and `git init` follow a symlink, so the shipped script refuses to write
+/// through one.
 #[cfg(unix)]
 #[test]
 fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
@@ -2720,10 +2515,8 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
         .expect("tar runs");
     assert_success(&ran, "extracting the archive");
 
-    // A link at a file and a link at a directory are two different holes: `cp` writes through
-    // the first, and `mkdir -p` and `git init` walk through the second. Named rather than
-    // read off the name, because a top-level file added to this list would otherwise be
-    // silently tested in the wrong shape.
+    // `cp` writes through a link at a file, and `mkdir -p` and `git init` walk through a link
+    // at a directory. Each case names its shape, so a new file is never tested as a directory.
     enum PointsAt {
         AFile,
         ADirectory,
@@ -2737,10 +2530,8 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
             PointsAt::AFile => {
                 std::fs::create_dir_all(home.join("keys")).expect("keys is creatable");
                 std::fs::create_dir_all(home.join("node")).expect("node is creatable");
-                // Pointing at a file that is really there, which is the case every `cp`
-                // follows. GNU coreutils declines to write through a DANGLING one, so a test
-                // built on that shape would pass here and say nothing about the platforms
-                // whose `cp` does.
+                // Every `cp` follows a link to an existing file. GNU coreutils declines a
+                // dangling one, which would pass here and fail on other platforms.
                 std::fs::write(&elsewhere, b"the file the link points at")
                     .expect("the file a link is about to point at is writable");
             }
@@ -2783,10 +2574,8 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
     refuses("node", PointsAt::ADirectory);
     refuses("storage", PointsAt::ADirectory);
 
-    // One level further down, where the check at the top of the script cannot see it: a real
-    // `storage` with a link at the repository's own name. Skipped rather than fatal, because
-    // by then the repositories before it are already back, so this asserts on what did not
-    // happen rather than on the exit code.
+    // A link at the repository's own name inside a real `storage` is skipped, not fatal,
+    // because earlier repositories are already back. The exit code says nothing here.
     let home = fixture.path("home-linked-repo");
     let elsewhere = fixture.path("elsewhere-linked-repo");
     std::fs::create_dir_all(home.join("storage")).expect("storage is creatable");
@@ -2811,11 +2600,10 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
     );
 }
 
-/// The real `case` is lifted out of `assets/restore.sh` rather than restated, so a change to
-/// one reader that is not made to the other fails here. The table repeats
-/// `git::tests::a_head_under_refs_that_climbs_out_of_the_repository_is_refused` and adds the
-/// cases only a shell can get wrong, because a bin-only crate has no library to call into.
-// Unix only: it runs the shipped script's own `case` through a POSIX shell.
+/// Runs the `case` lifted from `assets/restore.sh`, so a change to one reader alone fails.
+///
+/// The table repeats a unit test in `git::tests` and adds the cases only a shell gets wrong,
+/// because a bin-only crate has no library to call into.
 #[cfg(unix)]
 #[test]
 fn the_shipped_script_refuses_every_head_this_tool_refuses() {
@@ -2866,8 +2654,7 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
         "refs/heads/feature/nested",
         "refs/heads/v1.0",
         "refs/namespaces/z6Mk/refs/heads/master",
-        // A branch named in a language with accents is a ref like any other, and a shell
-        // whose character classes work per byte must not quietly drop its HEAD.
+        // A shell whose character classes work per byte must still accept an accented branch
         "refs/heads/caf\u{e9}",
     ];
 
@@ -2895,15 +2682,9 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
     }
 }
 
-/// The shipped script must say what this tool says about a git that checks nothing.
+/// `fetch.fsckObjects` reaches a bundle only from git 2.46, so both readers warn below it.
 ///
-/// `fetch.fsckObjects` reaches a bundle only from git 2.46, and both readers pass it. A reader
-/// that stayed quiet on an older git would hand back a home that looks exactly like one whose
-/// objects were checked, so both say so, and this pins the version boundary the script draws.
-///
-/// The real block is lifted out of `assets/restore.sh` rather than restated, for the same
-/// reason the `HEAD` case above is: a change made to one reader and not the other fails here.
-// Unix only: it runs the shipped script's own shell.
+/// Runs the block lifted from `assets/restore.sh`, so a change to one reader alone fails.
 #[cfg(unix)]
 #[test]
 fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
@@ -2918,16 +2699,14 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
             .find("\nesac\n")
             .expect("the version case is still closed")
         + "\nesac".len();
-    // The version comes from the environment rather than from the git that is installed, so
-    // the table below can ask about versions this machine does not have.
+    // `$SAID` lets the table ask about versions this machine does not have installed
     let lifted = script[start..end].replace("$(git --version 2>/dev/null || true)", "$SAID");
     assert!(
         lifted.contains("$SAID") && lifted.contains("2.46"),
         "the block no longer has what this substitutes, so it is not being tested: {lifted}"
     );
 
-    // A version and whether the script must warn about it. The tails are the ones
-    // distributions actually ship, and the last row is what an unreadable answer must do.
+    // Each version with whether the script warns. The tails are ones distributions ship.
     let table = [
         ("git version 1.9.1", true),
         ("git version 2.9.5", true),
@@ -2947,9 +2726,7 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
                 warns,
                 "under {shell}, {said:?} was answered with {printed:?}"
             );
-            // The same version with nothing to unbundle. That is every identity-only
-            // archive, and a warning about the repositories below is describing a risk
-            // this restore is not taking.
+            // An identity-only archive has nothing to unbundle, so it gets no warning
             let ran = under_shell(shell, &lifted, &[("SAID", said), ("bundles", "")]);
             assert_eq!(
                 stderr(&ran),
@@ -2957,18 +2734,14 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
                 "under {shell}, {said:?} spoke about bundles on an archive carrying none"
             );
         }
-        // Nothing that reads as a version at all: neither claim can be made, and saying
-        // nothing would be the claim that it checked. `2` is here because the two readers
-        // once disagreed about it, the shell warning where `rad-backup` said it could not
-        // tell, and a bare number is the only shape a dot-stripping reader gets wrong.
+        // An unreadable version must be reported, because silence claims the objects were
+        // checked. A bare `2` is the shape a dot-stripping reader gets wrong.
         for said in [
             "git version next",
             "git version 2",
             "git version 2.x",
             "git version",
-            // A release candidate. Its minor begins with digits, which a leading-digit
-            // pattern took for a number: the shell then answered `[ 46-rc0 -lt 46 ]` with
-            // its own "Illegal number" and said nothing about the bundles.
+            // A leading-digit pattern takes `46-rc0` for a number, and `[` then fails on it
             "git version 2.46-rc0",
             "git version 2.45-rc1",
         ] {
@@ -2979,21 +2752,14 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
                 stderr(&ran)
             );
         }
-        // Git absent altogether says nothing here. The script dies a few lines later on the
-        // first git it runs, and that failure names the missing tool; a sentence about what
-        // a bundle was checked for would only be read first and answer a different question.
+        // Without git this block stays quiet. The script's first git call fails later and
+        // names the missing tool.
         let ran = under_shell(shell, &lifted, &[("SAID", ""), ("bundles", "yes")]);
         assert_eq!(stderr(&ran), "", "under {shell}, git being absent");
     }
 }
 
-/// Rebuild an archive with `-d` planted as every repository's `HEAD`, the way a hostile or a
-/// corrupt manifest would carry it.
-///
-/// Every file is named to `tar` one by one rather than by its directory, because the reader
-/// matches `manifest.json` by its exact entry name and a directory argument would add entries
-/// the original archive never had.
-// Unix only: its one caller is, and it reaches `collect_files`, which is too.
+/// Repacks an archive with `-d` planted as every repository's `HEAD`.
 #[cfg(unix)]
 fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
     repack_with(fixture, archive, |extracted| {
@@ -3019,11 +2785,8 @@ fn repack_with_a_planted_head(fixture: &Fixture, archive: &Path) -> PathBuf {
     })
 }
 
-/// Make the manifest agree with a file that was replaced after the archive was written.
-///
-/// The size and sha256 in a manifest catch an archive that was damaged or edited afterwards.
-/// They catch nothing about one built to be hostile, whose author writes both halves, so a
-/// test about a hostile archive has to write both halves too.
+/// Rewrites the manifest's size and sha256 for `entry` to match `bytes`, as the author of a
+/// hostile archive would.
 #[cfg(unix)]
 fn rewrite_manifest_entry(extracted: &Path, entry: &str, bytes: &[u8]) {
     use sha2::Digest as _;
@@ -3048,8 +2811,8 @@ fn rewrite_manifest_entry(extracted: &Path, entry: &str, bytes: &[u8]) {
     .expect("the manifest is writable");
 }
 
-/// Extract an archive, let `plant` rewrite what it holds, and pack it up again under the same
-/// name. What somebody handing you an archive can do, done from a test.
+/// Extracts an archive, lets `plant` rewrite what it holds, and packs it again under the same
+/// name.
 #[cfg(unix)]
 fn repack_with(fixture: &Fixture, archive: &Path, plant: impl FnOnce(&Path)) -> PathBuf {
     let extracted = fixture.path("planted-extract");
@@ -3068,6 +2831,8 @@ fn repack_with(fixture: &Fixture, archive: &Path, plant: impl FnOnce(&Path)) -> 
 
     plant(&extracted);
 
+    // The reader matches `manifest.json` by its exact entry name, so each file is named to
+    // `tar` one by one. A directory argument would add entries the original never had.
     let mut entries = Vec::new();
     collect_files(&extracted, &extracted, &mut entries);
     entries.sort();
@@ -3107,27 +2872,19 @@ fn collect_files(root: &Path, dir: &Path, ran: &mut Vec<String>) {
     }
 }
 
-/// A `diff` against a `--repos all` archive must not report somebody else's repositories gone.
-///
-/// The archive describes every repository in storage; a comparison that only ever looked at
-/// this peer's own found the rest missing, said so, and exited `3`, every run, forever. A
-/// scheduled `diff` whose whole job is to answer "did anything change, or can the backup be
-/// skipped" therefore never answered "nothing changed" again.
 #[test]
 fn a_diff_against_an_archive_of_everything_does_not_report_a_foreign_repository_gone() {
     let fixture = Fixture::create("diff-foreign");
     let backups = fixture.path("backups");
 
-    // A bare repository in storage under a namespace that is not this peer's: what a seed
-    // holds for other people, and what `--repos all` carries while `mine` never names.
+    // A repository held for another peer, which `--repos all` carries and `mine` never names
     const FOREIGN: &str = "z2rGGGeuiMJUpZTUBUdyKzsBQU3xz";
     let foreign = fixture.home().join("storage").join(FOREIGN);
     git(
         &["init", "--quiet", "--bare", &foreign.to_string_lossy()],
         &fixture.path("."),
     );
-    // Given history, because an archive of everything bundles it, and a bundle of nothing is
-    // an error rather than an empty bundle.
+    // `git bundle` fails on a repository with no history
     const FOREIGN_PEER: &str = "z6MkwLM8ubPRsUFMkgBjxhr2VqfoLYRhpXCTBBpJ7BjgWZgt";
     let namespace = format!("refs/namespaces/{FOREIGN_PEER}");
     let work = fixture.path("work");
@@ -3182,12 +2939,8 @@ fn a_diff_against_an_archive_of_everything_does_not_report_a_foreign_repository_
     );
 }
 
-/// The whole wiring of the two-nodes-one-key warning, end to end.
-///
-/// `backup` stamps the manifest with whether the run retires this machine's key, `restore`
-/// copies that into the state file, and `doctor` reads it back. Every one of those is a place
-/// the answer can be lost, and losing it means the check quietly passes on the hazard it was
-/// added for.
+/// `backup` stamps whether the run retires the key, `restore` copies that into the state
+/// file, and `doctor` reads it back. Losing it at any step silently passes the check.
 #[test]
 fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_holds_the_key() {
     let fixture = Fixture::create("sole-holder");
@@ -3206,15 +2959,12 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     assert_success(&ran, "taking a backup");
     let archive = only_archive(&backups);
 
-    // The home the archive was taken from: nothing was restored here, so there is no second
-    // machine to warn about.
+    // Nothing was restored into the source home, so it has no second machine to warn about
     let ran = fixture.run(&["doctor", "--json"], &fixture.home());
     assert_eq!(verdict_of(&ran, "key-copies"), "pass");
 
-    // How many checks the command runs, asked of the command itself. `doctor.rs` keeps a
-    // hand-written list of every check for the rules that sweep their topics, and a tenth
-    // check added to `examine` alone would be swept by none of them: this is the half of the
-    // pair that notices. Raise both when a check is added, and put it in `every_topic` too.
+    // This count pairs with the hand-written check list in `doctor.rs`. A new check in
+    // `examine` raises both, and joins `every_topic` too.
     let report: serde_json::Value =
         serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
     assert_eq!(report["total"], 9, "{report}");
@@ -3223,7 +2973,7 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     let ran = fixture.run(&["restore", "--yes", &archive.to_string_lossy()], &restored);
     assert_success(&ran, "restoring the archive");
 
-    // And the home it was restored into, which now holds a key another machine also holds.
+    // The restored home holds a key another machine also holds
     let ran = fixture.run(&["doctor", "--json"], &restored);
     assert_eq!(verdict_of(&ran, "key-copies"), "warn");
     let report: serde_json::Value =
@@ -3240,26 +2990,19 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     );
 }
 
-/// `doctor` is what somebody runs when something is already wrong, so a database it cannot
-/// open must cost the checks that read it and nothing else.
-///
-/// Both node-database reads used to end the report with an sqlite error before a single check
-/// had printed, which is the report going silent at exactly the moment it is worth having.
 #[test]
 fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_report() {
     let fixture = Fixture::create("unreadable-node-db");
     let home = fixture.home();
 
-    // Not sqlite at all, and not empty: an absent file is a node that has never run, which is
-    // a different answer with a different remedy.
+    // An absent file means a node that never ran, so this one exists and is not SQLite
     std::fs::write(home.join("node/node.db"), b"this is not a database")
         .expect("the fixture home is writable");
 
     let ran = fixture.run(&["doctor", "--json"], &home);
     let report: serde_json::Value =
         serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
-    // A report at all is the first half of the point: this used to be an sqlite error and no
-    // json. The second half is that a check reading nothing from that file still answered.
+    // A check that reads nothing from the file still answers
     assert_eq!(verdict_of(&ran, "key-passphrase"), "pass", "{report}");
 
     for id in ["public-repositories", "unshared-work"] {
@@ -3281,15 +3024,12 @@ fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_
         );
     }
 
-    // The third reader is `private repositories`, whose wrong answer needs a routing table
-    // that would have said something, which this fixture has no way to build: the unit test
-    // `a_routing_table_that_would_not_open_is_not_evidence_that_nobody_else_holds_it` holds
-    // that half. What this asserts is only that it still answered at all.
+    // This fixture cannot build a routing table, so a unit test in `doctor` checks this
+    // reader's answer. Here it only has to answer.
     assert_ne!(verdict_of(&ran, "private-repositories"), "", "{report}");
 }
 
-/// The verdict of one doctor check, by `checkId`, out of a `--json` run. By id because that is
-/// what a script matches on, so these tests read the report the same way.
+/// The verdict of the doctor check with `checkId` `id`, out of a `--json` run.
 fn verdict_of(ran: &Output, id: &str) -> String {
     let report: serde_json::Value =
         serde_json::from_str(&stdout(ran)).expect("the doctor report is json");
@@ -3303,14 +3043,10 @@ fn verdict_of(ran: &Output, id: &str) -> String {
         .to_string()
 }
 
-/// The flow the README recommends for an unattended timer, proven end to end: an archive
-/// encrypted to a machine's own ssh public key, opened again with the private half. That half
-/// is passphrase-protected, because that is the normal state of an ssh key and what `rad auth`
-/// writes.
+/// The flow the README recommends for an unattended timer, with a passphrase-protected key as
+/// `rad auth` writes it.
 ///
-/// It did not work. age reports a key it could not unlock exactly as it reports a key that is
-/// not a recipient at all, so someone holding the correct key, in a real recovery, was told
-/// the key was wrong and no prompt ever appeared.
+/// age reports a key it could not unlock exactly as it reports a key that is not a recipient.
 #[test]
 fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphrase() {
     let fixture = Fixture::create("recipient-round-trip");
@@ -3335,16 +3071,14 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
     assert_success(&ran, "taking a backup encrypted to an ssh recipient");
     let archive = only_archive(&backups);
 
-    // The run itself names the key, not only the note beside the archive: the note is read in
-    // the middle of a recovery, and this is read while whoever set the timer up is still
-    // watching and could still go and check they have the private half.
+    // The run names the key while the user setting up the timer can still check they hold
+    // the private half
     let said = stderr(&ran);
     assert!(said.contains("opens only with the private half"), "{said}");
     assert!(said.contains(recipient.trim()), "{said}");
 
-    // The note beside the archive is what a person who no longer has this tool reads. For a
-    // recipient archive a bare `age -d` asks for a passphrase that does not exist, so the note
-    // has to name the key instead, on both the with-tool and the without-tool path.
+    // A bare `age -d` on a recipient archive asks for a passphrase that does not exist, so the
+    // note names the key for both paths
     let sidecar_path = archive.with_file_name(format!(
         "{}.README.txt",
         archive
@@ -3357,8 +3091,7 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
     assert!(sidecar.contains("age -d -i"), "{sidecar}");
     assert!(sidecar.contains(recipient.trim()), "{sidecar}");
 
-    // Nothing to unlock the key with, which is where a timer lands. The run must name the key
-    // it could not open rather than call it the wrong one.
+    // A timer has nothing to unlock the key with, so the run must name the locked key
     let locked = fixture.run(
         &[
             "verify",
@@ -3396,10 +3129,7 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
     );
     assert!(stderr(&opened).contains(DID), "{}", stderr(&opened));
 
-    // The other two ways in. RAD_BACKUP_IDENTITY_PASSPHRASE is what the CHANGELOG offers a
-    // timer, and RAD_BACKUP_IDENTITY_PASSPHRASE_FILE is the flag's own variable: both are
-    // read by clap and by `read_passphrase` rather than by anything a unit test can see, so
-    // if they are wrong nothing else here would notice.
+    // clap and `read_passphrase` read these variables, which no unit test reaches
     for (variable, value) in [
         ("RAD_BACKUP_IDENTITY_PASSPHRASE", KEY_PASSPHRASE.to_string()),
         (
@@ -3424,8 +3154,7 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
     }
 }
 
-/// A package build runs `rad-backup man > rad-backup.1`, so a pipe or a file gets the page
-/// itself, and only a terminal gets told how to read it.
+/// A package build runs `rad-backup man > rad-backup.1`, so a pipe gets the page itself.
 #[test]
 fn the_man_page_written_to_a_pipe_is_roff_a_package_can_install() {
     let ran = Command::new(env!("CARGO_BIN_EXE_rad-backup"))

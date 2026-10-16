@@ -1,10 +1,4 @@
-//! Taking a backup without having to remember to.
-//!
-//! The archive people lose their identity without is the one they meant to take last month.
-//! This installs a systemd user timer, checks that the run it schedules can actually work
-//! unattended, and turns it on. It replaces a unit file only when that unit carries its own
-//! marker, rewrites its environment file in full every run, and never enables anything the
-//! user did not ask for in the same breath.
+//! Scheduled backups through a systemd user timer.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -14,29 +8,29 @@ use crate::cmd::Ctx;
 use crate::error::{Error, Result};
 use crate::exec::Tool;
 
-/// Stamped into every unit this command writes, so it can tell its own file from one somebody
-/// hand-wrote and must not be overwritten.
+/// The header stamped into every unit this command writes, which tells a unit it may replace
+/// from a hand-written one.
 ///
-/// It used to end "Edit freely; it will not be replaced", which is the opposite of what
-/// `write_unit` does: a file carrying the marker is exactly the file the next run overwrites,
-/// so an edit made in place was lost without a word. Deleting the line is what keeps a unit.
+/// `write_unit` overwrites a file carrying this header, so the wording tells the reader that
+/// deleting it is what keeps an edit.
 const MARKER_UNIT: &str = concat!(
     "# Written by `rad backup schedule`, and replaced by its next run.\n",
     "# Delete both these lines to keep your own edits."
 );
 
-/// The header on the environment file. Not `MARKER_UNIT`, because that one tells the reader
-/// that deleting it keeps their edits: true of a unit, since `write_unit` refuses a file
-/// without the mark, and false here, since every run rewrites this file in full whatever it
-/// holds. Reusing it would make the same promise the unit marker was reworded to stop making.
+/// The header on the environment file.
+///
+/// Every run rewrites this file in full, so its header must not promise that deleting it
+/// keeps an edit, as `MARKER_UNIT` does.
 const MARKER_ENVIRONMENT: &str = concat!(
     "# Written by `rad backup schedule`, and rewritten in full by its next run.\n",
     "# A lasting change belongs on the command line, not in this file."
 );
 
-/// The half of the marker that decides whether a unit is ours, kept apart from the wording so
-/// that rephrasing the advice cannot make every unit written by an older version look like
-/// somebody's hand-written file and refuse to be updated.
+/// The part of the marker that identifies a unit this command wrote.
+///
+/// This text stays fixed when the advice is reworded, so units written by an older version
+/// are still recognised and updated.
 const MARKER_SIGNATURE: &str = "# Written by `rad backup schedule`";
 
 const SERVICE: &str = "rad-backup.service";
@@ -44,8 +38,7 @@ const TIMER: &str = "rad-backup.timer";
 
 pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ctx.home.require_identity()?;
-    // Checked here too: this is the verb that writes the number into a file a timer reads
-    // every night, so a bad one is installed rather than typed once.
+    // A bad `--keep` here would be installed into a file a timer reads every night
     if let Some(keep) = args.keep {
         crate::cmd::refuse_keep_zero(keep)?;
     }
@@ -58,8 +51,7 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         return status(ctx, &systemctl);
     }
     if args.off {
-        // Checked, like `enable` below: told the timer was off while systemd kept running it
-        // nightly, a user has been given the opposite of the truth about their own machine.
+        // A failed disable leaves the timer running nightly, so it must not report success
         if !systemctl.passthrough(&["--user", "disable", "--now", TIMER])? {
             return Err(Error::refused(
                 format!("systemd would not disable {TIMER}, so the timer may still be armed"),
@@ -72,17 +64,9 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         return Ok(());
     }
 
-    // An unattended run cannot be asked for a passphrase, and an encrypted archive needs one.
-    // Enabling a timer that is certain to fail every night is worse than not enabling it.
-    //
-    // What this process can see is not what the timer will see. A `RAD_BACKUP_PASSPHRASE`
-    // exported in the shell that runs this command reaches this process and nothing else:
-    // systemd starts the service from its own environment, and the environment file this
-    // command writes never carries the passphrase itself. Accepting the shell's copy passed
-    // the check and installed a timer that then failed every night at the prompt.
-    //
-    // Nothing to unlock, so nothing to ask for: an archive written to a recipient needs
-    // only their public key, and a plaintext one needs nothing at all.
+    // An unattended run cannot be asked for a passphrase, so a timer without one fails every
+    // night. A `RAD_BACKUP_PASSPHRASE` exported in this shell never reaches the timer, which
+    // systemd starts from its own environment. Recipient and plaintext archives need none.
     let needs_no_passphrase = !args.recipient.is_empty() || args.plaintext;
     let passphrase_file = ctx.global.passphrase_file.clone();
     let passphrase_env = crate::crypt::ARCHIVE_PASSPHRASE_ENV;
@@ -98,8 +82,7 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         ));
     }
 
-    // Before anything is written, so a machine where `rad` cannot be found gets no timer at
-    // all rather than one that archives no repositories every night.
+    // `rad` is resolved before anything is written, so a machine without it gets no timer
     let rad = rad_for_timer()?;
 
     let dir = unit_dir_from_env()?;
@@ -114,9 +97,8 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     )?;
     write_unit(ctx, &dir.join(TIMER), &timer_unit(&args.every))?;
 
-    // The booleans matter: `enable` is where systemd parses OnCalendar=, so a schedule it
-    // rejects fails HERE. Discarding these answers is how a user ends up told a backup will
-    // be taken nightly by a timer systemd never loaded.
+    // `enable` is where systemd parses OnCalendar=, so a rejected schedule fails here and
+    // ignoring these answers would report a backup scheduled on a timer systemd never loaded
     if !systemctl.passthrough(&["--user", "daemon-reload"])? {
         return Err(Error::refused(
             "systemd would not reload its unit files, so the timer was not installed",
@@ -140,30 +122,25 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
 
 /// Whether systemd's own environment already sets `name`.
 ///
-/// Asked because refusing on the absence of `--passphrase-file` alone would break a timer that
-/// works: a passphrase put where systemd keeps it, with `systemctl --user set-environment` or
-/// a file in `~/.config/environment.d/`, does reach the service. What this process inherited
-/// from the shell does not, which is why the shell's own environment is not consulted here.
+/// A passphrase set with `systemctl --user set-environment` or in `~/.config/environment.d/`
+/// reaches the service. This process's own environment does not, so it is not consulted.
 fn systemd_holds(systemctl: &Tool, name: &str) -> Result<bool> {
     let prefix = format!("{name}=");
-    // `confided` and not `spoken`, because the answer is one bit and the output is systemd's
-    // whole environment: when the passphrase lives there, reading it into an ordinary `String`
-    // leaves a copy in freed heap the moment this function returns.
+    // The output is systemd's whole environment, passphrase included, so it is read through
+    // `confided`. An ordinary `String` would leave a copy in freed heap.
     systemctl.confided(&["--user", "show-environment"], |shown| {
         shown.lines().any(|line| line.starts_with(&prefix))
     })
 }
 
-/// What to report about the timer, from what `is-enabled` said and, when that said nothing,
-/// what systemd knows about the unit. `None` is "systemd could not be asked at all".
+/// The timer state to report, from what `is-enabled` `said` and, when that is empty, the
+/// unit's `load_state`.
 ///
-/// `is-enabled` prints its verdict and exits non-zero to express it, so the word on stdout is
-/// the answer whatever the status was. Nothing at all has two opposite causes. A unit that was
-/// never installed is a definite answer, and it is the commonest one, because checking before
-/// scheduling anything is the commonest reason to ask. A systemd that could not be reached, no
-/// user bus over a plain ssh session and no lingering, is not an answer at all: reporting it
-/// as "disabled" told people on headless machines their backups were off while the timer ran
-/// every night.
+/// `is-enabled` exits non-zero to express its verdict, so the word it prints is the answer
+/// whatever the exit status.
+///
+/// Returns `disabled` for a unit systemd has not found, and `None` when systemd could not be
+/// asked, as over an ssh session with no user bus.
 fn timer_verdict(said: &str, load_state: &str) -> Option<String> {
     if !said.is_empty() {
         return Some(said.to_string());
@@ -175,21 +152,18 @@ fn timer_verdict(said: &str, load_state: &str) -> Option<String> {
         .map(|_| "disabled".to_string())
 }
 
-/// Whether what `systemctl is-enabled` said means the timer will fire.
+/// Whether what `systemctl is-enabled` said means the timer will fire, `enabled-runtime`
+/// (on until the next reboot) included.
 ///
-/// `enabled-runtime` is a timer that is on until the next reboot, and reading only the exact
-/// word `enabled` told the owner of one that no backup was scheduled on the machine. No other
-/// answer systemd gives begins with the word, and neither does the `unknown` this tool writes
-/// when systemd could not be reached at all, so the prefix is the whole test. Deliberately not
-/// a list of the other answers: systemd has added to that list before and would add to it
-/// again without telling this file.
+/// The test is a prefix, because systemd adds new answers over time and none of the others
+/// starts with `enabled`.
 fn timer_is_on(state: &str) -> bool {
     state.starts_with("enabled")
 }
 
 fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
     let is_enabled = systemctl.spoken(&["--user", "is-enabled", TIMER])?;
-    // Only when there is nothing to go on, so the ordinary path still costs one spawn.
+    // The second spawn runs only when `is-enabled` printed nothing
     let load_state = match is_enabled.stdout.is_empty() {
         true => {
             systemctl
@@ -227,8 +201,7 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
     if ctx.global.json {
         return ctx.term.print_json(&serde_json::json!({
             "enabled": is_on,
-            // The word systemd used, because "enabled: false" cannot tell a timer that is off
-            // from a systemd that could not be reached.
+            // `state` tells an off timer from a systemd that could not be asked
             "state": timer_state,
             "next": next_run,
             "lastFailure": last_failure,
@@ -263,8 +236,7 @@ fn status(ctx: &Ctx, systemctl: &Tool) -> Result<()> {
     Ok(())
 }
 
-/// Always refuses, on a machine with no systemd. Nothing is installed, and the line that would
-/// do the same job is printed rather than described, so it can be pasted.
+/// Prints a crontab line that does the timer's job, then refuses.
 fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     let output = args
         .output
@@ -279,7 +251,7 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ctx.term.detail("this crontab line does the same job:");
     ctx.term.blank();
     let encryption = shell_encryption_arguments(&args.recipient, args.plaintext);
-    // cron's PATH is shorter than a login shell's, so the line names `rad` outright when it can.
+    // cron's PATH is shorter than a login shell's, so the line names `rad` outright
     let rad = rad_from_env(crate::exec::rad_override_from_env());
     let rad_setting = match &rad {
         Ok(rad) => format!("RAD={} ", shell_systemd_quoted(&rad.display().to_string())),
@@ -313,14 +285,11 @@ fn refuse_without_systemd(ctx: &Ctx, args: &Schedule) -> Result<()> {
     ))
 }
 
-/// The `rad` a scheduled run is to use.
+/// The `rad` a scheduled run is to use, as this shell finds it.
 ///
-/// systemd starts the service with its own PATH, which need not hold the directory `rad` is
-/// installed in: the Radicle installer puts it in `~/.radicle/bin` and adds that to shell rc
-/// files systemd never reads. A run without `rad` can miss repositories, so the one this shell
-/// finds is written to the environment file as `RAD`, which `Tool::rad` honours. A `RAD` set in
-/// systemd's own environment is not read: the file overrides it, and `show-environment` prints
-/// values in a shell quoting that would need its own parser.
+/// systemd's PATH may lack `~/.radicle/bin`, which the Radicle installer adds only to shell rc
+/// files, so this path is written to the environment file as `RAD`. That file overrides a
+/// `RAD` set in systemd's own environment.
 fn rad_for_timer() -> Result<PathBuf> {
     rad_from_env(crate::exec::rad_override_from_env())
 }
@@ -341,15 +310,13 @@ fn rad_from_env(explicit: Option<OsString>) -> Result<PathBuf> {
     })
 }
 
-/// Where a shell would find `name`, as an absolute path. Pure but for reading file metadata:
-/// the PATH to search and the directory a relative `name` is read against are handed in.
+/// Where a shell would find `name` on the `search` path, as an absolute path.
 ///
-/// Only absolute PATH entries are searched. An empty or relative one is whatever directory
-/// `schedule` runs in, and a `rad` planted there would be pinned into a nightly timer that
-/// holds the key passphrase. A relative `name` is typed on purpose, so it is read against `cwd`.
+/// A relative `name` with a directory part is read against `cwd`. Empty and relative `search`
+/// entries are skipped, because a `rad` planted in the current directory would be pinned into
+/// a nightly timer that holds the passphrase.
 ///
-/// A symlink is kept rather than resolved, so a `rad` upgraded by repointing its link (a nix
-/// profile, a package manager's alternatives) is still the one the timer runs.
+/// A symlink is returned unresolved, so a `rad` upgraded by repointing its link stays in use.
 fn find_program(name: &OsStr, search: Option<&OsStr>, cwd: &Path) -> Option<PathBuf> {
     let name = Path::new(name);
     if name.components().count() > 1 {
@@ -401,15 +368,10 @@ fn home_dir_from_env() -> Result<PathBuf> {
     })
 }
 
-/// What a scheduled run reads its settings from. Kept apart from the writing so the one
-/// promise this file may make can be asserted without a filesystem.
+/// The text of the environment file a scheduled run reads its settings from.
 ///
-/// Every value goes in as `NAME=value` on its own line, and systemd reads the file line by
-/// line, so a path holding a newline writes whatever follows it as a SECOND setting. A
-/// directory called `backups\nRAD_BACKUP_PASSPHRASE=hunter2` is a legal directory, and this
-/// file is read by a timer that runs unattended. Refused rather than escaped: systemd's
-/// EnvironmentFile has no escape for a newline, so there is nothing to write that would mean
-/// the path the user asked for.
+/// Rejects any path systemd would read back differently. A newline in a path would write a
+/// second setting, and systemd's EnvironmentFile has no escape for one.
 fn environment_text(
     home: &Path,
     output: Option<&Path>,
@@ -433,11 +395,10 @@ fn environment_text(
     Ok(format!("{}\n", lines.join("\n")))
 }
 
-/// One `NAME=path` line, or a refusal if the path cannot be written as one.
+/// One `NAME=path` line for the environment file.
 ///
-/// Beyond line breaks, systemd drops a backslash as an escape, joins the next line on at a
-/// trailing one, and trims whitespace off both ends of a value. A path that is not UTF-8 would
-/// be written with replacement characters, naming a file that is not there.
+/// Rejects a path holding a line break or backslash, with whitespace at either end, or that
+/// is not UTF-8, because systemd would read each of these back as a different path.
 fn setting(name: &str, path: &Path) -> Result<String> {
     let Some(value) = path
         .to_str()
@@ -452,8 +413,7 @@ fn setting(name: &str, path: &Path) -> Result<String> {
     Ok(format!("{name}={value}"))
 }
 
-/// The environment a scheduled run reads. Written owner-only, because the path to a
-/// passphrase file is a map to the passphrase.
+/// Writes the environment file owner-only, because it holds the passphrase file's path.
 fn write_environment(
     ctx: &Ctx,
     path: &Path,
@@ -480,9 +440,7 @@ fn write_environment(
     Ok(())
 }
 
-/// Write one unit file, refusing to overwrite anything this tool did not write. The read
-/// result goes to `may_replace` whole, error and all: which errors mean "nothing there" is its
-/// decision, not this function's.
+/// Writes one unit file, refusing to overwrite a file this tool did not write.
 fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
     let existing = std::fs::read_to_string(path);
     may_replace(path, existing.as_deref())?;
@@ -491,12 +449,10 @@ fn write_unit(ctx: &Ctx, path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether whatever is already at `path` may be replaced, decided from the read alone. Pure.
+/// Whether the file at `path` may be replaced, given how reading it went.
 ///
-/// A file that is there and cannot be read is not a file that is not there. Folding the two
-/// together (an `is_ok_and` on the read) overwrote a hand-written unit saved mode 000, or
-/// holding bytes that are not UTF-8: exactly the file the marker check exists to protect, and
-/// the one file it could not see.
+/// Rejects a file that exists but cannot be read, such as a hand-written unit at mode 000 or
+/// holding bytes that are not UTF-8.
 fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>) -> Result<()> {
     match existing {
         Ok(text) if !text.contains(MARKER_SIGNATURE) => Err(Error::refused(
@@ -504,7 +460,6 @@ fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>
             "edit it yourself, or move it aside and run this again",
         )),
         Ok(_) => Ok(()),
-        // Nothing there, so there is nothing to protect.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(Error::refused(
             format!("{} is there and could not be read ({e})", path.display()),
@@ -514,12 +469,10 @@ fn may_replace(path: &Path, existing: std::result::Result<&str, &std::io::Error>
     }
 }
 
-/// One argument as systemd will read it back: quoted, because systemd word-splits an
-/// unquoted `ExecStart=` and an age recipient is a public key with spaces in it.
+/// Quotes one `ExecStart=` argument so systemd reads it back unchanged.
 ///
-/// `$` and `%` are doubled as well as escaped. Quoting does not stop systemd substituting
-/// `$VAR` or expanding a `%h`-style specifier in `ExecStart=`, and an ssh recipient carries
-/// a free-text comment, so both can arrive inside a key this tool was handed.
+/// systemd word-splits an unquoted argument, and substitutes `$VAR` and `%h` even inside
+/// quotes, so `$` and `%` are doubled. An ssh recipient's free-text comment can hold either.
 fn systemd_quoted(argument: &str) -> String {
     format!(
         "\"{}\"",
@@ -531,16 +484,17 @@ fn systemd_quoted(argument: &str) -> String {
     )
 }
 
-/// One argument as a crontab line hands it to `sh`. Single quotes take every other character
-/// literally, and the quote itself is closed, escaped and reopened. cron reads an unescaped
-/// `%` as a line break before `sh` sees it, and strips the backslash from `\%`.
+/// Quotes one argument of a crontab line so `sh` reads it back unchanged.
+///
+/// cron reads a bare `%` as a line break before `sh` sees it, and strips the backslash from
+/// `\%`.
 fn shell_systemd_quoted(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "'\\''").replace('%', "\\%"))
 }
 
-/// How the scheduled run should encrypt, spelled on the command line rather than put in the
-/// environment file: a recipient is not a secret, and the flag that says "no encryption at
-/// all" belongs where somebody reading the unit will see it.
+/// The encryption flags for the unit's command line.
+///
+/// A recipient is not a secret, and `--plaintext` belongs where a reader of the unit sees it.
 fn encryption_arguments(recipients: &[String], plaintext: bool) -> String {
     if plaintext {
         return " --plaintext".to_string();
@@ -551,10 +505,7 @@ fn encryption_arguments(recipients: &[String], plaintext: bool) -> String {
         .collect()
 }
 
-/// The same, for the crontab line printed where there is no systemd. Built from the recipients
-/// rather than by rewriting the systemd spelling: those are two quoting languages, and the
-/// rewrite left systemd's doubled backslashes inside single quotes and could produce a line
-/// `sh` would not run at all.
+/// The encryption flags for the crontab line, quoted for `sh`.
 fn shell_encryption_arguments(recipients: &[String], plaintext: bool) -> String {
     if plaintext {
         return " --plaintext".to_string();
@@ -617,9 +568,6 @@ fn describe(every: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// `systemctl is-enabled` answers `enabled-runtime` for a timer that is on until the next
-    /// reboot. Compared against the exact word `enabled`, that read as off, so the owner of a
-    /// live timer was told no backup was scheduled on the machine and sent to create one.
     #[test]
     fn a_timer_enabled_only_until_the_next_reboot_is_still_a_timer_that_is_on() {
         assert!(super::timer_is_on("enabled"));
@@ -634,9 +582,6 @@ mod tests {
 
     use super::*;
 
-    /// The bug: an unreadable file was read as no file, so `rad backup schedule` overwrote a
-    /// unit somebody wrote by hand. Three answers, and the tool is only allowed to write on
-    /// the two where it knows what it is writing over.
     #[test]
     fn a_unit_that_is_there_and_unreadable_is_not_a_unit_that_is_absent() {
         use std::io::{Error as IoError, ErrorKind};
@@ -670,9 +615,7 @@ mod tests {
 
     #[test]
     fn a_timer_that_was_never_installed_reads_as_off_rather_than_unknown() {
-        // `is-enabled` says nothing for a unit that is not there, and saying nothing was read
-        // as "systemd could not be asked". Checking before scheduling anything is the
-        // commonest reason to ask at all, and it was the one question left unanswered.
+        // `is-enabled` prints nothing for a unit that is not there
         assert_eq!(
             timer_verdict("", "LoadState=not-found").as_deref(),
             Some("disabled")
@@ -681,8 +624,7 @@ mod tests {
 
     #[test]
     fn a_systemd_that_could_not_be_asked_is_neither_on_nor_off() {
-        // No user bus over a plain ssh session: nothing on stdout and nothing to load. Calling
-        // that "disabled" told people on headless machines their nightly backups were off.
+        // An ssh session with no user bus gets nothing on stdout and no load state
         assert_eq!(timer_verdict("", ""), None);
         assert_eq!(timer_verdict("", "LoadState=loaded"), None);
     }
@@ -695,8 +637,7 @@ mod tests {
 
     #[test]
     fn a_recipient_reaches_the_unit_quoted_and_a_passphrase_file_is_not_demanded() {
-        // An age recipient is a public key with spaces in it, so an unquoted one would be
-        // word-split by systemd into flags it does not recognise.
+        // systemd word-splits an unquoted recipient into flags it does not recognise
         let unit = service_unit(
             Path::new("/tmp/env"),
             &encryption_arguments(&["ssh-ed25519 AAAA nobody@example".to_string()], false),
@@ -713,8 +654,7 @@ mod tests {
 
     #[test]
     fn asking_for_no_encryption_says_so_on_the_command_line_the_timer_runs() {
-        // In the unit rather than the environment file, because "this timer writes your
-        // private key in the clear every night" is not a thing to keep out of sight.
+        // A timer that writes the key in the clear every night says so where a reader looks
         let arguments = encryption_arguments(&[], true);
         assert_eq!(arguments, " --plaintext");
         assert!(service_unit(Path::new("/tmp/env"), &arguments).contains("--plaintext"));
@@ -728,23 +668,19 @@ mod tests {
 
     #[test]
     fn a_recipient_systemd_would_expand_reaches_the_run_as_it_was_given() {
-        // Quoting does not stop systemd substituting in `ExecStart=`: `$HOME` becomes the
-        // value of a variable and `%h` becomes a path. An ssh recipient ends in a free-text
-        // comment, so both arrive in keys people really paste.
+        // systemd substitutes `$HOME` and `%h` inside a quoted `ExecStart=` argument, and an
+        // ssh recipient's free-text comment can hold both
         let expanded = systemd_quoted("ssh-ed25519 AAAA 100% of $HOME");
         assert_eq!(expanded, "\"ssh-ed25519 AAAA 100%% of $$HOME\"");
     }
 
     #[test]
     fn the_crontab_line_quotes_a_recipient_the_shell_would_otherwise_choke_on() {
-        // Built from the recipients, not by rewriting the systemd spelling: that rewrite left
-        // systemd's doubled backslashes inside single quotes, and a recipient holding a quote
-        // produced a line `sh` refused outright with "unterminated quoted string".
         let arguments =
             shell_encryption_arguments(&["ssh-ed25519 AAAA it's mine".to_string()], false);
         assert_eq!(arguments, " --recipient 'ssh-ed25519 AAAA it'\\''s mine'");
 
-        // And the shell really does read it back as the one word it went in as.
+        // `sh` reads the quoted recipient back as one word
         let said = std::process::Command::new("sh")
             .args(["-c", &format!("printf '%s'{arguments}")])
             .output()
@@ -755,27 +691,26 @@ mod tests {
             "--recipientssh-ed25519 AAAA it's mine"
         );
 
-        // cron ends the command at a bare `%`.
+        // cron ends the command at a bare `%`
         assert_eq!(shell_systemd_quoted("/backups/100%"), "'/backups/100\\%'");
     }
 
     #[test]
     fn a_path_systemd_would_read_back_differently_is_refused_rather_than_written() {
-        // A legal directory name, and systemd reads this file a line at a time: written out,
-        // the second half is a setting nobody asked for, in a file an unattended timer reads.
+        // systemd reads this file a line at a time, so the second half would be a setting
         let smuggled = Path::new("/home/someone/backups\nRAD_BACKUP_PASSPHRASE=hunter2");
         let ok = Path::new("/home/ok");
         assert!(environment_text(smuggled, None, None, None, None).is_err());
         assert!(environment_text(ok, Some(smuggled), None, None, None).is_err());
         assert!(environment_text(ok, None, None, Some(smuggled), None).is_err());
         assert!(environment_text(ok, None, None, None, Some(smuggled)).is_err());
-        // A carriage return alone ends a line for the same readers.
+        // A carriage return alone ends a line for the same readers
         let returned = Path::new("/home/someone/backups\rRAD_BACKUP_KEEP=1");
         assert!(environment_text(returned, None, None, None, None).is_err());
-        // A trailing backslash joins the next setting onto this value.
+        // A trailing backslash joins the next setting onto this value
         let joined = Path::new("/home/someone/backups\\");
         assert!(environment_text(ok, Some(joined), None, None, None).is_err());
-        // systemd trims a space at either end of a value and keeps one inside it.
+        // systemd trims a space at either end of a value and keeps one inside it
         let trailing = Path::new("/home/someone/backups ");
         assert!(environment_text(ok, Some(trailing), None, None, None).is_err());
         let spaced = Path::new("/home/some one/.radicle/bin/rad");
@@ -811,7 +746,7 @@ mod tests {
         std::fs::write(&rad, "#!/bin/sh\n").expect("the test's scratch takes a file");
         std::fs::set_permissions(&rad, std::fs::Permissions::from_mode(0o755))
             .expect("the test owns the file it made");
-        // Not executable, so a shell passes over it and so must this.
+        // A shell passes over this non-executable `rad`
         std::fs::write(decoy.join("rad"), "").expect("the test's scratch takes a file");
 
         let elsewhere = Path::new("/nonexistent");
@@ -826,9 +761,9 @@ mod tests {
         );
         assert_eq!(find_program(OsStr::new("rad"), None, elsewhere), None);
 
-        // A relative RAD is read against the directory it was given in, not searched for.
+        // A relative RAD is read against the directory it was given in
         let root = installed.parent().expect("the scratch dir has a parent");
-        // An empty or relative PATH entry is the directory `schedule` runs in, never searched.
+        // An empty or relative PATH entry is the directory `schedule` runs in, and is skipped
         let relative = std::env::join_paths([Path::new(""), Path::new("installed")])
             .expect("no separator in the paths");
         assert_eq!(find_program(OsStr::new("rad"), Some(&relative), root), None);
@@ -843,8 +778,7 @@ mod tests {
         let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None, None)
             .expect("an ordinary path is writable as a setting");
 
-        // MARKER_UNIT says deleting it keeps the user's edits, which `write_unit` honours and
-        // this file cannot: every run rewrites it in full whatever it holds.
+        // Every run rewrites this file in full, so deleting its header keeps no edit
         assert!(!text.contains("Delete both these lines"), "{text}");
         assert!(text.contains("rewritten in full"), "{text}");
         for line in text.lines().take(2) {
@@ -854,26 +788,22 @@ mod tests {
 
     #[test]
     fn the_marker_says_the_unit_will_be_replaced_rather_than_promising_it_will_not() {
-        // It read "Edit freely; it will not be replaced", which is what `write_unit` does to
-        // a file WITHOUT the marker. A hand edit that kept the line was silently overwritten
-        // by the next run, having been told in writing that it would not be.
+        // `write_unit` overwrites a file carrying the marker, so the marker must say so
         assert!(!MARKER_UNIT.contains("will not be replaced"));
         assert!(MARKER_UNIT.contains("replaced by its next run"));
 
-        // The recognition half must survive a rewording of the advice, or every unit written
-        // by an older version stops being recognised as ours and refuses to be updated.
+        // Units written by an older version are recognised by the signature alone
         assert!(MARKER_UNIT.contains(MARKER_SIGNATURE));
         for line in MARKER_UNIT.lines() {
-            // systemd reads these as comments, and a comment starts the line.
+            // systemd reads a line as a comment only when `#` starts it
             assert!(line.starts_with('#'), "not a comment line: {line:?}");
         }
     }
 
     #[test]
     fn a_binary_whose_path_holds_a_space_still_produces_a_unit_systemd_can_run() {
-        // systemd word-splits an unquoted ExecStart=, and this project itself lives under a
-        // path with a space in it, so a dev-built binary produced a unit that parsed into a
-        // truncated path and failed only when the timer first fired.
+        // systemd word-splits an unquoted ExecStart=, and the failure shows only when the
+        // timer first fires
         let unit = service_unit(Path::new("/tmp/env"), "");
         let exec = unit
             .lines()
@@ -895,8 +825,7 @@ mod tests {
 
     #[test]
     fn a_schedule_systemd_understands_is_passed_through_unchanged() {
-        // `--every` accepts anything systemd's OnCalendar accepts, so nothing here may
-        // reinterpret it: systemd is the only thing that gets to decide what it means.
+        // `--every` takes any OnCalendar expression, and systemd alone interprets it
         assert!(timer_unit("Mon *-*-* 03:30:00").contains("OnCalendar=Mon *-*-* 03:30:00"));
     }
 }

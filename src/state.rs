@@ -1,13 +1,4 @@
-//! What this tool remembers between runs.
-//!
-//! One small file per identity, holding no secrets: when the last archive was written, what
-//! was in it, and where it went. It is what lets `doctor` say "the newest archive does not
-//! carry your two private repositories" without asking for a passphrase, and what lets `diff`
-//! answer without opening an archive at all. The age of an archive is read off the file when
-//! there is one, and off this record only when there is not.
-//!
-//! It lives under the XDG state directory rather than in the Radicle home, because it is this
-//! tool's memory and not part of anyone's identity.
+//! The per-identity record of the last archive, kept under the XDG state directory.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,11 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+/// What the last archive of an identity held and where it went, readable without a passphrase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
     pub did: String,
-    /// Absent when the archive went to stdout, where this tool cannot know where it landed.
+    /// `None` when the archive went to stdout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<String>,
     pub created: String,
@@ -30,40 +22,40 @@ pub struct Record {
     pub bytes: u64,
     #[serde(rename = "encrypted")]
     pub is_encrypted: bool,
-    /// The repositories whose data that archive carried.
+    /// The repositories whose data the archive carried.
     ///
-    /// Spelled `repos` on disk, because a state file written by an older version has to keep
-    /// answering `carries`. Revisit if a state file ever gains a version field.
+    /// The field is `repos` on disk, so a state file written by an older version still
+    /// answers `carries`. Revisit if a state file ever gains a version field.
     #[serde(default, rename = "repos")]
     pub carried: BTreeSet<String>,
     /// Every repository the archive described, carried or not.
     #[serde(default)]
     pub described: BTreeSet<String>,
-    /// This peer's signed refs per repository, as they were. What `diff` compares against.
+    /// This peer's signed refs per repository at archive time, for `diff` to compare against.
     #[serde(default)]
     pub sigrefs: BTreeMap<String, String>,
-    /// Still written beside `policies`, because an older version of this tool requires them
-    /// to read the file at all. Revisit if a state file ever gains a version field.
+    /// The policy counts. These stay beside `policies`, because an older version fails to
+    /// read a file without them. Revisit if a state file ever gains a version field.
     pub seeded: usize,
     pub followed: usize,
-    /// Which repositories and peers the home seeded, followed and blocked, by id. What `diff`
-    /// compares against, since equal counts hide a swap of one repository for another.
-    /// `None` in a record written before these were kept, which only has the counts above.
+    /// The ids the home seeded, followed and blocked, for `diff` to compare against.
+    ///
+    /// Equal counts hide a swap of one repository for another. A record from an older version
+    /// holds `None` here and only the counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policies: Option<PolicySets>,
-    /// Set when a restore, rather than a backup, wrote this record.
+    /// Where the home came from, set when a restore wrote this record.
     ///
-    /// Cleared by the next backup taken here, deliberately: once this machine is taking its
-    /// own archives it is the machine this identity lives on, and a warning that can never be
-    /// answered is one people learn to scroll past.
+    /// The next backup taken here clears it, because a machine taking its own archives is
+    /// where the identity now lives, and a warning that never clears gets ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<Restored>,
 }
 
 /// The policies of a home as sets of ids.
 ///
-/// Blocks are kept too. An archive carries the policy database, so a block added after it is
-/// one a restore would lose, and a node that lost it fetches from that peer again.
+/// Blocks are included, because a block added after an archive is lost on restore, and the
+/// node then fetches from that peer again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicySets {
@@ -92,27 +84,24 @@ impl PolicySets {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Restored {
-    /// Whether the archive said its source retires its own key, which only `move` does.
+    /// Whether the archive's source retires its own key, as `move` does.
+    ///
     /// `None` for an archive written before the manifest carried the answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_retires_key: Option<bool>,
     /// Whether a node was serving on the machine the archive was taken from.
     pub source_node_was_running: bool,
-    /// Whether the field above is what the source run saw or what it assumed. A run that
-    /// could not reach the control socket writes "running" as a precaution, and a report that
-    /// repeats it as a fact tells somebody their key is being double-signed when it may not
-    /// be. Absent in a record written before this was carried, which means it was seen.
+    /// Whether `source_node_was_running` was assumed, not seen.
+    ///
+    /// A source run that cannot reach the control socket writes "running" as a precaution,
+    /// and a report must not repeat that as a fact. A missing field means it was seen.
     #[serde(default)]
     pub source_node_state_was_guessed: bool,
 }
 
-/// The path as the next reader will have to resolve it, which is from wherever they are.
+/// Makes `path` absolute, so a reader in another working directory finds the same file.
 ///
-/// `rad backup --output backups/nightly.tar.zst` is written down as given, and the record is
-/// read back by a `doctor` or an `ls` run from somebody's home directory or by a timer with no
-/// working directory to speak of: they went looking in the wrong place and reported the
-/// archive missing. Falls back to the path as given when the current directory cannot be read,
-/// because a relative path is still better than no record at all.
+/// Falls back to `path` as given when the current directory cannot be read.
 fn absolute_as_far_as_it_goes(path: &Path) -> String {
     std::path::absolute(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -121,8 +110,7 @@ fn absolute_as_far_as_it_goes(path: &Path) -> String {
 }
 
 impl Record {
-    /// The record a finished archive leaves behind. Everything here is already public: what
-    /// went in, when, and where it went. Nothing that would help anyone read it.
+    /// Builds the record a finished archive leaves behind, holding nothing that helps read it.
     pub fn from_manifest(
         manifest: &crate::manifest::Manifest,
         archive: Option<&Path>,
@@ -155,11 +143,9 @@ impl Record {
                 .collect(),
             seeded: manifest.policies.seeded,
             followed: manifest.policies.followed,
-            // The manifest carries only counts. Each writer fills this from the policies it
-            // read, and a record left without them is compared by count.
+            // The manifest carries only counts, so each writer fills this from its own read
             policies: None,
-            // A backup records nothing here. Only a restore knows where a home came from, and
-            // it sets this after building the record.
+            // A restore sets this after building the record
             restored: None,
         }
     }
@@ -175,14 +161,14 @@ impl Record {
     }
 }
 
-/// Where the record for an identity lives, given a state directory. Pure.
+/// The path of the record for `did` under the state directory `base`.
 pub fn path_in(base: &Path, did: &str) -> PathBuf {
-    // The node id is the identity, and it is already filename-safe.
+    // The node id is filename-safe, and a bare one names the same file as the full DID
     let node_id = did.strip_prefix("did:key:").unwrap_or(did);
     base.join("rad-backup").join(format!("{node_id}.json"))
 }
 
-/// Where the record for an identity lives on this machine.
+/// The path of the record for `did` under `XDG_STATE_HOME`, or `~/.local/state`.
 pub fn path_from_env(did: &str) -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_STATE_HOME") {
         Some(dir) => PathBuf::from(dir),
@@ -199,11 +185,10 @@ pub fn path_from_env(did: &str) -> Result<PathBuf> {
     Ok(path_in(&base, did))
 }
 
-/// What this tool remembers about an identity.
+/// The stored record of an identity, if any.
 ///
-/// A state file that has gone bad is worth nothing and must not stop a run, but it is not the
-/// same answer as never having taken a backup, and reporting it as one would tell somebody
-/// their archive does not exist when it may be sitting right where they left it.
+/// A broken state file must not stop a run. `Unreadable` keeps it apart from `Absent`, so a
+/// report never says an archive does not exist when its record merely failed to read.
 #[derive(Debug)]
 pub enum Stored {
     Absent,
@@ -212,7 +197,7 @@ pub enum Stored {
 }
 
 impl Stored {
-    /// The record, when there is one fit to answer with.
+    /// The record, when one was read.
     pub fn record(&self) -> Option<&Record> {
         match self {
             Self::Record(record) => Some(record),
@@ -220,7 +205,7 @@ impl Stored {
         }
     }
 
-    /// What went wrong reading it, for a caller that should say so out loud.
+    /// The message to show the user when the record could not be read.
     pub fn complaint(&self) -> Option<String> {
         match self {
             Self::Unreadable { path, reason } => Some(format!(
@@ -237,20 +222,16 @@ pub fn read(did: &str) -> Result<Stored> {
     Ok(read_at(path_from_env(did)?))
 }
 
-/// What the file at `path` says, or why it could not say it. Pure.
+/// Reads the record at `path`.
 ///
-/// `metadata`, and not `is_file`, because `is_file` answers `false` for a file this process
-/// may not stat and for a directory sitting where the file should be, and both then read as
-/// `Absent`: `doctor` told the owner of a record it could not open that this tool had no
-/// record of one anywhere. Only "not there" is absence, the way `Home::holds_identity` tells
-/// the two apart; everything else that stops the file being read is `Unreadable`, which the
-/// enum already means and which stops nothing. Revisit if a state file ever needs a run to
-/// stop on it.
+/// Only a missing file is `Absent`. A directory in its place, a file this process may not
+/// stat, and a file that fails to parse are all `Unreadable`.
 pub fn read_at(path: PathBuf) -> Stored {
     let unreadable = |reason: String| Stored::Unreadable {
         path: path.clone(),
         reason,
     };
+    // `metadata` and not `is_file`, because `is_file` answers `false` for an unreadable file
     match std::fs::metadata(&path) {
         Ok(meta) if meta.is_file() => {}
         Ok(_) => return unreadable("there is a directory where the record should be".to_string()),
@@ -271,14 +252,12 @@ pub fn write(record: &Record) -> Result<PathBuf> {
     let path = path_from_env(&record.did)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-        // The directory as well as the file below. `create_dir_all` takes the umask, so on a
-        // default one this came out world-listable, and its file names are the DIDs of every
-        // identity this machine keeps a record for.
+        // `create_dir_all` takes the umask, and this directory's file names are the DIDs of
+        // every identity this machine keeps a record for
         crate::perms::set_dir_owner_only(parent)?;
     }
     let json = serde_json::to_vec_pretty(record)?;
-    // Owner-only: no key material in here, but it does name every repository this identity
-    // holds, private ones included, and where the archives of them are kept.
+    // The record names every repository the identity holds, private ones included
     crate::perms::write_owner_only(&path, &json)?;
     Ok(path)
 }
@@ -287,8 +266,7 @@ pub fn write(record: &Record) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The one field of a manifest these tests need, spelled out because a `Manifest` has no
-    /// `Default` and the rest of it says nothing about where the archive landed.
+    /// A minimal manifest, spelled out because `Manifest` has no `Default`.
     fn manifest() -> crate::manifest::Manifest {
         crate::manifest::Manifest {
             format: crate::manifest::FORMAT_VERSION,
@@ -320,10 +298,8 @@ mod tests {
         }
     }
 
-    /// The bug: `--output backups/nightly.tar.zst` was written into the record exactly as
-    /// typed, and `doctor` reading it back from another directory reported the archive gone.
-    /// Asserted through `from_manifest` rather than on the helper, so that a call site that
-    /// stops using the helper fails here rather than passing on the helper's own behaviour.
+    /// Asserted through `from_manifest`, so a call site that stops making the path absolute
+    /// fails here.
     #[test]
     fn a_relative_archive_path_is_recorded_the_way_the_next_reader_will_resolve_it() {
         let record = Record::from_manifest(
@@ -348,8 +324,7 @@ mod tests {
 
     #[test]
     fn an_archive_path_that_is_already_absolute_is_recorded_unchanged() {
-        // Built rather than written down, because what counts as absolute is the platform's
-        // call: `/backups` is a path relative to the current drive on Windows.
+        // The path is built from `temp_dir`, because `/backups` is relative on Windows
         let given = std::env::temp_dir().join("backups").join("nightly.tar.zst");
         let record = Record::from_manifest(&manifest(), Some(&given), "z6MkTest", true);
 
@@ -376,9 +351,6 @@ mod tests {
         }
     }
 
-    /// The bug: `is_file` answered `false` for a directory sitting where the record should be
-    /// and for a record this process may not stat, and both came back as `Absent`. `doctor`
-    /// then said "this tool has no record of one anywhere" about a record it could not open.
     #[test]
     fn a_record_that_is_there_and_cannot_be_read_is_not_reported_as_never_written() {
         let dir = std::env::temp_dir().join(format!("rad-backup-state-{}", std::process::id()));
@@ -422,9 +394,8 @@ mod tests {
         .expect("the fixture is writable");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
             .expect("mode is settable");
-        // Root and anything holding CAP_DAC_OVERRIDE reads straight through mode 000, so there
-        // is nothing it could fail to open. Probed here rather than guessed from a user name,
-        // because the probe is the condition itself.
+        // Root and anything holding CAP_DAC_OVERRIDE reads through mode 000, so the test
+        // probes for that and has nothing to check when it holds
         let reads_through_any_mode = std::fs::read(&locked).is_ok();
 
         let stored = read_at(locked.clone());
@@ -448,8 +419,7 @@ mod tests {
             path_in(Path::new("/var/state"), "did:key:z6MkAAA"),
             PathBuf::from("/var/state/rad-backup/z6MkAAA.json")
         );
-        // A bare node id names the same file as the full DID, so a caller cannot split the
-        // record in two by spelling the identity differently.
+        // A bare node id and the full DID name the same file, so the record never splits
         assert_eq!(
             path_in(Path::new("/var/state"), "z6MkAAA"),
             path_in(Path::new("/var/state"), "did:key:z6MkAAA")
@@ -466,10 +436,8 @@ mod tests {
 
     #[test]
     fn a_state_file_written_before_the_field_was_renamed_still_says_what_it_carried() {
-        // The field is `carried` in Rust and `repos` on disk. A state file already sitting in
-        // `~/.local/state` spells it the old way, and `doctor` reads that file to say whether
-        // the last archive covers a repository. Renaming the key would make every one of them
-        // read as an archive that carried nothing.
+        // Renaming the `repos` key makes every existing state file read as an archive that
+        // carried nothing
         let written = serde_json::to_value(record()).expect("a record serialises");
         assert!(written.get("repos").is_some(), "{written}");
         assert!(written.get("carried").is_none(), "{written}");

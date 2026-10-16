@@ -1,8 +1,4 @@
-//! Putting a home back, and making sure it is safe to build on.
-//!
-//! Restoring is done in two moves. Everything is unpacked into a staging directory beside the
-//! target home and checked there; only then is it installed. A half-restored identity is worse
-//! than none, because it looks like one.
+//! Restores a home by unpacking into staging and installing only what checks out.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -23,65 +19,45 @@ use crate::rad::Rad;
 use crate::state;
 use crate::term;
 
-/// How long to wait for a node this command started to answer on its control socket, and how
-/// often to look. The same shape as `backup`'s stop deadline, for the same reason: the command
-/// that starts a daemon does not wait for it.
-// Both only reach `wait_for_node`, which is the unix half of a platform pair.
+// The deadline and interval for `wait_for_node`, which `rad node start` needs because it
+// returns before the daemon answers. Both are unix-only, like the socket poll that reads them.
 #[cfg(unix)]
 const NODE_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(unix)]
 const NODE_START_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// How a restored repository stands next to what other nodes hold of its signed refs.
+/// How a restored repository stands against what other nodes hold of its signed refs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
     /// No node has said it holds anything other than what the archive holds.
     ///
-    /// Deliberately not "in step with the network", which this tool cannot establish. The
-    /// node's record of a peer is only rewritten when that peer announces a *different* head
-    /// (`repo-sync-status` in heartwood's node database), so a peer that still agrees never
-    /// refreshes its row and a row that agrees may be the one the archive itself carried.
-    /// Disagreement announces itself; agreement is silent, and silence is not evidence. This
-    /// is the standing a record with nothing in it against this copy earns, and all it earns.
+    /// Agreement is silent. Heartwood rewrites a peer's row only when that peer announces a
+    /// different head, so an agreeing row may be the archive's own and proves nothing.
     NothingSaysOtherwise,
-    /// The archive holds work no node that answered has, said by a node during this restore.
-    /// Push it before anything else.
+    /// The archive holds work that no node answering during this restore has. Push it first.
     ///
-    /// "No node that answered" and not "the network", for the reason `NothingSaysOtherwise`
-    /// carries: a node that said nothing contributed nothing. A repository can also earn this
-    /// alongside a row `git` could not read, so the sentence has to stay true of a comparison
-    /// that only partly completed.
+    /// This standing can come alongside a row `git` could not read, so it claims only the
+    /// nodes that answered.
     ArchiveIsAhead,
-    /// The archive holds work the only node that reported did not have, and that node
-    /// reported before the archive was taken. The fact keeps; the instruction does not.
+    /// The archive holds work the only reporting node lacked, on a row older than the backup.
     ///
-    /// A node behind you in January has had since January to catch up and pass you, and
-    /// heartwood writes nothing when a peer still agrees, so no announcement ever corrects
-    /// the row. Folded into `ArchiveIsAhead` this printed `rad sync --announce` over a copy
-    /// the network could be months ahead of, which is the command that publishes the fork.
-    /// Dropped altogether it lost a true and useful thing: this home holds work that, as far
-    /// as anything on record goes, exists nowhere else.
+    /// The node has had since the backup to pass this copy, and a row that agrees is never
+    /// rewritten. The report withholds `rad sync --announce`, which could publish the fork.
     ArchiveIsAheadOfAStaleRecord,
     /// Another node holds signed refs under this identity that the restored copy does not
     /// have. Writing here signs a second history for one peer id, which is the fork.
     PeerHoldsOther,
-    /// There was nothing on the other side to hold this against: it is announced to nobody,
-    /// delegated to us alone, and allowed to nobody, so no fetch reaches anyone who could hold
-    /// signed refs of ours for it.
+    /// No node can hold signed refs of this identity for the repository. It is announced to
+    /// nobody, delegated to this identity alone, and allowed to nobody.
     ///
-    /// Read out of the archive's copy of the identity document, which is the document as of
-    /// the backup. A delegate added since is not seen, and that is the one way this standing
-    /// can be wrong; the report says which repositories earned it and why.
+    /// The archive's identity document decides this, so a delegate added since the backup is
+    /// missed. The report names which repositories earned this standing and why.
     NothingToCompare,
-    /// Nothing came back to hold this against: the fetch failed, `git` could not answer, or
-    /// the node's own record could not be read. A later fetch, with the node running, may.
+    /// Nothing came back to compare against. The fetch failed, `git` could not answer, or the
+    /// node's record could not be read, and a later fetch with the node running may answer.
     ///
-    /// Not the standing for a record that was read and holds nothing against this copy. That
-    /// is `NothingSaysOtherwise`, and calling it an unknown told every user of a healthy home
-    /// to go and run the fetch that had just run: a peer that agrees writes no row, so there
-    /// was never a row coming. Kept apart from `NothingToCompare` for the same reason in the
-    /// other direction, a home of only private repositories being sent to fetch what nothing
-    /// will ever announce.
+    /// A record that was read and holds nothing against this copy is `NothingSaysOtherwise`,
+    /// and a repository no node can hold is `NothingToCompare`. A refetch fixes neither.
     CouldNotAsk,
 }
 
@@ -103,9 +79,8 @@ impl Standing {
         }
     }
 
-    /// The id a script matches on as `standingId`. Ids are frozen once released. `as_str` is
-    /// wording and may change. Named after the matching list in `restore --json`, where one
-    /// exists.
+    /// The id a script matches on as `standingId`, frozen once released. `as_str` is wording
+    /// and may change. Ids follow the matching list in `restore --json` where one exists.
     fn id(self) -> &'static str {
         match self {
             Self::NothingSaysOtherwise => "nothing-reported-otherwise",
@@ -117,17 +92,11 @@ impl Standing {
         }
     }
 
-    /// Ordered by what it costs to ignore, so that a repository several nodes disagree about
-    /// is reported as the answer that most needs acting on. Safe next to one node and unsafe
-    /// next to another is unsafe, and an unknown must not be hidden behind another node's
-    /// agreement, so `CouldNotAsk` outranks both benign answers.
+    /// Ranks standings by what ignoring them costs, so a repository several nodes disagree
+    /// about reports the answer that most needs acting on. `Comparison` carries push-first.
     ///
-    /// `ArchiveIsAhead` losing to `CouldNotAsk` used to lose the advice with it, because the
-    /// report read its "push this first" list off these standings and unpushed work whose only
-    /// other copy is the archive does not come back by fetching later. `Comparison` carries
-    /// that as a fact of its own now, so the ordering here decides only which words go beside
-    /// the repository. `NothingToCompare` is at the bottom and never actually reaches the
-    /// fold: `classify` cannot produce it, and the caller inserts it before any comparison.
+    /// `CouldNotAsk` outranks both benign answers so an unknown never hides behind another
+    /// node's agreement. `classify` never produces `NothingToCompare`, so it never folds.
     fn severity(self) -> u8 {
         match self {
             Self::NothingToCompare => 0,
@@ -148,29 +117,12 @@ impl Standing {
     }
 }
 
-/// Settle what a link at one of the home's own directories means before anything is written.
+/// Asks whether to restore through a link at one of the home's own directories, and returns
+/// each one with where it led when the user answered.
 ///
-/// Every writer follows a link at a directory: `create_dir_all` walks through one, and the
-/// copies and `git init` that follow land on the far side. So `keys` pointing at a directory
-/// somebody else owns takes the private key, and `storage` pointing at one takes every
-/// repository, private ones included.
-///
-/// Asked rather than refused outright, because pointing `storage` at a bigger disk is an
-/// ordinary thing to have done on purpose, and a tool for recovery that cannot recover into
-/// the layout somebody actually has is worse than the hazard: planting a link inside a home
-/// needs write access to that home, which is already enough to read the key. The prompt names
-/// where each one leads, `--yes` answers it the way an unattended restore needs, and a run
-/// with nobody to ask refuses, so silence is never taken for consent.
-///
-/// Separate from `--force`, which says this restore may overwrite what is in the home and
-/// never that it may write outside it. `--yes` does answer it, because that is the flag an
-/// unattended restore into a second-disk layout has to be able to pass; `SECURITY.md` says so
-/// rather than claiming a refusal this does not make.
-///
-/// What comes back is each name WITH the place it led to when the question was answered.
-/// Consent is about the place: a `storage` re-aimed from the big disk to somebody's `.ssh`
-/// during the minutes an archive takes to unpack is a different question, and one nobody has
-/// been asked.
+/// Every writer follows such a link, so `keys` aimed elsewhere takes the private key and
+/// `storage` takes every repository. `--yes` consents, which a second-disk layout needs. A
+/// run with nobody to ask refuses. `--force` never covers writing outside the home.
 fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
     let elsewhere = ctx.home.directories_that_point_elsewhere();
     if elsewhere.is_empty() {
@@ -179,8 +131,6 @@ fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
     let mut settled = Vec::with_capacity(elsewhere.len());
     for name in &elsewhere {
         let here = ctx.home.path().join(name);
-        // The target, so the question is about a place rather than about a word. A link this
-        // process cannot resolve is one it cannot describe, and saying so is the answer.
         let there = std::fs::read_link(&here);
         let where_to = match &there {
             Ok(there) => there.display().to_string(),
@@ -200,8 +150,7 @@ fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
     if ctx.term.confirm("restore through them anyway?")? {
         return Ok(settled);
     }
-    // Two different noes. Somebody who read the prompt and typed `n` is not a run with nobody
-    // to ask, and telling them to pass --yes is advice for the opposite of what they answered.
+    // Only a run with nobody to ask is told to pass --yes, never a user who answered `n`
     let (links, them) = match elsewhere.len() {
         1 => ("is a symlink", "it"),
         _ => ("are symlinks", "them"),
@@ -226,23 +175,20 @@ fn settle_directories_that_point_elsewhere(ctx: &Ctx) -> Result<Vec<Settled>> {
     ))
 }
 
-/// One of the home's own directories that leads elsewhere, and where it led when that was
-/// settled. `leads_to` is `None` for a link this run could not resolve, which never matches a
-/// later reading and so is refused rather than waved through.
+/// One of the home's own directories that leads elsewhere, and where it led at consent.
+///
+/// `leads_to` is `None` for a link that could not be resolved, which matches no later reading
+/// and so is always refused.
 struct Settled {
     name: &'static str,
     leads_to: Option<std::path::PathBuf>,
 }
 
-/// Refuse a link at one of those directories that is not the one the question was settled on.
+/// Refuses a link at one of the home's own directories that does not lead where it did when
+/// the user consented.
 ///
-/// The same three names, asked again after the archive is unpacked and again before the
-/// repositories go in, because unpacking a large one takes minutes. Compared against where
-/// each link led when it was consented to, not merely against the name: a link swapped to a
-/// new target mid-run is a question nobody answered, so the layout somebody actually agreed to
-/// passes and everything else is refused. Refused rather than asked about, and `--yes` does
-/// not answer it, because a link that changed under a running restore is nobody's layout.
-/// `ci/pins.sh` holds both calls, since no test can plant a link mid-run.
+/// Unpacking takes minutes, and a link swapped mid-run is a question nobody answered, so
+/// `--yes` does not cover it. `ci/pins.sh` pins both call sites, since no test can do it.
 fn refuse_a_link_that_appeared_mid_restore(home: &Home, settled: &[Settled]) -> Result<()> {
     let elsewhere: Vec<&'static str> = home
         .directories_that_point_elsewhere()
@@ -269,7 +215,7 @@ fn refuse_a_link_that_appeared_mid_restore(home: &Home, settled: &[Settled]) -> 
 }
 
 pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
-    // Before the `--words` branch below, which writes a key into `keys` of its own.
+    // The links are settled before the `--words` branch, which also writes a key into `keys`
     let settled = settle_directories_that_point_elsewhere(ctx)?;
     if args.words {
         return crate::cmd::words::restore(ctx).map(|()| std::process::ExitCode::SUCCESS);
@@ -284,10 +230,8 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     let home = &ctx.home;
     let term = &ctx.term;
 
-    // Two ways a home is occupied, and only the first used to be asked about. The second is
-    // the one that bites quietly: a home whose key was retired by `move` holds no identity and
-    // still holds every repository, and a restore rewinds all of their refs with a `--force`
-    // fetch.
+    // A home whose key `move` retired holds no identity yet still holds every repository, and
+    // a restore rewinds all of their refs with a `--force` fetch
     if !args.force {
         if home.holds_identity()? {
             return Err(Error::refused(
@@ -307,9 +251,8 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
             ));
         }
     }
-    // Anything but a node proven stopped refuses. A socket that cannot be reached is not a
-    // node that is down, and this guard exists precisely because being wrong about that costs
-    // the home it was protecting.
+    // Only a node proven stopped passes. An unreachable socket may still belong to a running
+    // node, and installing under one corrupts the home.
     let state = home.probe_node_state();
     if !state.is_stopped() {
         return Err(match state.doubt() {
@@ -338,14 +281,13 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         });
     }
 
-    // Read while the archive is certainly still there, because `remember` below records it
-    // and a second probe after a multi-gigabyte unpack can find the file moved or the medium
-    // ejected. Guessing "unencrypted" there made `doctor` fail an archive that is encrypted.
+    // Read now, while the archive is certainly present. After a multi-gigabyte unpack the file
+    // may have moved, and a wrong "unencrypted" in the record makes `doctor` fail the archive.
     let encrypted = crypt::looks_encrypted(archive)?;
     let passphrase = crate::cmd::read_archive_passphrase(ctx, archive)?;
 
     // Staging sits beside the home by default, so the filesystem that has to hold the
-    // restored data is the one proven to have room for it before anything is installed.
+    // restored data is the one proven to have room for it before anything is installed
     let parent = ctx.global.scratch_dir.clone().unwrap_or_else(|| {
         home.path()
             .parent()
@@ -378,11 +320,8 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         manifest.identity.did
     ));
 
-    // Before a byte is written, because exit 4 is documented as "everything is intact and
-    // nothing was written". Asked for from inside `replay_policies`, which runs after the
-    // identity, the databases and every repository are already on disk, it exited 4 over a
-    // home it had just rewritten, and skipped `remember` on the way out so the home did not
-    // even know where it came from.
+    // Checked before a byte is written, because exit 4 promises that nothing was written. From
+    // inside `replay_policies` it would exit 4 over a home already rewritten.
     if args.replay_policies && !Rad::new(ctx.home.path()).is_available() {
         return Err(Error::refused(
             "--replay-policies needs rad on PATH",
@@ -399,10 +338,9 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         Vec::new()
     };
 
-    // The comparison is the LAST thing, and its failure must not cost the record of what was
-    // restored. Written before the `?`, because the identity, the repositories and the
-    // policies are already on disk by now: a `rad node start` that fails here would otherwise
-    // leave a home that has been fully restored and believes it has never seen an archive.
+    // The record is written before the comparison's error propagates, because the identity,
+    // repositories and policies are on disk by now. A failed `rad node start` must not leave a
+    // fully restored home that has no record of its archive.
     let comparison = if args.no_reconcile {
         term.warn("--no-reconcile: nothing was compared with the network");
         Ok(nothing_compared(&restored.repos, NetworkCheck::Declined))
@@ -415,11 +353,10 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     report(ctx, &manifest, &restored, &reconciled, &policies_missed)
 }
 
-/// Record the archive this home came from.
+/// Records the archive this home came from.
 ///
-/// Without this, a machine that has only ever restored believes it has no backup at all:
-/// `doctor` fails a check that is not true and `diff` has nothing to compare against, on the
-/// one day the user most wants to hear that they are covered.
+/// Without the record, a machine that has only ever restored fails `doctor`'s backup check and
+/// gives `diff` nothing to compare against.
 fn remember(
     ctx: &Ctx,
     manifest: &Manifest,
@@ -433,29 +370,22 @@ fn remember(
         &manifest.identity.node_id,
         is_encrypted,
     );
-    // The archive described repositories it deliberately did not carry, the public ones the
-    // network still has. A record that claimed those are here would make the next `diff`
-    // report them as newly missing.
+    // The archive describes public repositories it did not carry. Recording those as present
+    // makes the next `diff` report them as newly missing.
     let present: BTreeSet<String> = restored.iter().map(|repo| repo.rid.clone()).collect();
     record.sigrefs.retain(|rid, _| present.contains(rid));
     record.carried.clone_from(&present);
     record.described = present;
-    // The counts the home actually holds, not the ones the archive described. Every tier
-    // carries the manifest's policy summary and only the tiers above `identity` carry
-    // `policies.db`, so an identity-tier restore recorded "45 seeding" over a home that seeds
-    // nothing and the next `diff` reported that gap as drift, on a machine nothing had
-    // drifted on. Read rather than assumed zero, because `--replay-policies` puts them back
-    // through `rad` and a tier that carried the database has them either way. A database that
-    // will not open leaves the manifest's numbers, which is the same guess this always made
-    // and is not worth failing a finished restore over.
+    // The counts come from the installed database, because the manifest's policy summary rides
+    // in every tier and `policies.db` only in tiers above `identity`. A database that will not
+    // open leaves the manifest's numbers, which is not worth failing a finished restore over.
     if let Ok(installed) = crate::db::read_policies(&ctx.home.policies_db()) {
         record.seeded = installed.seeded().count();
         record.followed = installed.followed().count();
         record.policies = Some(state::PolicySets::of(&installed));
     }
-    // What `doctor` needs to answer "may another machine still be running this identity". Only
-    // a restore can record it: by the time doctor runs, the archive is gone and the machine it
-    // came from is somewhere else.
+    // `doctor` reads this to warn that another machine may still run this identity. By the
+    // time `doctor` runs, the archive and its source machine are gone.
     record.restored = Some(state::Restored {
         source_retires_key: manifest.source.retires_key,
         source_node_was_running: manifest.node.was_running,
@@ -468,7 +398,7 @@ fn remember(
     }
 }
 
-/// Refuse to install a key that is not the key the manifest names.
+/// Refuses a key that is not the one the manifest names, or whose halves are not a pair.
 fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
     let identity = Identity::read(staging.join("keys/radicle.pub"))?;
     describes_this_key(
@@ -486,13 +416,10 @@ fn prove_identity(staging: &Path, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-/// Whether the manifest describes the key the archive carries. Both spellings of it.
+/// Refuses a manifest whose DID or node id is not the key the archive carries.
 ///
-/// The manifest names the identity twice, and only the did was ever checked. The node id is
-/// the same key written another way, and it is not decoration: it picks the namespace the
-/// signed-refs comparison reads and the key it looks the archived oid up under. One that
-/// disagrees makes every repository come back "nothing to compare", so the restore exits 0
-/// having compared nothing, which is the silent pass that comparison exists to prevent.
+/// The node id picks the namespace the signed-refs comparison reads. One that disagrees makes
+/// every repository "nothing to compare", and the restore exits 0 having compared nothing.
 fn describes_this_key(did: &str, claimed_did: &str, claimed_node_id: &str) -> Result<()> {
     if did != claimed_did {
         return Err(Error::refused(
@@ -512,23 +439,17 @@ fn describes_this_key(did: &str, claimed_did: &str, claimed_node_id: &str) -> Re
     Ok(())
 }
 
-/// What the DID of the key at `path` is, when there is a readable one there.
+/// The DID of the key at `path`, when a readable one is there.
 fn read_did_at(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     crate::key::Identity::parse(&text).ok().map(|id| id.did())
 }
 
-/// Never destroy the key that is already here.
+/// Moves a private key that is not the archive's aside, once the user confirms, and leaves a
+/// note beside it saying what it is.
 ///
-/// `--force` used to overwrite a live private key with no comparison and no way back, so
-/// pointing it at the wrong archive ended an identity permanently and said `installed the
-/// identity`. Now replacing an identity that is not the archive's own has to be confirmed by
-/// name, the displaced key is renamed rather than replaced, and a note is left beside it
-/// saying what it is, the way `migrate` does.
-///
-/// Fails CLOSED. A home whose public key is missing or unreadable cannot be shown to hold the
-/// same identity as the archive, so it is treated as a different one and confirmed for. The
-/// alternative reading, "cannot tell, so carry on", is the one that loses a key.
+/// Fails closed. A home whose public key is missing or unreadable cannot be shown to hold the
+/// archive's identity, so its key is treated as a different one.
 fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
     let existing = ctx.home.secret_key();
     if !existing.exists() {
@@ -537,9 +458,8 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
 
     let here = read_did_at(&ctx.home.public_key());
     let incoming = read_did_at(&staging.join("keys/radicle.pub"));
-    // Same identity, provably: the DID is derived from the public key, so equal DIDs mean the
-    // archive carries the key already here. Nothing is displaced, and retiring anyway filed a
-    // fresh copy of the key on every restore, as radicle.retired, .retired.2, .retired.3.
+    // Equal DIDs prove the archive carries the key already here, so nothing is displaced, and
+    // retiring it would file a fresh copy of the key on every restore
     if let (Some(here), Some(incoming)) = (&here, &incoming)
         && here == incoming
     {
@@ -573,10 +493,8 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
     let public = ctx.home.public_key();
     let mut kept = None;
     if public.exists() {
-        // Appended, never `with_extension`, which REPLACES one: `radicle.retired` became
-        // `radicle.pub`, so this renamed the file onto itself, reported success, and left
-        // `install` to overwrite the displaced public half seconds later. `radicle.retired.2`
-        // became `radicle.retired.pub`, colliding with the first retirement's.
+        // `.pub` is appended, never set with `with_extension`, which turns `radicle.retired`
+        // into `radicle.pub` and `radicle.retired.2` into the first retirement's public half
         let mut public_to = to.as_os_str().to_os_string();
         public_to.push(".pub");
         let public_to = std::path::PathBuf::from(public_to);
@@ -594,8 +512,7 @@ fn retire_any_displaced_key(ctx: &Ctx, staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Say, on disk, what the file beside this note is. Whoever finds it may be doing so years
-/// later, on a machine they have forgotten restoring anything on.
+/// Appends a note to `keys/DISPLACED.txt` saying what the displaced key beside it is.
 fn write_displaced_note(
     ctx: &Ctx,
     retired: &Path,
@@ -606,9 +523,8 @@ fn write_displaced_note(
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // Named only when it is really there. Whoever reads this is looking for files, and one
-    // that does not exist sends them hunting; the public half is re-derivable from the
-    // private one with `ssh-keygen -y` anyway, so saying nothing costs them nothing.
+    // The public half is named only when it exists, because a missing file sends the reader
+    // hunting, and `ssh-keygen -y` re-derives it from the private key anyway
     let half = match public.and_then(Path::file_name) {
         Some(name) => format!(", and its public half as {}", name.to_string_lossy()),
         None => String::new(),
@@ -626,10 +542,8 @@ fn write_displaced_note(
         former_did.unwrap_or("an identity this tool could not read"),
     );
     let path = ctx.home.keys_dir().join("DISPLACED.txt");
-    // Read before it is written, because a second displaced restore is not a correction of the
-    // first: `retired_path` never reuses a freed name, so the first key is still at
-    // `radicle.retired` while this one goes to `radicle.retired.2`, and a note that truncates
-    // leaves two keys in the directory and one paragraph naming only the newer of them.
+    // The note appends, because `retired_path` never reuses a freed name. A second
+    // displacement leaves `radicle.retired` and `radicle.retired.2`, each with its paragraph.
     let existing = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -642,27 +556,20 @@ fn write_displaced_note(
     )
 }
 
-/// One note after another, oldest first, with a blank line between them.
-///
-/// Separate from the writing so that the joining can be tested: the case worth pinning is the
-/// second note, and reaching it through `restore` means two archives, two identities and a
-/// home displaced twice.
+/// Joins notes oldest first, with a blank line between them.
 fn appended(existing: &str, note: &str) -> String {
     if existing.is_empty() {
         return note.to_string();
     }
-    // A trailing newline is what every note here ends with, so the separator is one more.
+    // Every note ends in a newline, so one more makes the blank line
     format!("{existing}\n{note}")
 }
 
-/// Move the identity, the config and the databases into place.
+/// Moves the identity, the config and the databases into place.
 fn install(ctx: &Ctx, staging: &Path, settled: &[Settled]) -> Result<()> {
     let home = &ctx.home;
-    // Asked again here, not only at the top of `run`. Unpacking and verifying a multi-gigabyte
-    // archive takes long enough for a login, a `rad node start` or a socket activation to land
-    // in between, and a node writing to the home while this copies its databases over corrupts
-    // both. The check up front is the courtesy that fails before the work; this is the one
-    // that matters.
+    // Asked again after the unpack, which takes long enough for a node to start. A node
+    // writing to the home while its databases are copied over corrupts both.
     refuse_a_link_that_appeared_mid_restore(home, settled)?;
     let state = home.probe_node_state();
     if !state.is_stopped() {
@@ -718,34 +625,21 @@ fn install(ctx: &Ctx, staging: &Path, settled: &[Settled]) -> Result<()> {
     Ok(())
 }
 
-/// The settings a restore takes out of an archive, and the reason there are only two.
+/// The repository config settings a restore takes out of an archive.
 ///
-/// A `config` in `storage/<rid>/` is where git looks for `core.fsmonitor`, `core.pager`,
-/// `remote.<name>.url = ext::sh -c ...` and every other setting whose value git RUNS. An
-/// archive is a file somebody handed you, so restoring one verbatim hands whoever wrote it a
-/// command on the next git operation in that repository.
-///
-/// Everything else a real Radicle storage config holds is in `CONFIG_FROM_INIT` below, which
-/// leaves the node's own name and DID: the two things nothing on this machine can supply.
+/// Git RUNS the values of settings such as `core.fsmonitor`, `core.pager` and an `ext::`
+/// remote url, and an archive is a file somebody handed you. The rest of a real Radicle
+/// storage config is `CONFIG_FROM_INIT`, which leaves the node's own name and DID.
 const CONFIG_ALLOWED: &[&str] = &["user.email", "user.name"];
 
-/// The settings `git init` works out for itself, which a restore therefore drops in silence.
+/// The settings `git init` works out for itself, which a restore drops without a warning.
 ///
-/// Each of these describes the filesystem the repository is on NOW: the format version,
-/// `filemode`, `ignorecase`, `precomposeunicode`, `symlinks`. The restoring machine's answer
-/// is the true one and a year-old answer out of an archive can only be wrong, or aimed:
-/// `bare = false` on a storage repository is one git will not use as storage, and
-/// `repositoryformatversion = 99` is one every later git command refuses to open.
+/// These describe the filesystem the repository is on now, so an archive's values can only be
+/// wrong or hostile. An honest archive carries three of them, and warning on those buries the
+/// warning that matters.
 ///
-/// Kept apart from the rest so the warning stays worth reading. An honest archive carries
-/// exactly these three under `[core]`, so warning about them would mean four lines per
-/// repository on every recovery, which is how a reader learns to skip the line that says
-/// `core.pager`.
-///
-/// `extensions.objectformat` is here rather than on the allowlist, and could not help there:
-/// the bundle is unpacked into the repository `git init` just made, so a sha256 repository
-/// fails at the unbundle, before any config is written. Revisit if Radicle storage ever moves
-/// off sha1, which would mean choosing the format at `init` rather than restoring it after.
+/// `extensions.objectformat` stays here because a sha256 bundle already fails to unbundle into
+/// the sha1 repository `git init` made. Revisit if Radicle storage moves off sha1.
 const CONFIG_FROM_INIT: &[&str] = &[
     "core.bare",
     "core.filemode",
@@ -758,25 +652,20 @@ const CONFIG_FROM_INIT: &[&str] = &[
     "extensions.objectformat",
 ];
 
-/// What a restore is willing to take out of a repository config, and what it left behind.
+/// The settings kept from an archived repository config, and the names of those dropped.
 struct AllowedConfig {
     kept: Vec<(String, String)>,
-    /// Named, not counted: whoever reads the warning is deciding whether the setting mattered.
-    /// What `git init` writes for itself is not in here, so an honest archive names nothing.
+    /// Names of the dropped settings, so the user can judge whether one mattered. Settings in
+    /// `CONFIG_FROM_INIT` are never listed, so an honest archive names nothing.
     dropped: Vec<String>,
 }
 
-/// Keep the allowlisted settings out of a config an archive carried, and name the rest.
+/// Splits the output of `git config --list -z` into the allowlisted settings and the names
+/// of the rest.
 ///
-/// Reads what `git config --list -z` printed rather than the config text itself: a parser of
-/// ours would have to model quoting, an inline `#`, `[core] key = value` on one line, a value
-/// continued with a backslash, and the case folding git applies to a section and a key, and
-/// every shape it modelled differently from git is either a setting git reads and this does
-/// not, or one dropped without being named. The shipped script asks git the same question, so
-/// both readers of an archive agree by construction rather than by two parsers matching.
-///
-/// The listing is `name\nvalue\0` per setting. A setting with no value at all prints its name
-/// alone, and is dropped rather than read as an empty one.
+/// Git's own listing resolves quoting, continuations and case folding, so this reader and the
+/// shipped restore script, which asks git the same question, agree by construction. Each entry
+/// is `name\nvalue\0`, and a setting with no value prints its name alone and is dropped.
 fn allowed_config(listed: &str) -> AllowedConfig {
     let mut kept = Vec::new();
     let mut dropped = Vec::new();
@@ -799,29 +688,16 @@ fn allowed_config(listed: &str) -> AllowedConfig {
 /// What came back out of the bundles, and what did not.
 struct Restored {
     repos: Vec<RepoRecord>,
-    /// Repositories the archive carried that are not in the home now. Carried separately
-    /// rather than inferred from the count, because a restore that quietly dropped one would
-    /// otherwise report success over a home missing the work it was taken for.
+    /// Repositories the archive carried that are not in the home now. Tracked explicitly, so a
+    /// restore that lost one cannot report success.
     dropped: Vec<String>,
 }
 
-/// Rebuild each archived repository from its bundle.
+/// The warning a restore gives about the object check before opening the first bundle, if any.
 ///
-/// One repository that will not open does not end the restore. `backup` already carries on
-/// past a repository it cannot bundle, and the asymmetry was worse here: a bundle that fails
-/// `fetch.fsckObjects` (old history with a malformed object bundles fine and refuses to
-/// unbundle) abandoned every repository after it, and took the state record and the report
-/// with it.
-/// What a restore says about the object check before it opens the first bundle, if anything.
-///
-/// `unbundle` asks git to check the objects it is about to write, and a git older than the
-/// one that started honouring that on a bundle accepts the setting and never looks at it: the
-/// objects land unchecked and the run would otherwise report the same success as one that had
-/// checked them. `None` from the reader is a third answer, not the bad one: not knowing which
-/// git ran is not the same claim as knowing it did not check.
-///
-/// Pure, because the only machine that can watch the first arm is one whose git is new enough
-/// and the only machine that can watch the second is one whose git is not.
+/// A git too old to check objects on a bundle accepts the setting and ignores it. `None` from
+/// the version reader means the version is unknown, which is a weaker claim than "did not
+/// check". The function is pure so tests can see all three answers on any one machine.
 fn bundle_check_notice(reaches: Option<bool>) -> Option<(String, Option<String>)> {
     match reaches {
         Some(true) => None,
@@ -844,13 +720,10 @@ fn bundle_check_notice(reaches: Option<bool>) -> Option<(String, Option<String>)
     }
 }
 
-/// Rebuild each archived repository from its bundle.
+/// Rebuilds each archived repository from its bundle.
 ///
-/// One repository that will not open does not end the restore. `backup` already carries on
-/// past a repository it cannot bundle, and the asymmetry was worse here: a bundle that fails
-/// `fetch.fsckObjects` (old history with a malformed object bundles fine and refuses to
-/// unbundle) abandoned every repository after it, and took the state record and the report
-/// with it.
+/// A repository that fails to restore is reported and skipped, so one malformed object in old
+/// history does not cost every repository after it, the state record and the report.
 fn restore_repositories(
     ctx: &Ctx,
     staging: &Path,
@@ -873,10 +746,8 @@ fn restore_repositories(
     if !git.is_available() {
         ctx.term
             .warn("git is not on PATH, so no repositories were restored");
-        // Deliberately not offering the staging directory: it lives in the scratch this run
-        // deletes on its way out, so the bundles named there are gone before the shell prompt
-        // comes back. The archive still holds them, and the same restore run again with git
-        // installed is the whole remedy.
+        // The staging directory is not offered, because it lives in this run's scratch and is
+        // deleted on exit. The archive still holds the bundles.
         ctx.term
             .detail("the identity and its policies are in place");
         ctx.term.detail(
@@ -889,8 +760,7 @@ fn restore_repositories(
         });
     }
 
-    // Said once, before the first bundle is opened, and only now that there is at least one
-    // to open: an archive carrying no repositories takes the early return above.
+    // Said once, before the first bundle, and only when there is a bundle to open
     if let Some((warning, detail)) = bundle_check_notice(git.fsck_reaches_a_bundle()) {
         ctx.term.warn(&warning);
         if let Some(detail) = detail {
@@ -898,9 +768,8 @@ fn restore_repositories(
         }
     }
 
-    // The third ask, and the last one before a repository is written. `install` asked before
-    // the identity went in, and a link planted at `storage` after that answer is one this
-    // `create_dir_all` would walk straight through.
+    // Asked a third time, because a link planted at `storage` after `install` asked is one
+    // this `create_dir_all` would walk straight through
     refuse_a_link_that_appeared_mid_restore(&ctx.home, settled)?;
     let storage = ctx.home.storage();
     std::fs::create_dir_all(&storage).map_err(|e| Error::io(&storage, e))?;
@@ -928,19 +797,13 @@ fn restore_repositories(
     })
 }
 
-/// Put one repository back, so that the caller can decide what a failure costs.
+/// Restores one repository, leaving the caller to decide what a failure costs.
 fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Result<()> {
     let bundle = staging.join(git::bundle_entry(&repo.rid));
     let target = ctx.home.repository_path(&repo.rid);
-    // Whether the repository was already there decides what a failure may clean up. Under
-    // `--force` the home can hold a copy this run did not create, and deleting that on a
-    // failed unbundle would destroy the thing the restore was meant to protect.
-    // Ahead of `existed` and of everything the failure path may sweep, because both of those
-    // resolve the link: `exists` follows it, and `remove_dir_all` over one answers with a
-    // second error about the wrong thing. A link at the repository's own name is inside a
-    // `storage` that is a real directory and so passed the check over the home's three, and
-    // `git init --bare` initialises at whatever it points at. The archive names the
-    // repository, so whoever wrote it knows which name to plant.
+    // A link at the repository's own name is refused before anything resolves it. `exists`
+    // follows a link, `git init --bare` initialises wherever it points, and the archive names
+    // the repository, so whoever wrote it knows which name to plant.
     if is_a_link(&target) {
         return Err(Error::refused(
             format!(
@@ -950,21 +813,21 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
             "move it aside, or restore into a different --home",
         ));
     }
+    // Under `--force` the home can hold a copy this run did not create, and a failed unbundle
+    // must not delete it
     let existed = target.exists();
 
     let put_back = || -> Result<()> {
         git.init_bare(&target)?;
         git.unbundle(&target, &bundle)?;
         if let Some(head) = &repo.head {
-            // A skip rather than a failure, and the same one the shipped script makes: the
-            // history is already unbundled at this point, and a pointer the manifest got
-            // wrong must not cost the refs it was supposed to point at.
+            // A bad HEAD is skipped, as the shipped script does, because the history is
+            // already unbundled and a wrong pointer must not cost the refs it points at
             if git::names_a_ref(head) {
                 git.set_head(&target, head)?;
             } else {
-                // Not a failed check, unlike a policy that did not go back: `HEAD` is a
-                // pointer git rebuilds from the default branch, and no signed history rides
-                // on it, so a run that lost one is still a complete restore.
+                // A warning and not a failed check, because git rebuilds `HEAD` from the
+                // default branch and no signed history rides on it
                 ctx.term.warn(&format!(
                     "{}: `{head}` does not name a ref, so it came back without its HEAD",
                     repo.display_name()
@@ -999,8 +862,8 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
                         }
                     }
                 }
-                // The repository keeps the config `git init` gave it, which is a working one:
-                // a config the archive mangled is a line lost, not a repository lost.
+                // The repository keeps the working config `git init` gave it, so a config the
+                // archive mangled costs a line and not a repository
                 None => ctx.term.warn(&format!(
                     "{}: the config in the archive could not be read, so its name and DID \
                      did not come back",
@@ -1014,12 +877,11 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
     match put_back() {
         Ok(()) => Ok(()),
         Err(e) => {
-            // An empty bare repository is not nothing: the next inventory counts it, the next
-            // archive carries it, and `rad` reads it as a repository with no history at all.
+            // An empty bare repository left behind would be counted and archived, and `rad`
+            // would read it as a repository with no history
             if !existed
                 && let Err(swept) = std::fs::remove_dir_all(&target)
-                // Nothing to sweep when the failure was `git init` itself, and saying so about
-                // a directory that was never made only adds noise to an already bad moment.
+                // No directory exists to sweep when `git init` itself failed
                 && swept.kind() != std::io::ErrorKind::NotFound
             {
                 ctx.term.detail(&format!(
@@ -1034,8 +896,8 @@ fn restore_one(ctx: &Ctx, git: &Git, staging: &Path, repo: &RepoRecord) -> Resul
 
 /// What a whole run's comparison found.
 ///
-/// The standings are one answer per repository; `ahead_of_someone` is a second, orthogonal one
-/// that a single standing cannot carry. See `Comparison`.
+/// `ahead_of_someone` is a second answer per repository, which a single standing cannot
+/// carry. See `Comparison`.
 #[derive(Default)]
 struct Reconciled {
     standings: BTreeMap<String, Standing>,
@@ -1045,29 +907,22 @@ struct Reconciled {
 
 /// Whether this run meant to ask the network anything.
 ///
-/// A repository nothing came back for is a check that did not run, not a check that passed,
-/// and it costs the exit code for that reason. `--no-reconcile` is the one case where an
-/// unasked question is what was asked for, so it is carried here rather than guessed at from
-/// standings that look the same either way.
+/// A repository nothing came back for costs the exit code, unless `--no-reconcile` asked for
+/// no comparison. The standings look the same either way, so the intent is carried here.
 #[derive(Default, Debug, PartialEq, Eq)]
 enum NetworkCheck {
     /// The run put the repositories to the network, or tried to.
     #[default]
     Wanted,
-    /// `--no-reconcile`: nothing was compared and nothing was meant to be.
+    /// Nothing was compared, as `--no-reconcile` asked.
     Declined,
 }
 
-/// Compare each restored repository with what other nodes hold of its signed refs.
+/// Compares each restored repository with what other nodes hold of its signed refs.
 ///
-/// This is the check that separates a restore from a data-loss event. Signed refs are a chain:
-/// if the archived copy is behind what the network has, and the user commits on top of it,
-/// they sign a second history for their own namespace, and peers see a fork that does not
-/// resolve itself.
-///
-/// The fetch is what makes the answer current; it is not itself the answer. See `classify` for
-/// why the network's view of our own namespace has to come from the node's record of what
-/// peers announced rather than from the refs sitting in local storage.
+/// Signed refs are a chain. Writing on top of an archived copy that is behind the network
+/// signs a second history for the user's own namespace, a fork that never resolves. The fetch
+/// only makes the node's record current, and `classify` reads the verdict from that record.
 fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<Reconciled> {
     if restored.is_empty() {
         return Ok(Reconciled::default());
@@ -1088,20 +943,11 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
     }
     let mut standings = Reconciled::default();
 
-    // What the record held before this run could add to it, read while nothing can be writing
-    // to it. Not from the archive's own copy in staging: `node/node.db` rides in an archive
-    // only under `--with-node-db`, so for an ordinary archive there is no such file, the
-    // baseline came back empty, and every row in the home's own months-old table read as one
-    // that had just arrived. The home's copy at this instant is the archive's where the
-    // archive carried one and the machine's own where it did not, and neither was written by
-    // this run, which is the whole of what the split needs.
-    // What makes a row that arrives during this run worth the stronger reading: a node
-    // connecting for the first time subscribes to a fixed backlog of gossip, twenty-four hours
-    // in heartwood 1.x (`INITIAL_SUBSCRIBE_BACKLOG_DELTA`), so what reaches a home with no
-    // node database is a day old at most. A home that already had one asks for everything
-    // since it was last online, which on an archive restored months later is months of replay;
-    // those rows are the ones the baseline holds back, and this is why holding them back is
-    // not merely conservative. Revisit if heartwood makes either window unbounded.
+    // The baseline is the home's record before the node started below writes to it, never
+    // staging's, because `node.db` rides in an archive only under `--with-node-db`. An empty
+    // baseline reads stale rows as fresh, and the report asks for an announce that could
+    // publish a fork. A fresh node replays a day of gossip, an old one months
+    // (`INITIAL_SUBSCRIBE_BACKLOG_DELTA`). Revisit if heartwood makes either window unbounded.
     let baseline = match crate::db::read_synced_heads(&ctx.home.node_db(), node_id) {
         Ok(baseline) => Some(baseline),
         Err(e) => {
@@ -1112,24 +958,16 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
             None
         }
     };
-    // The node is started here, and this is the only place it can be. Installing over a live
-    // home corrupts both, so restore refuses to begin while the node runs; comparing with the
-    // network needs a node to ask. Held together, those two rules made this check unreachable:
-    // it warned and returned on every restore, while the README sold the comparison as the
-    // thing that stops the user forking their own peer history. So the node is started once
-    // the identity is safely in place, and put back the way it was found.
-    //
-    // Started only when the node is known to be down. A doubt here means `rad node start`
-    // would be aimed at a home something else may already be serving, and a second node on one
-    // key is the fork the whole comparison exists to prevent.
+    // Restore refuses to begin under a running node and the comparison needs one, so the node
+    // is started here and stopped afterwards. It starts only when known to be down, because a
+    // second node on one key is the fork this comparison exists to prevent.
     let started_here = if !ctx.home.probe_node_state().is_stopped() {
         false
     } else {
         ctx.term
             .step("starting the node to compare the restored repositories with the network");
-        // Reported, never propagated. Everything from here on happens after the identity,
-        // the repositories and the policies are on disk, and an error escaping would take the
-        // report of what did not come back with it.
+        // Reported, never propagated, because the identity, repositories and policies are on
+        // disk and an escaping error would lose the report of what did not come back
         let started = match rad.start_node() {
             Ok(started) => started,
             Err(e) => {
@@ -1162,8 +1000,8 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
 
     if started_here {
         ctx.term.step("stopping the node again");
-        // Reported, never propagated: the standings are the answer this function owes its
-        // caller, and a stop that failed must not stand in front of them.
+        // Reported, never propagated, because the standings are this function's answer and a
+        // failed stop must not stand in front of them
         if !matches!(rad.stop_node(), Ok(true)) {
             ctx.term
                 .warn("the node started for this check would not stop");
@@ -1176,10 +1014,8 @@ fn reconcile(ctx: &Ctx, manifest: &Manifest, restored: &[RepoRecord]) -> Result<
 
 /// Whether the node answered on its control socket before `NODE_START_TIMEOUT` elapsed.
 ///
-/// `rad node start` returns as soon as the daemon forks, so every query fired straight after
-/// it fails on a machine where the node takes a moment: the comparison then filled with
-/// `CouldNotAsk` for every repository and the restore reported success having compared
-/// nothing. `backup`'s `quiesce` waits the same way for the same reason.
+/// `rad node start` returns as soon as the daemon forks, so a query fired straight after it
+/// fails, and every repository would read `CouldNotAsk` on a node that is merely slow.
 #[cfg(unix)]
 fn wait_for_node(ctx: &Ctx) -> bool {
     let deadline = std::time::Instant::now() + NODE_START_TIMEOUT;
@@ -1192,11 +1028,8 @@ fn wait_for_node(ctx: &Ctx) -> bool {
     false
 }
 
-/// There is no control socket to poll here, so the unix `wait_for_node` would spend
-/// `NODE_START_TIMEOUT`
-/// reaching the one answer it can reach and then report that a node which may well be up would
-/// not start. The fetches are asked instead: they fail per repository, saying so per
-/// repository, which is a true sentence where "the node would not start" was not.
+/// Returns `true` at once, because without a control socket to poll the unix wait could only
+/// time out on a node that may be up. The fetches then fail per repository, each saying so.
 #[cfg(not(unix))]
 fn wait_for_node(_ctx: &Ctx) -> bool {
     true
@@ -1204,15 +1037,13 @@ fn wait_for_node(_ctx: &Ctx) -> bool {
 
 /// What one repository's comparison found.
 ///
-/// Two answers rather than one, because they are facts about different nodes and folding them
-/// loses the one with a permanent consequence. A repository can be ahead of the seed that has
-/// answered and unknown to the seed that has not; reporting only the worse of those drops it
-/// out of the "push this first" list, and unpushed work whose only other copy is the archive
-/// does not come back by fetching later.
+/// The two answers are facts about different nodes. A repository can be ahead of one seed and
+/// unknown to another, and keeping only the worse would drop work whose only other copy is the
+/// archive from the push-first list.
 struct Comparison {
     standing: Standing,
-    /// Some node's record is an ancestor of what the archive holds, so this repository carries
-    /// work that node has never seen.
+    /// Whether some node's recorded head is an ancestor of the archive's, so the archive holds
+    /// work that node lacks.
     someone_is_behind: bool,
 }
 
@@ -1221,49 +1052,36 @@ struct Comparison {
 enum Origin {
     /// Some node wrote it while this restore was running.
     AnnouncedSinceRestore,
-    /// The home already held it before this run began: the archive's row where the archive
-    /// carried a node database, the machine's own where it did not.
+    /// The home held it before this run began, from the archive's or the machine's node.db.
     CameWithTheArchive,
 }
 
-/// Where the archive's signed refs stand against what other nodes hold of them.
+/// Decides where the archive's signed refs stand against what other nodes say they hold.
 ///
-/// `held` is what those nodes have said they carry of *our* `rad/sigrefs` that is not what the
-/// archive carries. That record, and not the copy in local storage, is the only view of our
-/// own namespace this machine can get: `rad sync <rid> --fetch` over a repository already in
-/// storage is a pull, and a pull deliberately ignores the local peer's key, so our own refs
-/// stay exactly as the archive wrote them however far the network has moved. Reading those
-/// back and calling them the network is what reported every restore in step with a network
-/// nobody had asked.
+/// `held` comes from the node's record of announcements, never from local storage. A fetch
+/// over a repository already in storage ignores the local peer's own key, so local refs stay
+/// as the archive wrote them however far the network has moved. Writing on top of a copy
+/// another node has moved past forks the user's peer history, with no undo.
 ///
-/// Kept apart from the fetching and the spawning of `git` because this is the decision the
-/// whole tool exists for: writing on top of a restored copy another node has moved past forks
-/// your own peer history, and there is no undo.
-///
-/// `is_ancestor` is a closure rather than a value, so the classification can be tested without
-/// a repository on disk.
+/// `is_ancestor` is a closure so tests need no repository on disk.
 fn classify<F>(held: &Evidence, mut is_ancestor: F) -> Result<Comparison>
 where
     F: FnMut(&str) -> Result<Answer>,
 {
-    // Nothing on record against the archive, which is what `NothingSaysOtherwise` claims and
-    // the whole of what it claims. Not `CouldNotAsk`: the record was read, and it holds
-    // nothing that contradicts this copy.
+    // The record was read and holds nothing against this copy, which is exactly what
+    // `NothingSaysOtherwise` claims
     let mut standing = Standing::NothingSaysOtherwise;
     let mut someone_is_behind = false;
     for (origin, head) in held.rows() {
         standing = standing.worse_of(if !git::names_an_oid(head) {
-            // A row shaped like a flag would be one to `merge-base`, which takes no `--`. A
-            // malformed row is a database this tool cannot read, not evidence of a fork.
+            // `merge-base` takes no `--`, so a row shaped like a flag would be read as one. A
+            // malformed row is an unreadable database, not evidence of a fork.
             Standing::CouldNotAsk
         } else {
             match is_ancestor(head)? {
-                // Their head is in our history, so they are behind and we hold the work. True
-                // of a row that arrived just now; only ever true of one the archive carried at
-                // the moment the backup was taken. A node that was behind in January is a node
-                // that has had since January to catch up and pass us, and it announces nothing
-                // when it does not, so acting on that row is how a copy the network is ahead
-                // of gets told to run `rad sync --announce`.
+                // The peer's head is in the archived history, so the archive holds work it
+                // lacks. A row the archive carried may be stale, since that node can pass this
+                // copy without a word, so only a fresh row earns "push this first".
                 Answer::Yes => match origin {
                     Origin::AnnouncedSinceRestore => {
                         someone_is_behind = true;
@@ -1271,17 +1089,12 @@ where
                     }
                     Origin::CameWithTheArchive => Standing::ArchiveIsAheadOfAStaleRecord,
                 },
-                // Their head is not in our history: work signed under this key that is not
-                // here. Taken from either origin, because this reading cannot decay. A node
-                // that once held refs under your key that you lack still holds them, so a row
-                // the archive carried is as true today as the day it was written.
-                //
-                // `resolve_git_failure` turns a `git` that could not resolve their head at all
-                // into this, having first established the object is genuinely absent.
+                // The peer's head is not in the archived history, so work signed under this
+                // key is missing here. That reading never decays, so a row of any age counts.
+                // `resolve_git_failure` maps a head proven absent to this answer.
                 Answer::No => Standing::PeerHoldsOther,
-                // `git` could not run, or could not open the repository. That says nothing
-                // about any peer, and saying it does costs exit 3 and a warning that somebody
-                // has forked their own identity.
+                // `git` could not run or open the repository, which says nothing about any
+                // peer and must not cost exit 3 and a fork warning
                 Answer::CouldNotAsk { .. } => Standing::CouldNotAsk,
             }
         });
@@ -1292,19 +1105,12 @@ where
     })
 }
 
-/// What other nodes have said they hold of one repository's signed refs that is not what the
-/// archive holds, split by whether the archive itself brought the row.
+/// What other nodes have said they hold of one repository's signed refs that differs from
+/// the archive, split by whether the row predates this run.
 ///
-/// A row that agrees with the archive is in neither set. Nothing distinguishes the two things
-/// it can be: heartwood rewrites a peer's row only when that peer announces a *different*
-/// head, so an agreeing row is either a peer's first word or one that was in the table before
-/// this run, which for a `--with-node-db` archive is the archive's own. Reading it as the
-/// network agreeing is the archive being compared with itself.
-///
-/// A row that differs is kept, and where it came from decides what may be read out of it. Both
-/// readings hold for a row that arrived during this run. Only the one that cannot decay, a
-/// node holding refs signed under this key that are not here, may be taken from a row the
-/// archive carried. See `classify`.
+/// A row that agrees with the archive is left out, because heartwood rewrites a row only when
+/// a peer announces a different head, so an agreeing row may be the archive's own. Only the
+/// fork reading, which cannot decay, may be taken from a row that predates this run.
 #[derive(Default)]
 struct Evidence {
     announced_since_restore: BTreeSet<String>,
@@ -1312,7 +1118,7 @@ struct Evidence {
 }
 
 impl Evidence {
-    /// Every row worth asking `git` about, each beside where it came from.
+    /// Every row worth asking `git` about, with its origin.
     fn rows(&self) -> impl Iterator<Item = (Origin, &String)> {
         self.announced_since_restore
             .iter()
@@ -1329,8 +1135,8 @@ impl Evidence {
 enum Before<'a> {
     /// These heads and no others, read from the home before the node was started.
     Held(Option<&'a BTreeSet<String>>),
-    /// Not known. Every row then reads as one that was already there, which is the reading
-    /// that claims less: it withholds "push this first" and keeps the fork verdict.
+    /// Not known, so every row reads as already there. That reading claims less, withholding
+    /// "push this first" and keeping the fork verdict.
     Unknown,
 }
 
@@ -1343,12 +1149,12 @@ impl Before<'_> {
     }
 }
 
-/// `recorded` is what the node's record holds for one repository now, and `before` what the
-/// same record held for it when this restore started.
+/// Splits the rows `recorded` holds for one repository by whether `before` already held
+/// them, leaving out rows that agree with `archived`.
 ///
-/// Split on the head alone, because `read_synced_heads` drops the node column: a second node
-/// announcing a head the archive already had against a first node reads as a row that was
-/// already there. That direction only ever withholds "push this first", which is the safe one.
+/// The split is on the head alone, because `read_synced_heads` drops the node column. A
+/// second node announcing a head already on record then reads as old, which only withholds
+/// "push this first", the safe direction.
 fn evidence_against(
     archived: &str,
     recorded: Option<&BTreeSet<String>>,
@@ -1359,8 +1165,8 @@ fn evidence_against(
     };
     let mut evidence = Evidence::default();
     for head in recorded {
-        // Two spellings of one commit are not two commits, and treating them as two spends a
-        // `git` to report unpushed work that does not exist.
+        // Two spellings of one commit are one commit, and comparing them would report
+        // unpushed work that does not exist
         if git::same_oid(head, archived) {
             continue;
         }
@@ -1373,11 +1179,10 @@ fn evidence_against(
     evidence
 }
 
-/// The repository id in the form heartwood's own tables use, which carries the `rad:` prefix.
+/// The repository id in the form heartwood's tables use, with the `rad:` prefix.
 ///
-/// `rad::is_identifier` accepts both spellings and the archive is written by whoever wrote it,
-/// so a manifest carrying bare `z...` rids restored, fetched, and then matched no row at all:
-/// every repository quietly became "could not be compared" with nothing saying why.
+/// A manifest can carry bare `z...` rids, which `rad::is_identifier` accepts, and an
+/// unprefixed lookup matches no row, so every repository would read "could not be compared".
 fn prefixed_rid(rid: &str) -> String {
     if rid.starts_with(RID_PREFIX) {
         rid.to_string()
@@ -1394,17 +1199,9 @@ const GOSSIP_WINDOW: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// What other nodes have told this one they hold, after a moment for them to say it.
 ///
-/// `rad sync --fetch` returns when the fetches are done, and a peer's refs announcement is a
-/// separate message that arrives over the same connection on its own schedule. Read
-/// microseconds later, the table holds only what the archive itself carried, so a fork created
-/// after the backup was taken goes unseen on a network that is about to say so.
-///
-/// A flat wait, with nothing to poll for: a peer that holds exactly what the archive holds
-/// writes no row at all, so no observable state ever says the answers are in. The length was
-/// inherited from what this command spends waiting for a node it started, and it is spent on
-/// every restore that fetched anything rather than only when something is wrong, which is why
-/// the line saying so names the number. Named from the constant, so the two cannot drift into
-/// a run that says twenty and waits thirty.
+/// A refs announcement arrives on its own schedule after `rad sync --fetch` returns, and a
+/// read made at once sees only what the archive carried. The wait is flat because a peer that
+/// agrees writes no row, so nothing ever signals that the answers are in.
 fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSet<String>>> {
     ctx.term.step(&format!(
         "waiting {} seconds for other nodes to report what they hold",
@@ -1414,23 +1211,18 @@ fn what_others_hold(ctx: &Ctx, node_id: &str) -> Option<BTreeMap<String, BTreeSe
     read_what_others_hold(&ctx.term, &ctx.home.node_db(), node_id)
 }
 
-/// The reading on its own, so that what it decides can be tested without the wait and without
-/// a home around it.
+/// Reads what other nodes have said they hold, without the wait.
 ///
-/// `None` rather than an error when the record cannot be read, because propagating it would
-/// cost the report of which repositories did not come back at all, which this run established
-/// long before the comparison and which no later command can reconstruct.
+/// Returns `None` when the record cannot be read or matched, because an error would cost the
+/// report of which repositories did not come back, which no later command can reconstruct.
 fn read_what_others_hold(
     term: &term::Term,
     node_db: &Path,
     node_id: &str,
 ) -> Option<BTreeMap<String, BTreeSet<String>>> {
     match crate::db::read_synced_heads(node_db, node_id) {
-        // A table that reads perfectly and whose repository ids are spelled some way this
-        // build does not look up. Every lookup would miss, every repository would earn "no
-        // other node has reported holding anything else", and the run would reassure its
-        // reader on a table it had in its hands. `prefixed_rid` exists because the archive's
-        // side of this went wrong once; nothing guarded heartwood's side.
+        // A table that reads but whose repository ids this build does not spell would miss
+        // every lookup, and every miss reads as "nothing reported otherwise"
         Ok(held) if !held.is_empty() && !held.keys().any(|repo| repo.starts_with(RID_PREFIX)) => {
             term.warn(
                 "the node's database spells repository ids in a way this rad-backup does not \
@@ -1438,11 +1230,9 @@ fn read_what_others_hold(
             );
             None
         }
-        // A table this build cannot read comes back empty, and an empty record means "nobody
-        // has reported anything else", which would reassure the reader on the strength of a
-        // table nobody managed to open. Asked about this read rather than about the process,
-        // because any other reader's drift would otherwise discard a record that was read
-        // perfectly. `main` prints which table moved.
+        // A table this build cannot read comes back empty, which would also reassure. The
+        // drift is asked about for this read alone, so another reader's drift cannot discard
+        // a good record. `main` prints which table moved.
         Ok(_) if crate::db::saw_schema_drift_in(node_db, "sync status table") => {
             term.warn(
                 "this rad-backup cannot read part of the node's database, so nothing was compared",
@@ -1459,27 +1249,15 @@ fn read_what_others_hold(
     }
 }
 
-/// Read a `git` that could not answer as a fact about the peer's head or one about this disk.
+/// Reads a `git` failure as either the peer's head being absent or this disk being unreadable.
 ///
-/// A peer's sigrefs commit that is not in local storage makes `merge-base` exit 128, and that
-/// is the fork hazard rather than a broken machine: our own namespace is the one thing a pull
-/// never brings back. But an unreadable repository exits 128 too, and blaming a peer for that
-/// costs exit 3 and a warning that somebody's identity may have forked.
+/// `merge-base` exits 128 both for a peer head missing here, which is the fork hazard, and for
+/// a broken repository. The archived head is the control, so a store that cannot produce it
+/// either is read as broken. `merge-base --is-ancestor A A` is no control, because it answers
+/// on equality without opening an object.
 ///
-/// So the object is looked for, and the caller says whether the same repository could produce
-/// the archived head. `cat-file -e` answers "absent" for an object sitting in a pack that was
-/// truncated in transit, which a restore is exactly the moment for, and every object in that
-/// pack answers the same way. The archived head is the control: a restore that worked put it
-/// there, so a store that cannot produce it either is a store that cannot answer, not a
-/// network holding something else.
-///
-/// Asking instead whether the archived head reaches itself proves nothing, because
-/// `merge-base --is-ancestor A A` answers on equality without opening a single object.
-///
-/// One state is still read wrongly. The control proves that some lookup path works, not the
-/// one the peer's head needed: a fetch that wrote a second, short pack holding only the peer's
-/// head reports the fork over a repository nobody else has touched. Revisit if `git` grows a
-/// cheap way to ask whether a lookup failed or came back empty.
+/// A fetch that wrote a second pack holding only the peer's head still reads as the fork.
+/// Revisit if `git` grows a cheap way to tell a failed lookup from an empty one.
 fn resolve_git_failure(
     git: &Git,
     git_dir: &Path,
@@ -1501,20 +1279,16 @@ fn resolve_git_failure(
 
 /// Every restored repository, with nothing compared about it.
 ///
-/// The paths that give up before comparing anything used to hand back an empty record, which
-/// `--json` rendered as empty `atRisk`, `ahead` and `notChecked` arrays: a run that never
-/// asked the network anything was indistinguishable, to a script, from one that asked and
-/// found nothing wrong.
+/// Each repository gets a standing, so `--json` never shows empty lists for a run that asked
+/// the network nothing.
 fn nothing_compared(restored: &[RepoRecord], wanted: NetworkCheck) -> Reconciled {
     Reconciled {
         wanted,
         standings: restored
             .iter()
             .map(|repo| {
-                // The two are still told apart. Collapsed into "could not be compared", a home
-                // of three private repositories was told 3 of 3 had failed and sent to run a
-                // fetch that fails for those by design, whatever the reason this run never
-                // asked anybody anything.
+                // Private repositories stay `NothingToCompare`, so a home of them is not told
+                // every comparison failed and sent to run a fetch that cannot succeed
                 let standing = if no_node_can_hold(repo) {
                     Standing::NothingToCompare
                 } else {
@@ -1527,12 +1301,10 @@ fn nothing_compared(restored: &[RepoRecord], wanted: NetworkCheck) -> Reconciled
     }
 }
 
-/// The standing for a repository the archive holds no signed refs of ours for.
+/// The standing for a repository the archive holds no signed refs of this identity for.
 ///
-/// There is no head to run `merge-base` against, and none is needed: a row here says a node
-/// announced that it holds signed refs under this key, and this copy holds none, which is the
-/// fork hazard whatever the two heads would have been. A repository first written in after the
-/// backup was taken is exactly this shape, and it used to be skipped as nothing to compare.
+/// Any row says a node holds signed refs under this key that this copy lacks, which is the
+/// fork hazard whatever the heads. A repository first written after the backup has this shape.
 fn without_a_head_of_ours(recorded: Option<&BTreeSet<String>>) -> Standing {
     match recorded {
         Some(heads) if !heads.is_empty() => Standing::PeerHoldsOther,
@@ -1540,32 +1312,22 @@ fn without_a_head_of_ours(recorded: Option<&BTreeSet<String>>) -> Standing {
     }
 }
 
-/// Whether no node will ever hold signed refs of ours for this repository, whoever is asked.
+/// Whether no node will ever hold signed refs of this identity for the repository, because it
+/// is announced to nobody, delegated to this identity alone and allowed to nobody.
 ///
-/// Announced to nobody, delegated to us alone, allowed to nobody. One place, so the paths that
-/// give up before asking say the same thing about a repository as the path that asks.
-///
-/// Deliberately NOT "the archive holds no signed refs of ours for it". That is a fact about
-/// the archive and was read as one about the network: a repository first written in after the
-/// backup was taken has no signed refs of ours in the archive and every reason to have them on
-/// a seed, and skipping it reported the one case this command exists for as nothing to
-/// compare, at exit 0. Such a repository is fetched like any other, and any row for it is a
-/// node holding refs signed under this key that are not here.
-///
-/// Read out of the archive's copy of the identity document, so a delegate or an allowed peer
-/// added after the backup is not seen. That direction can only leave a repository uncompared
-/// that somebody does hold, which is why the report says who was not asked and why.
+/// An archive holding no signed refs of this identity does not qualify, because a repository
+/// first written after the backup can have them on a seed. The archive's identity document is
+/// read, so a delegate added since is missed, and the report says who was not asked.
 fn no_node_can_hold(repo: &RepoRecord) -> bool {
-    // Private on its own is not enough, because `rad sync --fetch` reaches the delegates and
-    // allowed peers of a private repository, and one shared with a collaborator is precisely
-    // the one whose sigrefs can be behind theirs.
+    // Private alone is not enough, because `rad sync --fetch` reaches a private repository's
+    // delegates and allowed peers, and a collaborator's copy can be ahead of this one
     repo.has_nowhere_to_fetch_from()
 }
 
-/// Never returns an error, because everything it can fail at happens after the identity, the
-/// repositories and the policies are on disk. A `git` that vanished mid-run or a file
-/// descriptor limit reached on the twelfth repository used to propagate past `report`, and the
-/// user was never told which repositories the archive carried and the home did not get.
+/// Compares each restored repository with the network, recording a standing for every one.
+///
+/// Never returns an error, because it runs after everything is on disk, and an error escaping
+/// would lose the report of which repositories did not come back.
 fn compare_with_network(
     ctx: &Ctx,
     manifest: &Manifest,
@@ -1584,24 +1346,18 @@ fn compare_with_network(
     ));
     let mut fetched = Vec::new();
     for repo in restored {
-        // Nobody to ask: announced to nobody, delegated to us alone, allowed to nobody.
-        // Asking anyway spends a fetch per repository to fail, and reports the feature working
-        // as a fault. `no_node_can_hold` says what counts as nobody and why private alone
-        // does not.
+        // A repository no node can hold is not fetched, because the fetch would fail and
+        // report the feature working as a fault
         if no_node_can_hold(repo) {
             standings.insert(repo.rid.clone(), Standing::NothingToCompare);
             continue;
         }
-        // `None` is a repository the archive holds no signed refs of ours for, and it is
-        // fetched like any other. There is no head to run `merge-base` against, and none is
-        // needed: a row saying some node holds our sigrefs is, on its own, a node holding refs
-        // signed under this key that this copy does not have.
+        // `None` is a repository the archive holds no signed refs of this identity for. It is
+        // still fetched, because any row for it is work signed under this key missing here.
         let archived = repo.sigrefs.get(node_id);
-        // Nothing in this manifest was vouched for by anybody. `merge-base` takes no `--`, so
-        // a value reading as a flag would be one, and a revision expression would have git
-        // resolve something the archive chose. Not compared rather than refused outright: one
-        // repository with a bad oid is not a reason to abandon the comparison of the rest, and
-        // "could not ask" is the honest standing for it.
+        // The manifest is unvouched for, and `merge-base` takes no `--`, so an archived value
+        // shaped like a flag or a revision expression is not compared. One bad oid marks its
+        // own repository `CouldNotAsk` and leaves the rest to be compared.
         if archived.is_some_and(|archived| !git::names_an_oid(archived)) {
             standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
@@ -1640,14 +1396,10 @@ fn compare_with_network(
             None => Before::Unknown,
         };
         let evidence = evidence_against(archived, recorded, before);
-        // Asked once per repository rather than once per head: the control is the archived
-        // head, which does not change between two peers' rows. Asked only when a `git` failure
-        // needs reading, because a repository every row of which answered cleanly should not
-        // spend a process on a question nothing is waiting for.
+        // The control is the archived head, so it is asked at most once per repository, and
+        // only when a `git` failure needs reading
         let mut control = None;
-        // One line per repository, not one per row. A repository several of whose rows cannot
-        // be read said the same sentence several times, with nothing to tell the reader that
-        // it was still the one repository.
+        // One warning per repository, however many of its rows cannot be read
         let mut said_already = false;
         let compared = classify(&evidence, |head| {
             let asked = git.is_ancestor(&path, head, archived)?;
@@ -1681,9 +1433,9 @@ fn compare_with_network(
                 }
                 standings.insert(repo.rid.clone(), compared.standing);
             }
-            // `git` itself could not be run: the binary went away mid-restore, or this process
-            // is out of file descriptors. One repository's worth of unknown, and the rest of
-            // the report still owed to the user.
+            // `git` itself could not run, from a vanished binary or exhausted file
+            // descriptors. This repository becomes an unknown, and the report is still owed
+            // for the rest.
             Err(e) => {
                 ctx.term
                     .warn(&format!("{} could not be compared: {e}", repo.rid));
@@ -1693,7 +1445,7 @@ fn compare_with_network(
     }
 }
 
-/// Re-apply seeding and following through `rad`, for a Radicle whose schema has moved on.
+/// Re-applies seeding and following through `rad`, for a Radicle whose schema has moved on.
 fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     let path = staging.join("policies.json");
     if !path.is_file() {
@@ -1704,9 +1456,8 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     let text = std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e))?;
     let policies: Policies = serde_json::from_str(&text)?;
 
-    // `run` refused before installing anything if `rad` was missing then, so reaching this
-    // means it went away mid-restore. Reported as every row missed, not raised: every byte is
-    // already on disk, and exit 4 here would say that nothing was written.
+    // `run` refused up front without `rad`, so a missing `rad` here vanished mid-restore.
+    // Every row is reported missed and not raised, since exit 4 claims nothing was written.
     let rad = Rad::new(ctx.home.path());
     if !rad.is_available() {
         ctx.term.warn(&format!(
@@ -1717,10 +1468,9 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     }
     ctx.term.step("replaying policies through rad");
 
-    // `policies.json` comes out of the same unvouched-for archive as everything else, and a
-    // rid or a nid lands in an argv position where a leading `-` is a flag rather than an id.
-    // Skipped rather than fatal: one lost seeding decision the user can make again by hand is
-    // a smaller loss than abandoning the rest of the replay, and neither is silent.
+    // `policies.json` is unvouched for, and an id with a leading `-` would land in argv as a
+    // flag. Such a row is skipped and named, because one lost decision is cheaper than
+    // abandoning the rest of the replay.
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
     for policy in policies.seeded() {
@@ -1763,9 +1513,8 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
         ));
     }
     if !failed.is_empty() {
-        // `rad` printed its own reason on stderr. Without this the run said nothing and exited
-        // 0, so a restore that put back every repository and none of the seeding policies read
-        // as a clean one.
+        // `rad` printed its reason on stderr. This warning keeps a restore that put back no
+        // seeding policies from reading as a clean one.
         ctx.term.warn(&format!(
             "`rad` refused {}: {}. Those were not restored",
             crate::term::count(failed.len(), "policy", "policies"),
@@ -1776,11 +1525,10 @@ fn replay_policies(ctx: &Ctx, staging: &Path) -> Result<Vec<String>> {
     Ok(skipped)
 }
 
-/// Replay one policy row, unless its identifier is one `rad` would read as a flag.
+/// Replays one policy row, unless its identifier is one `rad` would read as a flag.
 ///
-/// The two outcomes are kept apart because they need different answers: a skipped row is this
-/// tool refusing a hostile archive, and a failed one is `rad` refusing a decision it was asked
-/// to put back.
+/// A skipped row is this tool refusing a hostile archive, and a failed one is `rad` refusing
+/// a decision, so the two are kept apart.
 fn replay(
     id: &str,
     skipped: &mut Vec<String>,
@@ -1799,26 +1547,23 @@ fn replay(
 
 /// What the report is about to say, decided before a word of it is printed.
 ///
-/// A value rather than a handful of expressions inside `report`, because these are the whole
-/// of what a restore tells somebody about their signed refs and until they were one the only
-/// way to check them was to read a restore's output by eye.
+/// Held as a value so tests can check what a restore tells the user about their signed refs.
 struct Verdict<'a> {
     /// Another node holds signed refs this copy does not. Do not write in these.
     at_risk: Vec<&'a str>,
     /// Work no reporting node has, whose only other copy is the archive. Push these.
     ahead: Vec<&'a str>,
-    /// Nothing came back to hold against. Named, so that a comparison which answered nothing
-    /// does not read as a clean bill.
+    /// Nothing came back to compare against. Named, so a comparison that answered nothing does
+    /// not read as a clean bill.
     not_checked: Vec<&'a str>,
-    /// No node will ever hold these: announced to nobody, or with no signed refs of ours in
-    /// the archive. Said out loud, because a home of only private repositories otherwise gets
-    /// a restore that mentions the network nowhere at all.
+    /// Repositories no node will ever hold. Named, so a home of only private repositories is
+    /// still told why the network went unmentioned.
     nothing_to_compare: Vec<&'a str>,
-    /// Work no node had when the archive was taken, and no node has spoken since. The fact,
-    /// without the `rad sync --announce` that belongs beside a fresh one.
+    /// Work no node had when the archive was taken, with no node reporting since. Reported
+    /// without `rad sync --announce`.
     ahead_of_a_stale_record: Vec<&'a str>,
-    /// Whether anything at all was held against what a node reported, which is what the line
-    /// saying nobody has reported otherwise rests on.
+    /// Whether every comparison ran, none found a fork, and at least one repository's record
+    /// was read.
     nothing_was_reported_otherwise: bool,
 }
 
@@ -1836,23 +1581,17 @@ impl<'a> Verdict<'a> {
         let not_checked = of_standing(Standing::CouldNotAsk);
         let nothing_to_compare = of_standing(Standing::NothingToCompare);
         let ahead_of_a_stale_record = of_standing(Standing::ArchiveIsAheadOfAStaleRecord);
-        // Off the second answer rather than off the standings, because a repository some node
-        // is behind on and another node has said nothing about reports as the unknown, and the
-        // work it holds that nowhere else does would then never be named.
-        //
-        // Minus the ones at risk. The two lists give opposite instructions, and a repository
-        // in both was handed `rad sync --announce` first, which is the command that publishes
-        // the fork the second list exists to stop.
+        // Taken from the second answer, because a repository one node is behind on and another
+        // said nothing about reports as the unknown, and its unique work would go unnamed.
+        // Repositories at risk are left out, because `rad sync --announce` publishes the fork.
         let ahead = reconciled
             .ahead_of_someone
             .iter()
             .map(String::as_str)
             .filter(|rid| !at_risk.contains(rid))
             .collect();
-        // Gated on a repository having genuinely been held against a row some node wrote.
-        // Gated instead on the map being non-empty, it printed over a home of private
-        // repositories nobody else can hold, and over runs where most comparisons failed:
-        // right under the line saying so, which read as a partial pass.
+        // Said only when at least one repository's record was read and nothing went
+        // unchecked, so the line never sits over private repositories or failed comparisons
         let nothing_was_reported_otherwise = at_risk.is_empty()
             && not_checked.is_empty()
             && standings.values().any(|standing| {
@@ -1920,15 +1659,9 @@ fn report(
             manifest.identity.alias.as_deref().unwrap_or("unnamed"),
             ctx.home.path().display()
         ));
-        // Counted off the database now in the home, not off the manifest. `backup` fills the
-        // manifest's policy summary at every tier, but only the tiers above `identity` carry
-        // `policies.db`, so an identity-tier restore reported "45 seeding and 3 following
-        // policies" over a home that seeds nothing, and `remember` then wrote those numbers
-        // into the state record for the next `diff` to blame as drift.
-        //
-        // Reported, never propagated: this line sits in front of the fork warning, the list of
-        // repositories that did not come back and the exit code, and a `policies.db` that
-        // would not open used to take all three with it.
+        // Counted from the installed database, because the manifest's summary rides in every
+        // tier and `policies.db` only above `identity`. Reported, never propagated, because
+        // the fork warning, the dropped list and the exit code come after this line.
         match crate::db::read_policies(&ctx.home.policies_db()) {
             Ok(installed) => term.hint(&format!(
                 "{}, {} seeded and {} followed policies",
@@ -1941,22 +1674,18 @@ fn report(
                 term.warn(&format!("the restored policies could not be counted: {e}"));
             }
         }
-        // Under `--no-reconcile` the one line `run` printed is the whole story: the user asked
-        // for no comparison, and a second warning with a remedy reads as a failure.
+        // Under `--no-reconcile` the line `run` printed is enough, and a second warning with a
+        // remedy would read as a failure
         if reconciled.wanted == NetworkCheck::Wanted && !not_checked.is_empty() {
             term.warn(&format!(
                 "{} of {} could not be compared with the network",
                 not_checked.len(),
                 term::count(restored.len(), "repository", "repositories")
             ));
-            // Named rather than only counted, and shortlisted rather than listed: a node that
-            // would not start on a seed makes this every repository in the home.
+            // Shortlisted, because a node that would not start makes this every repository
             term.detail(&term::shortlist(&not_checked));
-            // Several causes, and the remedy has to cover them without asserting any. A fetch
-            // that failed is answered by running it again; a head no git would take and a node
-            // database this build could not read are not, and telling somebody to re-run the
-            // command that has just run is how the schema check used to send people to start a
-            // node already up.
+            // The causes vary, and only a failed fetch is fixed by running it again, so the
+            // remedy asserts none of them
             term.detail("the warnings above say why");
             term.detail(
                 "before you write in them, clone each one into a new, empty RAD_HOME to check \
@@ -1978,14 +1707,9 @@ fn report(
             term.detail("no other node reported work of yours that is not in the archive");
         }
         if !ahead_of_a_stale_record.is_empty() {
-            // The fact without the instruction. The only node on record was behind when the
-            // archive was taken and has said nothing since, and heartwood writes nothing for
-            // a peer that still agrees, so that row is as likely to be as stale as the
-            // archive as it is to be current. `rad sync --announce` on a copy the network has
-            // moved past is the command that publishes the fork.
-            // The archive's own date rather than a figure standing in for it. How stale that
-            // record might be is exactly the age of the backup, and somebody deciding whether
-            // to announce is deciding on which month it was taken.
+            // The fact without the instruction. That row may be as stale as the archive, and
+            // `rad sync --announce` on a copy the network has passed publishes the fork. The
+            // backup's date is printed, because it bounds how stale the row can be.
             let taken = manifest
                 .created
                 .get(..10)
@@ -2045,9 +1769,8 @@ fn report(
             term.detail("to see what the network holds, clone each one into a new, empty RAD_HOME");
         }
         term.blank();
-        // One line either way. The archive only knows a node ran when it was taken, and nothing
-        // here knows whether that machine still exists, so the warning is conditional on it.
-        // Two nodes running one key fork its history, which is why it comes before the start.
+        // The archive knows only that a node ran when it was taken, so the warning is
+        // conditional. Two nodes on one key fork its history, so the stop comes first.
         match manifest.node.was_running {
             true => term.warn(
                 "if the machine this archive came from still runs its node, stop it before you \
@@ -2057,18 +1780,11 @@ fn report(
         }
     }
 
-    // A repository this run meant to compare and could not is a failed check too. The fork
-    // hazard is the reason this tool exists rather than a tarball, and a run that never got
-    // to look at it has not established the thing its exit code would be claiming: `rad` off
-    // PATH, a node that would not start and a fetch that failed all end here, and a scheduled
-    // restore that exited 0 over any of them is the last anyone hears. Under `--no-reconcile`
-    // the same standings mean the user asked for exactly this, which is why the two are told
-    // apart rather than read off the standings.
+    // A repository this run meant to compare and could not fails the check, because a
+    // scheduled restore exiting 0 over it is the last anyone hears. Under `--no-reconcile` the
+    // same standings are what the user asked for.
     let unchecked = reconciled.wanted == NetworkCheck::Wanted && !not_checked.is_empty();
-    // A repository the archive carried and the home did not get is a failed check, the same
-    // as a fork hazard: the run did not deliver what it was asked for, and a scheduled restore
-    // that exited 0 over it would be the last anyone heard about it. A seeding or following
-    // decision that did not go back counts for the same reason.
+    // A repository or policy the archive carried and the home did not get also fails the check
     Ok(
         if at_risk.is_empty() && dropped.is_empty() && policies_missed.is_empty() && !unchecked {
             std::process::ExitCode::SUCCESS
@@ -2080,10 +1796,8 @@ fn report(
 
 #[cfg(test)]
 mod tests {
-    /// A manifest names its identity twice and both have to be the key in the archive. Only
-    /// the did was checked, so an archive whose node id said something else installed happily
-    /// and then compared nothing: every repository came back "nothing to compare", because the
-    /// sigrefs are looked up under that node id, and the run exited 0 over it.
+    /// Both spellings of the identity must be the archive's key, because the signed refs are
+    /// looked up under the node id and a wrong one compares nothing at exit 0.
     #[test]
     fn a_manifest_whose_node_id_is_not_its_key_is_refused_like_a_wrong_did() {
         const DID: &str = "did:key:z6MkjDYUKMUeY58Vtr8dGJrHRvnTfjKWVGCBYJDVTHXsXzm5";
@@ -2093,15 +1807,15 @@ mod tests {
         assert!(describes_this_key(DID, DID, NODE_ID).is_ok());
         assert!(describes_this_key(DID, DID, SOMEBODY_ELSE).is_err());
         assert!(describes_this_key(DID, &format!("did:key:{SOMEBODY_ELSE}"), NODE_ID).is_err());
-        // A node id that is the did over again, rather than the key on its own.
+        // A node id that is the DID over again, not the bare key
         assert!(describes_this_key(DID, DID, DID).is_err());
     }
 
     use super::*;
 
-    /// Every standing id, as the exact string a script matches on. A second copy on purpose:
-    /// an edit to `Standing::id` has to be made twice to ship. Nothing notices a variant left
-    /// out of this list, so a new id needs a line here too.
+    /// Every standing id, as the exact string a script matches on. The second copy is on
+    /// purpose, so an edit to `Standing::id` takes two edits to ship. A new variant needs a
+    /// line here too, since nothing notices one left out.
     #[test]
     fn standing_ids_are_pinned_because_scripts_match_on_them() {
         let pinned = [
@@ -2138,12 +1852,10 @@ mod tests {
         assert!(failed.is_empty());
     }
 
-    /// All three answers about the object check, on a machine that can only ever see one.
+    /// All three answers about the object check, on a machine that can only see one.
     ///
-    /// A git new enough to run the check says nothing, because a restore that behaved as
-    /// promised has nothing to report. The other two are different claims and must not be
-    /// worded as one: "did not check" is a fact about this git, "could not be read" is a fact
-    /// about this reader, and only the first names the version that would fix it.
+    /// A git that checks gets no word. "Did not check" is a fact about this git and names the
+    /// fixing version, and "could not be read" is a fact about the reader and names none.
     #[test]
     fn only_the_git_that_checks_a_bundle_passes_without_a_word_about_it() {
         assert_eq!(bundle_check_notice(Some(true)), None);
@@ -2176,8 +1888,8 @@ mod tests {
 
     #[test]
     fn a_policy_row_rad_refuses_is_recorded_rather_than_dropped() {
-        // The bool is `rad`'s exit status. Discarding it was how a restore could put back
-        // every repository, none of the seeding decisions, and still exit 0.
+        // The bool is `rad`'s exit status, and a discarded one lets a restore lose every
+        // seeding policy at exit 0
         let (mut skipped, mut failed) = (Vec::new(), Vec::new());
         replay("rad:zAAA", &mut skipped, &mut failed, || Ok(false))
             .expect("a refused row is reported, not raised");
@@ -2196,8 +1908,7 @@ mod tests {
     /// The identity being restored, which is the one whose signed refs a fork would be under.
     const OWN_NODE: &str = "z6MkAAA";
 
-    /// Forty hexadecimal characters, so the value reaches `git` rather than being turned away
-    /// as a row that is not an oid. Which oid it is never matters: the closure answers.
+    /// Forty hexadecimal characters, so the value passes the oid check and reaches `git`.
     fn oid(fill: char) -> String {
         std::iter::repeat_n(fill, 40).collect()
     }
@@ -2234,11 +1945,9 @@ mod tests {
         heads.iter().cloned().collect()
     }
 
-    /// The bug this whole function was rewritten for. The network side used to be read out of
-    /// local storage, and `rad sync --fetch` over a repository already there is a pull,
-    /// which ignores the local peer's own key: the refs read back were always the ones the
-    /// archive had just written. Every restore reported every repository in step, on no
-    /// evidence, and in step is the one answer that means "go ahead and write".
+    /// The network side comes from the node's record, never local storage, because a fetch
+    /// over an existing repository ignores the local peer's own key and would always read back
+    /// the archive's refs as "in step".
     #[test]
     fn a_node_holding_signed_refs_this_copy_does_not_have_is_the_fork_hazard() {
         let calls = std::cell::Cell::new(0);
@@ -2249,11 +1958,8 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    /// A `git` killed by a signal, an unreadable repository and an unresolvable archived oid
-    /// all arrive here identically. Reporting the loudest verdict this tool has, and exiting 3
-    /// with it, on any of those is telling somebody their identity may be forked because a
-    /// process died. `resolve_git_failure` establishes that the peer's head is genuinely not
-    /// on this disk before it lets a failure mean anything about a peer.
+    /// A killed `git`, an unreadable repository and an unresolvable archived oid all arrive as
+    /// `CouldNotAsk`, and none of them is evidence that a peer forked the identity.
     #[test]
     fn a_git_that_could_not_answer_at_all_is_an_unknown_and_not_a_fork() {
         let calls = std::cell::Cell::new(0);
@@ -2279,9 +1985,8 @@ mod tests {
         assert!(compared.someone_is_behind);
     }
 
-    /// Safe next to one node and unsafe next to another is unsafe, and the report acts on one
-    /// standing per repository. Asserted in both orders, because a single case passes just as
-    /// well against "the last one wins" or "the first one wins" with the fold doing nothing.
+    /// Unsafe next to any node is unsafe. Both orders are asserted, because one order passes
+    /// against "first wins" or "last wins" with the fold doing nothing.
     #[test]
     fn the_node_that_most_needs_acting_on_is_the_one_reported() {
         for order in [[Answer::No, Answer::Yes], [Answer::Yes, Answer::No]] {
@@ -2294,11 +1999,9 @@ mod tests {
         }
     }
 
-    /// The fact that has no other home. A node behind us and a node holding refs we do not
-    /// have are facts about different nodes, and the standing can only carry one of them:
-    /// folded, the repository reports as the fork hazard alone and drops out of the "push this
-    /// first" list, so work whose only other copy is the archive is never named. Fetching
-    /// later recovers a missed fork; it does not recover work that exists nowhere.
+    /// A node behind and a node holding other refs are facts about different nodes. The
+    /// standing carries the fork, and `someone_is_behind` keeps the work whose only other copy
+    /// is the archive, which fetching later never recovers.
     #[test]
     fn work_a_node_is_behind_on_is_still_a_fact_beside_a_node_holding_other_refs() {
         let mut answers = [Answer::Yes, Answer::No].into_iter();
@@ -2314,9 +2017,8 @@ mod tests {
         );
     }
 
-    /// Two spellings of one commit are one commit. `names_an_oid` accepts either case and git
-    /// resolves either, so a byte-exact filter kept an uppercase row as something to compare
-    /// and came back with "push this first" about work that was already there.
+    /// `names_an_oid` accepts either case and git resolves either, so a byte-exact filter
+    /// would report work already there as unpushed.
     #[test]
     fn one_commit_spelled_in_two_cases_is_not_two_commits() {
         let evidence = evidence_against(
@@ -2328,11 +2030,8 @@ mod tests {
         assert_eq!(evidence.rows().count(), 0);
     }
 
-    /// The reading a row that agrees can never bear. A row agreeing with the archive is as
-    /// likely to be one that was already in the table as a peer's first word, and nothing in
-    /// the table tells them apart: heartwood rewrites a peer's row only when the peer
-    /// announces a different head. Counted as the network agreeing, that is the archive
-    /// compared with itself a second time.
+    /// An agreeing row may be the archive's own, because heartwood rewrites a peer's row only
+    /// when the peer announces a different head. Counting it compares the archive to itself.
     #[test]
     fn a_row_that_agrees_with_the_archive_is_not_evidence_about_the_network() {
         let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('a')])), Before::Held(None));
@@ -2340,9 +2039,8 @@ mod tests {
         assert_eq!(evidence.rows().count(), 0);
     }
 
-    /// And the reading a row that differs always bears, whenever it was written. Gated on a
-    /// timestamp instead, a seed that already held work this archive was missing reported as
-    /// "could not be compared" and the run exited 0 over a live fork hazard.
+    /// A differing row is evidence however old it is. Filtered by timestamp, a seed holding
+    /// work this archive lacks would read "could not be compared" at exit 0.
     #[test]
     fn a_row_that_differs_is_evidence_whenever_the_node_wrote_it() {
         let evidence = evidence_against(
@@ -2357,9 +2055,8 @@ mod tests {
         );
     }
 
-    /// `rad::is_identifier` takes both spellings, so a manifest can carry either, and the node
-    /// writes only the prefixed one. Matched exactly, a bare-rid archive found no row for any
-    /// repository and every one of them was compared against nothing at all.
+    /// A manifest can carry either spelling, and the node writes only the prefixed one, so an
+    /// exact match would compare a bare-rid archive against nothing.
     #[test]
     fn a_repository_id_without_its_prefix_still_finds_the_row_the_node_wrote() {
         let held = BTreeMap::from([("rad:z6MkAAA".to_string(), rows(&[oid('b')]))]);
@@ -2380,13 +2077,13 @@ mod tests {
         let compared = classify(&evidence, asked(Answer::No, &calls)).expect("no head reaches git");
 
         assert_eq!(compared.standing, Standing::NothingSaysOtherwise);
-        // Two oids that are the same string are the same commit, and asking `git` to walk
-        // between them is a process spawned per repository to learn nothing.
+        // Two identical oids are one commit, and asking `git` to walk between them spawns a
+        // process per repository to learn nothing
         assert_eq!(calls.get(), 0, "git was asked about two identical oids");
     }
 
-    /// A row shaped like a flag would be read as one by `merge-base`, which takes no `--`.
-    /// Not the fork verdict either: a database this tool cannot read is not evidence of one.
+    /// `merge-base` takes no `--`, so a row shaped like a flag must never reach it. An
+    /// unreadable database is no evidence of a fork either.
     #[test]
     fn a_recorded_head_that_is_not_an_oid_is_an_unknown_and_never_reaches_git() {
         let calls = std::cell::Cell::new(0);
@@ -2399,11 +2096,9 @@ mod tests {
         assert_eq!(calls.get(), 0, "git was handed a value out of a database");
     }
 
-    /// The instruction that must never come off a stale row. A node recorded as behind was
-    /// behind on the day the backup was taken, and it has had every day since to catch up and
-    /// pass this copy; heartwood writes nothing when a peer still agrees, so no announcement
-    /// corrects the row. Acted on, it prints `rad sync --announce` beside a repository the
-    /// network may be months ahead of, which is the command that publishes the fork.
+    /// A node recorded as behind on the backup's day has had every day since to pass this
+    /// copy, and heartwood writes nothing while a peer agrees. `rad sync --announce` beside it
+    /// could publish the fork.
     #[test]
     fn a_node_the_archive_recorded_as_behind_is_never_a_reason_to_push() {
         let calls = std::cell::Cell::new(0);
@@ -2414,8 +2109,7 @@ mod tests {
         assert!(!compared.someone_is_behind);
     }
 
-    /// And the reading the same row still bears. A node that once held refs signed under this
-    /// key that this copy lacks still holds them: nothing about a restore makes that untrue,
+    /// A node that once held refs signed under this key that this copy lacks still holds them,
     /// so the fork hazard is taken from a row of any age.
     #[test]
     fn a_node_the_archive_recorded_holding_other_refs_is_still_the_fork_hazard() {
@@ -2426,10 +2120,8 @@ mod tests {
         assert_eq!(compared.standing, Standing::PeerHoldsOther);
     }
 
-    /// Which side of the split a row lands on is decided by the archive's own copy of the
-    /// table, read before the node this restore starts can write to it. No clock is consulted,
-    /// because the column carries the announcing node's and heartwood replays old gossip under
-    /// its old stamp.
+    /// The home's copy of the table, read before this restore's node can write, decides the
+    /// split. No clock is consulted, because heartwood replays old gossip under old stamps.
     #[test]
     fn a_row_the_archive_brought_is_told_from_one_that_arrived_during_the_restore() {
         let now = rows(&[oid('b'), oid('c')]);
@@ -2441,9 +2133,8 @@ mod tests {
         assert_eq!(evidence.came_with_the_archive, BTreeSet::from([oid('b')]));
     }
 
-    /// With no baseline to read, nothing can be shown to have arrived during this run, and
-    /// the reading that survives that is the one that claims less. Defaulted the other way,
-    /// an unreadable record silently restored the advice this whole split exists to withhold.
+    /// With no baseline, no row can be shown to have arrived during this run, so every row
+    /// takes the reading that claims less and "push this first" stays withheld.
     #[test]
     fn an_unreadable_baseline_leaves_every_row_one_that_was_already_there() {
         let evidence = evidence_against(&oid('a'), Some(&rows(&[oid('b')])), Before::Unknown);
@@ -2452,11 +2143,9 @@ mod tests {
         assert_eq!(evidence.came_with_the_archive, BTreeSet::from([oid('b')]));
     }
 
-    /// A pack that arrived truncated. `cat-file -e` answers "absent" for every object in it,
-    /// so a probe that asked only about the peer's head read a damaged store as a node holding
-    /// refs this copy does not have: exit 3, and a paragraph telling somebody their identity
-    /// may have forked, over a repository nobody else had touched. The archived head is the
-    /// control, because a restore that worked put it there.
+    /// A truncated pack makes `cat-file -e` answer "absent" for every object in it. The
+    /// archived head is the control, so a damaged store is never read as a peer holding refs
+    /// this copy lacks.
     #[test]
     fn a_store_that_cannot_produce_our_own_head_either_is_a_broken_store_and_not_a_fork() {
         let git = Git::new();
@@ -2469,8 +2158,8 @@ mod tests {
             .is_ancestor(&git_dir, &peer, &archived)
             .expect("git ran");
         assert!(matches!(asked, Answer::CouldNotAsk { .. }), "{asked:?}");
-        // The premise: the repository itself opens, and every object in it stops answering,
-        // ours included. The control is what tells that from a node holding something else.
+        // The premise is a repository that opens while every object in it, the archived head
+        // included, stops answering
         assert_eq!(
             git.holds_object(&git_dir, &peer).expect("git ran"),
             Answer::No
@@ -2487,9 +2176,8 @@ mod tests {
         );
     }
 
-    /// A repository is reported as one standing, and these are the pairs whose order decides
-    /// which. Written out rather than left to `severity`'s arms, because reordering those is a
-    /// one-character edit that no other test would notice.
+    /// The pairs whose order decides a repository's one reported standing, spelled out because
+    /// reordering `severity`'s arms is a one-character edit no other test notices.
     #[test]
     fn the_standing_that_most_needs_acting_on_wins_every_pair() {
         use Standing::*;
@@ -2512,11 +2200,9 @@ mod tests {
         }
     }
 
-    /// A record that was read and holds nothing against this copy is exactly what the standing
-    /// claims, and no more. Called `CouldNotAsk` instead, a healthy restore of a home whose
-    /// peers all still agree reported every repository uncompared and sent the user to run a
-    /// fetch that had just run: heartwood writes no row for a peer that agrees, so no fetch
-    /// and no amount of waiting was ever going to produce one.
+    /// A record that was read and holds nothing against this copy earns
+    /// `NothingSaysOtherwise`. Heartwood writes no row for a peer that agrees, so a
+    /// `CouldNotAsk` here would send every healthy restore to rerun a pointless fetch.
     #[test]
     fn a_record_holding_nothing_against_this_copy_is_not_an_unknown() {
         let calls = std::cell::Cell::new(0);
@@ -2526,11 +2212,7 @@ mod tests {
         assert_eq!(calls.get(), 0);
     }
 
-    /// A repository this copy holds every object of, over which `git` still could not answer,
-    /// is a fact about this machine. The probe this replaced asked whether the archived head
-    /// reached itself, which `merge-base --is-ancestor A A` answers on equality without
-    /// opening a single object, so it said yes over any repository at all and the run reported
-    /// somebody's own identity as forked.
+    /// A `git` failure over an object this copy holds is a fact about this machine.
     #[test]
     fn a_git_failure_over_an_object_this_copy_holds_says_nothing_about_a_peer() {
         let git = Git::new();
@@ -2538,7 +2220,7 @@ mod tests {
         let scratch = crate::key::tests::TestScratch::create("restore-git-failure-held");
         let (git_dir, _, head) = crate::git::tests::two_commits(&scratch);
         // An object that is here and is not a commit, which `merge-base` refuses with the
-        // same exit 128 it gives for an object that is not here at all.
+        // same exit 128 it gives for an object that is not here at all
         let tree = crate::git::tests::rev_parse(&git_dir, "HEAD^{tree}");
 
         let asked = git.is_ancestor(&git_dir, &tree, &head).expect("git ran");
@@ -2553,9 +2235,8 @@ mod tests {
         );
     }
 
-    /// And the failure that is a fact about a peer. Our own namespace is the one thing a pull
-    /// never brings back, so a sigrefs commit some node announced and this disk does not hold
-    /// is work signed under this key that is not here.
+    /// A pull never brings back the local peer's own namespace, so a sigrefs commit a node
+    /// announced and this disk lacks is work signed under this key that is missing here.
     #[test]
     fn a_head_this_copy_does_not_hold_at_all_is_a_peer_holding_refs_that_are_missing_here() {
         let git = Git::new();
@@ -2571,9 +2252,8 @@ mod tests {
         assert_eq!(resolved, Answer::No);
     }
 
-    /// The probe reads a failure and nothing else. Run over an answer `git` gave, it would
-    /// overturn it: the head below is one this copy does not hold, so a probe that reached it
-    /// would turn "that node is behind us" into the fork verdict.
+    /// The probe reads only failures. Over an answer `git` gave, it would turn "that node is
+    /// behind us" into the fork verdict, since the head below is not on this disk.
     #[test]
     fn an_answer_git_gave_is_never_second_guessed() {
         let git = Git::new();
@@ -2611,10 +2291,8 @@ mod tests {
         }
     }
 
-    /// The run that gave up before asking anybody still says which repositories nobody could
-    /// ever have answered about. Collapsed into one standing, a home of three private
-    /// repositories was told 3 of 3 comparisons had failed and sent to run a fetch that fails
-    /// for those by design.
+    /// A run that gave up before asking still says which repositories no node could hold, so a
+    /// home of private repositories is not told every comparison failed.
     #[test]
     fn a_repository_nobody_could_hold_is_not_reported_as_a_comparison_that_failed() {
         let restored = [
@@ -2635,10 +2313,8 @@ mod tests {
         assert!(given_up.ahead_of_someone.is_empty());
     }
 
-    /// The hazard that used to be reported as nothing to compare, at exit 0. A repository
-    /// first written in after the backup was taken has no signed refs of ours in the archive
-    /// and every reason to have them on a seed; skipping it on that basis read a fact about
-    /// the archive as one about the network, over the exact case this command exists for.
+    /// A repository first written after the backup has no signed refs of this identity in the
+    /// archive and may have them on a seed, so any row for it is the fork hazard.
     #[test]
     fn a_node_holding_refs_for_a_repository_the_archive_signed_nothing_in_is_the_fork_hazard() {
         let recorded = BTreeSet::from([oid('b')]);
@@ -2654,9 +2330,8 @@ mod tests {
         );
     }
 
-    /// And such a repository reaches the fetch, and is an unknown rather than a nothing when
-    /// the run gives up before asking. Asserted against `no_node_can_hold` itself, because
-    /// that is the function the skip lived in.
+    /// Such a repository reaches the fetch, and reads as an unknown when the run gives up
+    /// before asking. Asserted against `no_node_can_hold`, which decides the skip.
     #[test]
     fn a_repository_the_archive_signed_nothing_in_is_still_asked_about() {
         let theirs = repo("rad:zTheirs", "public", &[("z6MkOther", &oid('a'))]);
@@ -2670,9 +2345,8 @@ mod tests {
         );
     }
 
-    /// A table this build cannot read comes back empty, and an empty record is the sentence
-    /// "no other node has reported holding anything else". Read as one, a schema that moved on
-    /// would reassure every reader of it about every repository they have.
+    /// A table this build cannot read comes back empty, and an empty record would reassure
+    /// the user about every repository.
     #[test]
     fn a_sync_table_this_build_cannot_read_is_not_a_network_holding_nothing() {
         let scratch = crate::key::tests::TestScratch::create("restore-sync-schema");
@@ -2687,8 +2361,8 @@ mod tests {
         let _ = crate::db::drain_schema_drift();
         assert!(read_what_others_hold(&term, &node_db, OWN_NODE).is_none());
 
-        // And the same read against the schema this build does follow, so that what the test
-        // above proves is the drift and not the fixture.
+        // The same read on the schema this build follows, so the case above proves the drift
+        // and not the fixture
         let readable = scratch.path_of("readable.db");
         rusqlite::Connection::open(&readable)
             .expect("scratch database opens")
@@ -2705,9 +2379,8 @@ mod tests {
         );
     }
 
-    /// A table read perfectly whose repository ids are spelled some way this build does not
-    /// look up. Every lookup misses, and a miss is the sentence that reassures, so the whole
-    /// home would have been reported clear on the strength of a table nobody could match.
+    /// A table whose repository ids this build cannot match misses every lookup, and a miss
+    /// would report the whole home clear.
     #[test]
     fn a_record_this_build_cannot_match_a_repository_in_is_not_a_network_holding_nothing() {
         let scratch = crate::key::tests::TestScratch::create("restore-sync-spelling");
@@ -2737,8 +2410,7 @@ mod tests {
     #[test]
     fn a_repository_config_out_of_an_archive_gives_up_everything_git_decides_here() {
         // The five settings `rad` leaves in `storage/<rid>/config`. The three under `[core]`
-        // are what `git init` works out about this disk, so the restoring machine's answer is
-        // the one that is true now and the archive's is dropped without a word about it.
+        // describe this disk, so the archive's values are dropped without a word.
         let real = listing(&[
             ("core.repositoryformatversion", "0"),
             ("core.filemode", "true"),
@@ -2754,16 +2426,15 @@ mod tests {
                 ("user.email".to_string(), "maninak@z6MkvAFB".to_string()),
             ]
         );
-        // Nothing named: an honest archive carries exactly these, and a warning that fires on
-        // every repository of every recovery is one nobody reads by the fifth.
+        // An honest archive carries exactly these, so a warning here would fire on every
+        // repository of every recovery
         assert!(allowed.dropped.is_empty(), "{:?}", allowed.dropped);
     }
 
     #[test]
     fn a_repository_config_cannot_carry_a_setting_git_would_run() {
-        // Every one of these makes git run a command on an ordinary operation in the
-        // repository, and all of them arrive in a file somebody else wrote. Spelled as git
-        // reports them, which is how the reader sees them: lowercased, subsection and all.
+        // Each of these makes git run a command on an ordinary operation. They are spelled as
+        // git lists them, lowercased and with subsections.
         let hostile = listing(&[
             ("core.fsmonitor", "/tmp/pwn"),
             ("core.pager", "/tmp/pwn"),
@@ -2778,7 +2449,7 @@ mod tests {
             allowed.kept,
             vec![("user.name".to_string(), "kept".to_string())]
         );
-        // Named, so the warning can say what was left out rather than that something was.
+        // Named, so the warning says what was left out
         assert_eq!(
             allowed.dropped,
             vec![
@@ -2794,9 +2465,8 @@ mod tests {
 
     #[test]
     fn a_setting_with_no_value_is_left_out_rather_than_read_as_an_empty_one() {
-        // `[user] name` with nothing after it. Git prints the name alone and reads it as a
-        // true boolean; written back as an empty string it would be a repository whose owner
-        // has no name, and `git config --bool` would answer false to a caller asking.
+        // `[user] name` with no value, which git lists as a name alone and reads as true.
+        // Written back as an empty string, it would name nobody and read as false.
         let odd = "user.name\0user.email\nkept\0";
         let allowed = allowed_config(odd);
         assert_eq!(
@@ -2808,8 +2478,7 @@ mod tests {
 
     #[test]
     fn a_second_displaced_key_does_not_take_the_note_describing_the_first() {
-        // `radicle.retired` from one restore and `radicle.retired.2` from the next both sit in
-        // the same directory, and whoever finds them is looking for which is which.
+        // Both retirements sit in one directory, and the reader needs to tell them apart
         let first = "the key at keys/radicle is now radicle.retired.\n";
         let second = "the key at keys/radicle is now radicle.retired.2.\n";
         let both = appended(&appended("", first), second);
@@ -2836,9 +2505,8 @@ mod tests {
         }
     }
 
-    /// The two lists give opposite instructions, and this one was named in both. `rad sync
-    /// --announce` came first in the output, so the reader was handed the command that
-    /// publishes the fork before reaching the paragraph telling them not to write at all.
+    /// The two lists give opposite instructions. A repository at risk handed `rad sync
+    /// --announce` would publish the fork before the reader reached the warning.
     #[test]
     fn a_repository_at_risk_is_never_also_one_to_push_first() {
         let found = reconciled(&[("rad:zAAA", Standing::PeerHoldsOther)], &["rad:zAAA"]);
@@ -2848,8 +2516,8 @@ mod tests {
         assert!(verdict.ahead.is_empty(), "{:?}", verdict.ahead);
     }
 
-    /// A repository some node is behind on reports as the unknown when another node said
-    /// nothing usable, and the work it holds that nowhere else does would then never be named.
+    /// A repository one node is behind on stays in the push-first list when another node's
+    /// answer is unknown.
     #[test]
     fn work_no_node_reported_holding_is_still_pushed_first_when_the_standing_is_unknown() {
         let found = reconciled(&[("rad:zAAA", Standing::CouldNotAsk)], &["rad:zAAA"]);
@@ -2858,9 +2526,8 @@ mod tests {
         assert_eq!(verdict.ahead, vec!["rad:zAAA"]);
     }
 
-    /// The sentence is about the whole home, so one repository must not carry it for twenty.
-    /// Printed right under the line saying most of them were never compared, it read as a
-    /// partial pass over exactly the run that established least.
+    /// The sentence covers the whole home, so one compared repository must not carry it over
+    /// twenty that were not.
     #[test]
     fn nothing_reported_otherwise_is_said_only_once_everything_was_compared() {
         let some_unknown = reconciled(
@@ -2876,9 +2543,8 @@ mod tests {
         assert!(Verdict::of(&every_one_compared).nothing_was_reported_otherwise);
     }
 
-    /// A home of only private repositories used to get a restore that mentioned the network
-    /// nowhere at all: nothing at risk, nothing ahead, nothing unchecked, and no line saying
-    /// why. The standing exists; it was never read out.
+    /// A home of only private repositories names them, so the report still mentions the
+    /// network and says why nothing was compared.
     #[test]
     fn repositories_no_node_can_ever_hold_are_named_rather_than_passed_over() {
         let found = reconciled(
@@ -2895,9 +2561,7 @@ mod tests {
         );
     }
 
-    /// Nothing was held against anything: no node can hold these and none was asked. Gated on
-    /// the standings merely being there, the line printed over a home of private repositories
-    /// as though the network had been consulted about them.
+    /// No node can hold these and none was asked, so the line must not imply a network check.
     #[test]
     fn nothing_reported_otherwise_is_not_said_when_nothing_was_ever_compared() {
         let found = reconciled(&[("rad:zAAA", Standing::NothingToCompare)], &[]);

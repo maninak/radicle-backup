@@ -20,8 +20,7 @@ use crate::error::{Error, Result};
 use crate::home::Home;
 use crate::term::Term;
 
-/// What every verb needs: somewhere to print, a home to work on, and the flags that outlive
-/// the choice of verb.
+/// The terminal, the home and the global flags every verb works with.
 pub struct Ctx {
     pub term: Term,
     pub home: Home,
@@ -46,11 +45,7 @@ impl Ctx {
     }
 }
 
-/// The passphrase for opening an archive, if that archive wants one.
-///
-/// One place, because every verb that opens an archive carried its own copy of this, and a
-/// change to the wording or to where a passphrase may come from had to land in each copy or
-/// the verbs would start asking differently from one another.
+/// Reads the passphrase for opening `archive`, if that archive wants one.
 pub fn read_archive_passphrase(
     ctx: &Ctx,
     archive: &Path,
@@ -67,14 +62,13 @@ pub fn read_archive_passphrase(
     )?))
 }
 
-/// Where this identity's archives are expected to live, given every source but the
-/// environment. Pure, so the precedence can be checked without setting a variable in a
-/// process the test suite shares with every other test.
+/// Where this identity's archives are expected to live, from every source but the environment.
 ///
-/// In order: what the caller said, then RAD_BACKUP_DIR, then wherever the last archive
-/// actually went, then the working directory. The remembered directory matters most: someone
-/// who has taken a backup once has already answered this question, and asking again by way of
-/// an empty listing is a worse answer than using what they said.
+/// The order is the flag, then `RAD_BACKUP_DIR`, then the directory the last archive went to,
+/// then the working directory.
+///
+/// Takes `RAD_BACKUP_DIR` as an argument, so a test need not set a variable every other test
+/// in the process sees. [`archive_dir_from_env`] reads it.
 pub fn archive_dir_given(
     flag: Option<&Path>,
     variable: Option<PathBuf>,
@@ -97,7 +91,7 @@ pub fn archive_dir_given(
     PathBuf::from(".")
 }
 
-/// The same answer, with `RAD_BACKUP_DIR` read from the environment.
+/// Resolves [`archive_dir_given`] with `RAD_BACKUP_DIR` read from the environment.
 pub fn archive_dir_from_env(flag: Option<&Path>, record: Option<&crate::state::Record>) -> PathBuf {
     archive_dir_given(
         flag,
@@ -106,9 +100,10 @@ pub fn archive_dir_from_env(flag: Option<&Path>, record: Option<&crate::state::R
     )
 }
 
-/// The archive a command was pointed at, or the newest one of this identity that can be
-/// found. Says which it chose, because a command that reads a file the user did not name has
-/// to be obvious about which file that was.
+/// The archive a command was pointed at, or else this identity's newest one.
+///
+/// Prints the newest archive's path, because a command reading a file the user did not name
+/// has to say which file it read.
 pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
     if let Some(path) = given {
         return Ok(path.to_path_buf());
@@ -135,13 +130,10 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
 
 /// A directory for working files, removed when it goes out of scope.
 ///
-/// Snapshots of databases and freshly built git bundles have to exist as files before they can
-/// be added to a tar, because tar needs a size before it takes content. They are put next to
-/// whatever the command is producing, the archive for `backup` and the home for `restore`, on
-/// a filesystem the user already chose, rather than in a shared temporary directory where a
-/// private repository's contents would be a surprise. `backup --stdout` produces no file to
-/// sit beside, so it alone falls back to the system temporary directory; `--scratch-dir`
-/// overrides either.
+/// Database snapshots and git bundles become files here first, because tar needs a size before
+/// it takes content. Callers create it beside their output, on a filesystem the user chose, so
+/// a private repository stays out of a shared temporary directory. `backup --stdout` has no
+/// output directory, so it uses the system's temporary one unless `--scratch-dir` is given.
 pub struct Scratch {
     path: PathBuf,
 }
@@ -149,11 +141,9 @@ pub struct Scratch {
 impl Scratch {
     pub fn create(parent: &Path) -> Result<Self> {
         let path = parent.join(format!(".rad-backup-{}", std::process::id()));
-        // Owner-only from the moment it exists, and never a directory that was already
-        // there: the name has a process id in it, which is guessable, and a working directory
-        // somebody else made first would hold a private repository's contents under their
-        // permissions. A leftover from a crashed run with this pid lands here too, which is
-        // why the error names the path to remove.
+        // The directory is owner-only from creation and never reused, because its name holds
+        // a guessable pid and a directory someone else made first would expose its contents.
+        // A leftover from a crashed run with this pid is refused too, so the error names it.
         crate::perms::create_private_dir(&path).map_err(|e| match e {
             Error::Io { .. } if path.exists() => Error::refused(
                 format!("the working directory {} already exists", path.display()),
@@ -172,8 +162,8 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_dir_all(&self.path) {
-            // Leaving working files behind can mean leaving repository data behind, so it is
-            // said out loud even though there is nothing left to do about it here.
+            // Working files can hold repository data, so a failed removal is reported though
+            // nothing can be done about it here
             eprintln!(
                 "! could not remove the working directory {}: {e}. It may hold copies of your \
                  data. Delete it yourself",
@@ -183,20 +173,14 @@ impl Drop for Scratch {
     }
 }
 
-/// Substitute `{{KEY}}` markers in one of the shipped documents, in ONE pass over it.
+/// Substitutes `{{KEY}}` markers in `template` in one pass, leaving unknown ones as written.
 ///
-/// Sequential `replace` calls read their own output, so a value containing a marker was
-/// expanded by a later key. An alias of `{{SECRET}}`, which arrives in a `config.json` copied
-/// verbatim out of somebody else's archive, put the 24-word mnemonic in the title of the
-/// recovery sheet. Scanning once means an inserted value is never looked at again, so no
-/// value can name another key, whatever it holds.
-///
-/// Sized for the template AND every value before the first byte goes in, because one of the
-/// documents this fills is the recovery sheet: growing the buffer frees the old one with a
-/// partial copy of the key still in it, which the `Zeroizing` around the result never reaches.
-/// An over-estimate, since a substituted marker also removes the `{{KEY}}` it replaced, and a
-/// buffer larger than needed is the harmless direction.
+/// An inserted value is never scanned again, so a value such as an alias of `{{SECRET}}`
+/// cannot expand to another key.
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
+    // The buffer is sized up front, because growing it frees the old one with a partial copy
+    // of the key in it, out of reach of the `Zeroizing` around the result. The estimate runs
+    // high, which is harmless.
     let mut filled = String::with_capacity(room_for(template, values));
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -210,8 +194,6 @@ pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
                 filled.push_str(&rest[..start]);
                 filled.push_str(value);
             }
-            // An unknown marker is left as it was written. A template carrying `{{` for its
-            // own reasons is not this function's business to mangle.
             None => filled.push_str(&rest[..start + 2 + end + 2]),
         }
         rest = &after[end + 2..];
@@ -222,10 +204,8 @@ pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
 
 /// How much room [`fill`] needs before it writes anything.
 ///
-/// Each value is counted once per marker that asks for it, not once: `{{ALIAS}}` is in the
-/// recovery sheet twice and `{{FILE}}` is in the sidecar four times, so counting a value once
-/// leaves the buffer short of an alias long enough to matter, and it grows in the middle of
-/// the document, freeing a heap block that already holds the key and the QR code.
+/// Each value counts once per marker that asks for it, because `{{ALIAS}}` appears twice in
+/// the recovery sheet, and a buffer that grows midway frees a block holding the key.
 fn room_for(template: &str, values: &[(&str, &str)]) -> usize {
     template.len()
         + values
@@ -237,11 +217,9 @@ fn room_for(template: &str, values: &[(&str, &str)]) -> usize {
             .sum::<usize>()
 }
 
-/// Refuse a retention of zero, wherever it was spelled.
+/// Refuses a retention of zero, wherever it was spelled.
 ///
-/// `prune` refused it and `--keep` did not, so one number meant "refuse" on one verb and
-/// "delete every archive but the one just written" on the other. Both read `RAD_BACKUP_KEEP`
-/// and `schedule` writes that file, so the divergence reached an unattended timer.
+/// A zero on a backup run would delete every archive but the one just written.
 pub fn refuse_keep_zero(keep: usize) -> Result<()> {
     if keep == 0 {
         return Err(Error::refused(
@@ -252,7 +230,7 @@ pub fn refuse_keep_zero(keep: usize) -> Result<()> {
     Ok(())
 }
 
-/// A UTC timestamp for the manifest: RFC 3339, to the second.
+/// Formats `at` as an RFC 3339 UTC timestamp, to the second.
 pub fn rfc3339_stamp(at: jiff::Timestamp) -> String {
     at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
@@ -261,10 +239,6 @@ pub fn rfc3339_stamp(at: jiff::Timestamp) -> String {
 mod tests {
     use super::*;
 
-    /// Several sources for one answer, and the order between them decides whether a verb
-    /// looks where the last archive actually went or at the working directory. Untestable
-    /// while the variable was read inside the function: setting one for a test sets it for
-    /// every other test in the process.
     #[test]
     fn where_archives_live_prefers_the_flag_then_the_variable_then_where_the_last_one_went() {
         let mut record = crate::state::Record {
@@ -300,8 +274,8 @@ mod tests {
             PathBuf::from("/mnt/backups")
         );
 
-        // An archive that went to stdout, and one whose recorded path has no directory in it.
-        // Neither names a directory, so neither may stand in for one.
+        // Neither an archive that went to stdout nor one recorded without a directory names a
+        // directory, so neither stands in for one
         record.archive = None;
         assert_eq!(
             archive_dir_given(None, None, Some(&record)),
@@ -324,7 +298,7 @@ mod tests {
     #[test]
     fn a_value_cannot_name_another_key() {
         // The alias arrives in a `config.json` that a restore copies verbatim out of somebody
-        // else's archive, and `paper` puts it in the title of a sheet printed next to the key.
+        // else's archive, and `paper` puts it in the title of a sheet printed next to the key
         let filled = fill(
             "{{ALIAS}} holds {{SECRET}}",
             &[("ALIAS", "{{SECRET}}"), ("SECRET", "the 24 words")],
@@ -334,9 +308,6 @@ mod tests {
 
     #[test]
     fn a_document_is_sized_for_every_marker_that_asks_for_the_same_value() {
-        // The sheet `paper` prints carries `{{ALIAS}}` in its title and again in its table,
-        // and the sidecar carries `{{FILE}}` four times. Room for one copy is room the key
-        // and the QR outgrow halfway down the document.
         let template = "{{ALIAS}} .. {{ALIAS}}";
         let values = [("ALIAS", "a name long enough to matter")];
         assert!(room_for(template, &values) >= fill(template, &values).len());
@@ -344,9 +315,8 @@ mod tests {
 
     #[test]
     fn a_document_is_sized_without_counting_a_value_no_marker_asks_for() {
-        // The over-estimate is deliberate but it is not unbounded: a value passed to a
-        // template that does not name it is a marker count of zero, so the sheet is not
-        // sized for a mnemonic it never prints.
+        // A value no marker asks for adds nothing, so the sheet is not sized for a mnemonic it
+        // never prints
         assert_eq!(room_for("nothing here", &[("SECRET", "the 24 words")]), 12);
     }
 
@@ -376,8 +346,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&parent);
         std::fs::create_dir_all(&parent).expect("the parent is creatable");
 
-        // What an attacker who guessed the pid would leave behind: the directory already
-        // there, with permissions of their choosing.
+        // An attacker who guessed the pid leaves the directory already there, with permissions
+        // of their choosing
         let squatted = parent.join(format!(".rad-backup-{}", std::process::id()));
         std::fs::create_dir_all(&squatted).expect("the squatted directory is creatable");
         crate::perms::set_mode(&squatted, 0o777).expect("its mode is settable");

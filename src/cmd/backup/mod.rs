@@ -1,8 +1,4 @@
-//! Creating an archive.
-//!
-//! The order of work is the order of risk. Everything that can fail cheaply (reading the key,
-//! working out the inventory, asking for a passphrase) happens before a single byte is
-//! written, so that a run that is going to fail does so before it has touched anything.
+//! Creating an archive, with every cheap failure checked before a byte is written.
 
 use std::collections::BTreeSet;
 use std::io::IsTerminal;
@@ -36,48 +32,39 @@ const RESTORE_DOC: &str = include_str!("../../../assets/RESTORE.md");
 const RESTORE_SCRIPT: &str = include_str!("../../../assets/restore.sh");
 const SIDECAR: &str = include_str!("../../../assets/sidecar.txt");
 
-/// Permissions for the restore script, which is meant to be run straight out of the archive.
+/// The mode of the restore script, executable so it runs straight out of the archive.
 const SCRIPT_MODE: u32 = 0o755;
 
 /// What a run produced, and whether it produced all of it.
 ///
-/// `is_incomplete` exists because a backup that lost a repository still writes a usable
-/// archive: refusing the whole run over one damaged repository is worse for the user than
-/// carrying the rest. So the loss travels out as a flag and becomes exit 3, which is what an
-/// unattended timer can actually see. Without it, `rad backup` exited 0 on a run that dropped
-/// the one repository nothing else has a copy of.
+/// A run that lost a repository still writes a usable archive, and `is_incomplete` turns the
+/// loss into exit 3, which an unattended timer can see.
 pub struct Outcome {
     pub path: Option<PathBuf>,
     pub is_incomplete: bool,
 }
 
-/// Why an archive is being written, which decides what its manifest says about the fate of the
-/// machine writing it.
-///
-/// An enum rather than a flag on `Create`, because it is not something a user types: it is
-/// which of this tool's own commands is asking, and `move` is the only one that answers
-/// differently.
+/// Why an archive is being written, which decides what its manifest says about the source
+/// machine's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
     /// An ordinary backup. The key stays on this machine, and so may a node running it.
     Backup,
-    /// A move. This machine's key is retired once the archive is verified, so the home
-    /// restored from it is meant to be the only one holding the identity.
+    /// A move. This machine's key is retired once the archive is verified, so the restored
+    /// home is meant to be the only one holding the identity.
     Move,
-    /// A move under `--keep-source`, where this machine keeps its key. The archive says so,
-    /// because the home restored from it has to be warned about the copy left behind: written
-    /// as a plain `Move` it told the far end "a move retires the key on the machine it came
-    /// from" about a machine that still had it, which is the exact fork this tool exists to
-    /// prevent, announced as safe.
+    /// A move under `--keep-source`, where this machine keeps its key.
+    ///
+    /// The archive records that, so the restored home warns about the copy left behind.
+    /// Recorded as a plain `Move`, it would announce a forked identity as safe.
     MoveKeepingSource,
 }
 
 impl Purpose {
-    /// Whether the machine this archive is being taken from gives up its key.
+    /// Whether the source machine gives up its key.
     ///
-    /// Its own function because the answer is written into the archive and read on another
-    /// machine, months later, to decide whether to warn somebody that two homes hold one
-    /// identity. Nothing else in a manifest is acted on that far from where it was written.
+    /// The answer is written into the archive and read on another machine, to decide whether
+    /// to warn that two homes hold one identity.
     fn retires_key(self) -> bool {
         match self {
             Self::Backup | Self::MoveKeepingSource => false,
@@ -112,15 +99,13 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         ));
     }
 
-    // Before anything is stopped or written: a retention that would empty the directory is a
-    // refusal, not something to discover after the archive is on disk.
+    // A retention that would empty the directory is refused before anything is touched
     if let Some(keep) = args.keep {
         crate::cmd::refuse_keep_zero(keep)?;
     }
 
-    // Asked for before the node is stopped, not after. Asking afterwards left the node down
-    // for as long as it took somebody to find their passphrase, and a run they then abandoned
-    // had stopped it for nothing. A dry run writes no archive, so it is never asked.
+    // The passphrase is asked before the node stops, so finding it never keeps the node down.
+    // A dry run writes no archive and is never asked.
     let encryption = match args.dry_run {
         true => None,
         false => Some(ask_encryption(ctx, args)?),
@@ -142,15 +127,14 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         &policies,
         &routing,
     )?;
-    // What this run has to say at the end, and the archive keeps. Anything already printed as
-    // it happened goes into `said` instead, so the closing report does not repeat it.
+    // The warnings printed at the end and kept in the archive. A warning already printed as it
+    // happened goes into `said`, so the closing report does not repeat it.
     let mut warnings = inventory.warnings.clone();
 
     if args.dry_run {
         dry_run(ctx, &inventory, tier, selection, &warnings)?;
-        // `quiesce` already ran, so a dry run with `--stop-node` really did stop the node.
-        // Put it back before returning, or `--dry-run` leaves the thing it promised not to
-        // touch switched off.
+        // `quiesce` already ran, so a dry run with `--stop-node` did stop the node, and the
+        // node must start again before returning
         node.restart();
         return Ok(Outcome {
             path: None,
@@ -160,8 +144,8 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
 
     let encryption = encryption.expect("a run that is not a dry run has returned by now");
     let now = jiff::Timestamp::now();
-    // Read once. Read twice, the archive's file name and the alias inside its manifest came
-    // from two reads of a `config.json` somebody can edit between them, and the two disagreed.
+    // The alias is read once, so the file name and the manifest cannot disagree after an edit
+    // to `config.json` between two reads
     let alias = home.read_alias()?;
     let destination = prepare(
         args,
@@ -296,9 +280,8 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
         SCRIPT_MODE,
     )?;
 
-    // A count this archive records as zero because the table it came from has been renamed is
-    // a number a restore would otherwise take at face value. Carried in the manifest because
-    // the reader of an archive is not the person who took it.
+    // A count recorded as zero because its table was renamed would mislead a restore, so the
+    // manifest carries the warning for whoever reads the archive
     for drift in crate::db::drain_schema_drift() {
         let warning = crate::db::schema_drift_warning(&drift);
         ctx.term.warn(&warning);
@@ -309,28 +292,25 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     writer.finish(&mut manifest)?;
     let path = destination.commit(&ctx.term)?;
 
-    // A private selection that could not see which repositories are private carried none
-    // of them, and a timer reading only the exit status has to hear about it.
+    // A private selection blind to visibility carried none of them, and a timer reading only
+    // the exit status must hear about it
     let is_incomplete = dropped > 0 || sight == inventory::PrivateSight::Blind;
-    // Stricter than the exit status: a selection judged by refs alone exits 0, and its archive
-    // still must not stand in for an older one that was judged in full.
+    // The note is stricter than the exit status, because a selection judged by refs alone
+    // exits 0 and its archive still must not stand in for one judged in full
     let missing = match dropped > 0 || sight != inventory::PrivateSight::Seen {
         true => Missing::Repositories,
         false => Missing::Nothing,
     };
 
-    // Past this point the archive is committed, so nothing below may fail the
-    // run: a full disk that stopped the sidecar being written used to exit 1 over a good
-    // archive, and skip both the state record and the report that names it. The same
-    // reasoning `remember` states for itself, applied to everything after the commit.
-    // The note goes first, because pruning reads it to tell which archives it may delete.
+    // The archive is committed, so nothing below may fail the run. The note goes first,
+    // because pruning reads it to tell which archives it may delete.
     if let Some(path) = &path
         && let Err(e) = write_sidecar(path, &manifest, &encryption, archived, missing)
     {
         ctx.term.warn(&format!(
             "the archive is written, but its note beside it is not: {e}"
         ));
-        // A note an earlier archive left at this path would describe this one wrongly.
+        // A note an earlier archive left at this path would describe this one wrongly
         let stale = sidecar_path(path);
         if let Some(e) = crate::cmd::prune::unremoved_sidecar(&stale) {
             ctx.term
@@ -369,11 +349,10 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     })
 }
 
-/// Say what a run would carry, and how much of it, without writing anything.
+/// Prints what a run would carry, and how much, without writing anything.
 ///
-/// The sizes are what the repositories occupy in storage, not what the bundles will weigh: a
-/// bundle is compressed and holds only reachable objects, so the real archive comes out
-/// smaller. An over-estimate is the safe direction for "will this fit".
+/// The sizes are storage sizes, which over-estimate the compressed bundles. Over is the safe
+/// side of "will this fit".
 fn dry_run(
     ctx: &Ctx,
     inventory: &Inventory,
@@ -395,9 +374,8 @@ fn dry_run(
         selected.push((record, bytes));
     }
 
-    // A dry run is a report like every other, and `--json` used to be the one flag it ignored:
-    // a consumer asking what a backup would carry got the human table on stdout and no object
-    // at all, which is worse than an error because it parses as far as the first line.
+    // A dry run honours `--json`, because a consumer handed the human table parses it only as
+    // far as the first line
     if ctx.global.json {
         let repos: Vec<serde_json::Value> = selected
             .iter()
@@ -444,8 +422,8 @@ fn dry_run(
         term::count(inventory.selected.len(), "repository", "repositories"),
         term::human_bytes(total)
     ));
-    // The estimate is meant to run high, so a part of storage nobody could measure has to be
-    // said out loud: silently, it is the one thing that makes the number run low.
+    // The estimate runs high on purpose, and an unmeasured part makes it run low, so the
+    // unmeasured part is printed
     if unreadable > 0 {
         term.warn(&format!(
             "{} could not be measured, so that size is a floor and not an estimate",
@@ -459,12 +437,10 @@ fn dry_run(
     Ok(())
 }
 
-/// What a directory occupies, and how many directories under it could not be read.
+/// The bytes a directory occupies, and how many entries under it could not be read.
 ///
-/// Following no symlinks and crossing no filesystems it was not pointed at. Used only for the
-/// estimate a dry run prints, which over-estimates on purpose because "will this fit" is the
-/// question and over is the safe side of it. A directory that cannot be read is the other
-/// direction, so it is counted and said rather than silently costing bytes off the total.
+/// The walk follows no symlinks. An unreadable entry is counted, because it is what makes the
+/// dry run's estimate run low.
 fn directory_size(path: &Path) -> (u64, usize) {
     let Ok(entries) = std::fs::read_dir(path) else {
         return (0, 1);
@@ -472,8 +448,7 @@ fn directory_size(path: &Path) -> (u64, usize) {
     let mut bytes = 0;
     let mut unreadable = 0;
     for entry in entries {
-        // An entry the directory would not even name, which is one more thing this estimate
-        // has not seen. Dropped silently, it came off the total as if it were not there.
+        // An entry the directory would not name is one more thing the estimate has not seen
         let Ok(entry) = entry else {
             unreadable += 1;
             continue;
@@ -488,8 +463,7 @@ fn directory_size(path: &Path) -> (u64, usize) {
                 Ok(meta) => bytes += meta.len(),
                 Err(_) => unreadable += 1,
             },
-            // A symlink, a socket or a fifo. The archive does not carry one either, so it
-            // costs nothing and is not something this could not read.
+            // A symlink, a socket or a fifo, which the archive does not carry either
             Ok(_) => {}
             Err(_) => unreadable += 1,
         }
@@ -497,10 +471,9 @@ fn directory_size(path: &Path) -> (u64, usize) {
     (bytes, unreadable)
 }
 
-/// Record what was written, for `doctor` and `diff` to read later.
+/// Records what was written, for `doctor` and `diff` to read later.
 ///
-/// A state file that cannot be written does not undo an archive that can, so this warns and
-/// carries on rather than failing a run that has already succeeded.
+/// A failed state write prints a warning and never fails a run whose archive is written.
 fn remember(
     ctx: &Ctx,
     manifest: &Manifest,
@@ -537,7 +510,7 @@ fn ask_encryption(ctx: &Ctx, args: &Create) -> Result<Encryption> {
     )?;
     Ok(Encryption::Passphrase(passphrase))
 }
-/// Take a consistent copy of a database, then archive that copy.
+/// Takes a consistent copy of a database, then archives that copy.
 fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &str) -> Result<()> {
     if !source.is_file() {
         return Ok(());
@@ -553,13 +526,13 @@ fn snapshot_into(writer: &mut Writer, scratch: &Scratch, source: &Path, entry: &
     Ok(())
 }
 
-/// How many repositories reached the archive, and why each one that was selected did not.
+/// How many repositories reached the archive, and a reason for each selected one that did not.
 struct Bundled {
     archived: usize,
     failures: Vec<String>,
 }
 
-/// Bundle each selected repository and record what went in.
+/// Bundles each selected repository and records what went in.
 fn archive_repositories(
     ctx: &Ctx,
     writer: &mut Writer,
@@ -581,8 +554,8 @@ fn archive_repositories(
 
     let mut archived = 0;
     let mut bundle_failures = Vec::new();
-    // Where each record sits, indexed once, because a scan of `manifest.repos` per bundle is
-    // quadratic in the repository count and a seed carries thousands.
+    // The index keeps each bundle's lookup cheap, because a seed carries thousands of
+    // repositories
     let by_rid: std::collections::BTreeMap<String, usize> = manifest
         .repos
         .iter()
@@ -593,11 +566,8 @@ fn archive_repositories(
     for rid in &inventory.selected {
         let repo_path = ctx.home.repository_path(rid);
         let bundle = scratch.path_of("repository.bundle");
-        // One broken repository does not cost the user every other one. A `fatal: bad object`
-        // out of `git bundle create` used to abort the whole run, so a home with a single
-        // damaged repository could not be backed up at all, which is the opposite of what a
-        // backup tool is for. The failure is named, carried into the manifest, and reflected
-        // in the exit code, so it can be neither missed nor mistaken for success.
+        // One broken repository must not cost the user every other one. Its failure is
+        // printed, carried into the manifest and reflected in the exit code.
         if let Err(error) = git.bundle(&repo_path, &bundle) {
             ctx.term
                 .fail(&format!("{}: {error}", inventory.display_name(rid)));
@@ -621,8 +591,8 @@ fn archive_repositories(
         archived += 1;
     }
 
-    // Handed back rather than put in `manifest.warnings`, which `run` assigns wholesale just
-    // before `finish`. Each one has been printed above, so `run` keeps it out of the report.
+    // The failures go back to `run`, which assigns `manifest.warnings` wholesale before
+    // `finish`. Each is printed here, so `run` keeps them out of the report.
     if !bundle_failures.is_empty() {
         ctx.term.warn(&format!(
             "{} of {} could not be bundled and {} NOT in this archive",
@@ -641,15 +611,11 @@ fn archive_repositories(
     })
 }
 
-/// The two lines of the sidecar that depend on how the archive was sealed: the shell command
-/// that opens it, and the paragraph above it saying what that command will want.
+/// The sidecar's shell command that opens the archive, and the paragraph saying what that
+/// command will want.
 ///
-/// `age -d` with nothing else asks for a passphrase, which an archive encrypted to a recipient
-/// does not have: printed for one of those, the line fails for a reason that reads like the
-/// archive is broken. Each kind gets the line that actually opens it.
-///
-/// Pure, and separate from writing the note, because this is the part that has been wrong
-/// twice and the part a test can hold still.
+/// `age -d` alone asks for a passphrase, which a recipient archive does not have, so each kind
+/// of encryption gets the line that opens it.
 fn opening_lines(encryption: &Encryption, file_name: &str) -> (String, String) {
     match encryption {
         Encryption::Plaintext => (
@@ -662,11 +628,8 @@ fn opening_lines(encryption: &Encryption, file_name: &str) -> (String, String) {
             "Each rad-backup command above asks for the passphrase this archive was sealed with."
                 .to_string(),
         ),
-        // KEYFILE and PASSFILE, never `<key file>`: a reader pastes these lines into a shell,
-        // and `age -d -i <key file> archive.tar.zst.age` is not a template with a placeholder
-        // in it, it is an input redirect from `key`, the word `file`, and an OUTPUT redirect
-        // that truncates the archive to nothing. The one file holding a key that cannot be
-        // reissued must not be destroyed by following its own instructions.
+        // KEYFILE and PASSFILE carry no angle brackets, because a pasted `<key file>` is a
+        // shell redirect whose `>` truncates the archive to nothing
         Encryption::Recipients(recipients) => (
             format!("age -d -i KEYFILE {file_name} | zstd -dc | tar -x"),
             format!(
@@ -723,17 +686,16 @@ fn write_sidecar(
             ("MANUAL", &manual),
         ],
     );
-    // Staged and renamed over the path, never written through it: a symlink planted at the
-    // note's name would otherwise truncate whatever it points at. Owner-only, like the archive
-    // beside it.
+    // The note is staged and renamed over its path, because writing through a symlink planted
+    // at its name truncates the target. The note is owner-only, like the archive.
     crate::perms::write_atomically(&sidecar_path(archive), text.as_bytes(), MODE_SECRET)
 }
 
-/// Delete older archives of the same identity, keeping the newest `keep` of them and the
-/// newest one that holds every selected repository.
+/// Deletes older archives of the same identity, keeping the newest `keep` and the newest one
+/// that holds every selected repository.
 ///
-/// The same rule `rad backup prune` applies, from the same listing, so a retention policy
-/// cannot mean two different things depending on which command enforced it.
+/// The rule and the listing are `rad backup prune`'s, so a retention means the same thing
+/// whichever command enforces it.
 fn prune(ctx: &Ctx, current: &Path, manifest: &Manifest, keep: usize) -> Result<()> {
     let Some(directory) = current.parent() else {
         return Ok(());
@@ -761,10 +723,8 @@ fn prune(ctx: &Ctx, current: &Path, manifest: &Manifest, keep: usize) -> Result<
         std::fs::remove_file(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
         ctx.term
             .step(&format!("removed the older archive {}", archive.name()));
-        // After the line naming the archive, so the warning reads as being about it. Through
-        // `prune`'s own reader, because the note left standing over a deleted archive is the
-        // same misleading directory whichever command did the deleting, and this side used to
-        // drop the error on the floor while `prune` said it out loud.
+        // The warning follows the line naming the archive, so it reads as being about it.
+        // `prune`'s own helper reports a note left standing over a deleted archive.
         let sidecar = sidecar_path(&archive.path);
         if let Some(e) = crate::cmd::prune::unremoved_sidecar(&sidecar) {
             ctx.term
@@ -800,8 +760,7 @@ fn report(
         Some(path) => term.ok(&format!("wrote {}", path.display())),
         None => term.ok("wrote the archive to stdout"),
     }
-    // Labelled, because a bare "state tier, --repos private" under the progress lines read as
-    // one more diagnostic rather than as what this archive holds and the settings that chose it.
+    // The labels mark these lines as what the archive holds, so they never read as diagnostics
     term.hint(&format!(
         "identity: {} ({})",
         manifest.identity.alias.as_deref().unwrap_or("unnamed"),
@@ -816,8 +775,8 @@ fn report(
             _ => term::count(archived, "repository", "repositories"),
         });
     }
-    // Policies only above the identity tier: the manifest counts them at every tier, but only
-    // the higher tiers carry the policy database.
+    // Policies show only above the identity tier, because only those tiers carry the policy
+    // database
     if manifest.tier != Tier::Identity {
         saved.push(format!(
             "{} seeded and {} followed policies",
@@ -835,10 +794,8 @@ fn report(
         manifest.repo_selection.as_str(),
     ));
 
-    // Named here as well as in the note beside the archive, because the note is read during a
-    // recovery and this is read while somebody is still watching. A recipient archive opens
-    // with a private key that need not be anywhere near this machine, and this run is the last
-    // moment anyone is in a position to go and check they still have it.
+    // The recipient keys are named here as well as in the note, because this run is the last
+    // moment the user can check they still hold a matching private key
     if let Encryption::Recipients(recipients) = encryption {
         term.hint(&format!(
             "opens only with the private half of {}",
@@ -856,14 +813,8 @@ fn report(
     if !manifest.identity.key_is_encrypted {
         term.warn("the archived key has no passphrase of its own");
     }
-    // A private repository left out of the archive is only lost if nobody else has it: the
-    // owner may have allowed a peer to hold it, and a peer that holds it can hand it back.
-    //
-    // Judged on what REACHED the archive, not on what was selected for it. `bundle` is set on
-    // `manifest.repos`, never on `inventory.records`, so a check against the inventory was a
-    // constant, and a repository whose bundle failed stayed in `selected` and counted as
-    // carried. The one repository that had just become unrecoverable was the one this warning
-    // stayed silent about.
+    // A private repository left out is lost only if no peer holds it. The check reads `bundle`
+    // on `manifest.repos`, because a selected repository whose bundle failed is not carried.
     let carried: BTreeSet<&str> = manifest
         .repos
         .iter()
@@ -907,9 +858,7 @@ fn read_hostname() -> Option<String> {
                 .ok()
                 .filter(|name| !name.is_empty())
         })
-        // Neither of the two above exists on macOS or the BSDs, so every manifest written
-        // there recorded `host: null` and an archive could not say which machine it came
-        // from. `uname -n` is POSIX and answers on all three.
+        // macOS and the BSDs have neither of the two above, and `uname -n` is POSIX
         .or_else(|| {
             crate::exec::Tool::on_path("uname")
                 .spoken(&["-n"])
@@ -923,10 +872,7 @@ fn read_hostname() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// `--keep-source` was written into the archive as a plain move, so the home restored from
-    /// it was told the key on the machine it came from had been retired, about a machine that
-    /// still had it. Spelled out per variant, because a fourth one added to the enum has to
-    /// answer this question on purpose rather than fall into whichever arm was the default.
+    /// Spelled out per variant, so a new variant answers this on purpose.
     #[test]
     fn only_a_move_that_gives_up_the_key_says_so_in_the_archive() {
         assert!(!Purpose::Backup.retires_key());
@@ -934,12 +880,8 @@ mod tests {
         assert!(!Purpose::MoveKeepingSource.retires_key());
     }
 
-    /// A directory the estimate could not read is what makes it under-estimate, and under is
-    /// the wrong side of "will this fit".
-    ///
-    /// The other two ways an entry goes unread, a `read_dir` iterator that yields an error and
-    /// a `file_type` that cannot be determined, are counted in the same tally but are not
-    /// reachable from a fixture: on Linux both come from the filesystem giving up mid-walk.
+    /// An erroring `read_dir` iterator and an undeterminable `file_type` count in the same
+    /// tally, but no fixture reaches them on Linux.
     #[cfg(unix)]
     #[test]
     fn a_directory_the_estimate_could_not_read_is_counted_rather_than_costed_off_the_total() {
@@ -973,10 +915,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// The bug: the recipient line read `age -d -i <key file> archive.tar.zst.age`, which a
-    /// shell does not read as a template. `<key` redirects input, `file` is an argument, and
-    /// `>archive.tar.zst.age` TRUNCATES the archive. Somebody following the note beside their
-    /// only copy of an unreissuable key would have destroyed it.
     #[test]
     fn nothing_the_sidecar_offers_to_run_carries_a_shell_redirect() {
         let sealed = Encryption::Passphrase(zeroize::Zeroizing::new("hunter2".to_string()));
@@ -994,15 +932,14 @@ mod tests {
         }
     }
 
-    /// The other half of the same bug: the paragraph was built from a `format!` whose source
-    /// indentation went into the string, so the note printed a line of prose followed by
-    /// seventeen spaces. Only the recipient arm was ever wrapped, so only it could drift.
+    /// A `format!` whose source indentation leaks into the string prints prose followed by
+    /// spaces.
     #[test]
     fn the_note_beside_the_archive_is_not_indented_by_the_source_that_wrote_it() {
         let keyed = Encryption::Recipients(vec!["ssh-ed25519 AAAAExample me@laptop".to_string()]);
         let (_, opening) = opening_lines(&keyed, "alice.tar.zst.age");
         for line in opening.lines() {
-            // The recipients themselves are indented on purpose, as a block to read down.
+            // The recipients themselves are indented on purpose, as a block to read down
             assert!(
                 !line.starts_with("     ") && line.trim_end() == line,
                 "{line:?} carries the layout of the code that built it"
