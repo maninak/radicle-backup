@@ -480,6 +480,10 @@ mod tests {
                     .is_some_and(|doubt| doubt.contains("control.sock")),
                 "{state:?}"
             );
+        } else {
+            crate::perms::tests::skip_as_privileged_from_env(
+                "a node directory that cannot be entered",
+            );
         }
     }
 

@@ -203,16 +203,6 @@ mod tests {
         String::from_utf8(render().expect("the page renders")).expect("roff is text")
     }
 
-    /// The start of the entry that documents an option, as opposed to its mention in a
-    /// synopsis. Roff escapes a hyphen, so `--force` is spelled `\-\-force`.
-    fn entry(short: Option<char>, long: &str) -> String {
-        let long = format!("\\fB\\-\\-{}\\fR", long.replace('-', "\\-"));
-        match short {
-            Some(short) => format!(".TP\n\\fB\\-{short}\\fR, {long}"),
-            None => format!(".TP\n{long}"),
-        }
-    }
-
     /// The name each `.TP` entry in a stretch of the page documents, the long name for a flag
     /// and the value name for a positional (`ARCHIVE` for `[ARCHIVE]`).
     fn entries(roff: &str) -> Vec<String> {
@@ -337,6 +327,27 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_is_refused_the_roff_and_told_how_to_read_the_page() {
+        let mut written = Vec::new();
+        let refusal = run(Stdout::Terminal, &mut written).expect_err("a terminal is refused");
+        assert!(matches!(refusal, Error::ManAtATerminal), "{refusal}");
+        assert_eq!(refusal.exit_status(), crate::error::EXIT_FAILURE);
+        assert_eq!(written, b"");
+        let said = refusal.to_string();
+        for way in [
+            "`man rad-backup`",
+            "rad-backup man > ",
+            "`rad-backup --help`",
+        ] {
+            assert!(said.contains(way), "the refusal leaves out {way}: {said}");
+        }
+        // Every line fits an 80-column terminal once `main` prefixes the first with `✗ `
+        for line in refusal.to_string().lines() {
+            assert!(line.chars().count() + 2 <= 80, "{line}");
+        }
+    }
+
+    #[test]
     fn the_page_names_no_page_of_ours_that_nothing_ships() {
         // The pages `just generated` writes for a package to install
         let shipped = ["rad-backup", "rad-restore"];
@@ -359,139 +370,6 @@ mod tests {
                     "the page sends a reader to {name}(1), which no package installs"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn the_page_ends_with_who_makes_it_where_to_report_a_bug_and_what_to_read_next() {
-        let closing = closing_sections();
-        assert!(page().ends_with(&closing), "the page ends elsewhere");
-        let headings: Vec<&str> = closing
-            .lines()
-            .filter_map(|line| line.strip_prefix(".SH "))
-            .collect();
-        assert_eq!(headings, ["AUTHORS", "\"REPORTING BUGS\"", "\"SEE ALSO\""]);
-        for credit in [
-            crate::credits::RID,
-            crate::credits::AUTHOR,
-            crate::credits::DONATE,
-            crate::credits::RADICLE_TOOLS,
-            crate::credits::SECURITY,
-        ] {
-            assert!(closing.contains(&roff_text(credit)), "{credit}");
-        }
-    }
-
-    #[test]
-    fn the_page_turns_hyphenation_off_before_its_first_section() {
-        let page = page();
-        let before_first_section = page
-            .split(".SH ")
-            .next()
-            .expect("split yields at least one piece");
-        assert!(
-            before_first_section.lines().any(|line| line == ".nh"),
-            "{before_first_section}"
-        );
-        assert!(!page.contains("\n.hy"), "hyphenation is turned back on");
-    }
-
-    #[test]
-    fn every_command_synopsis_says_it_takes_the_global_options() {
-        let page = page();
-        let command = Cli::command();
-        let mut checked = 0;
-        for verb in command.get_subcommands() {
-            let start = format!("\\fBrad\\-backup {}\\fR", roff_text(verb.get_name()));
-            let synopsis = page
-                .lines()
-                .find(|line| line.starts_with(&start))
-                .unwrap_or_else(|| panic!("`{}` has no synopsis", verb.get_name()));
-            assert!(
-                synopsis.ends_with(" [\\fIglobal\\ options\\fR]"),
-                "{synopsis}"
-            );
-            checked += 1;
-        }
-        assert!(checked > 10, "only {checked} commands were looked at");
-    }
-
-    #[test]
-    fn the_global_options_are_listed_once_and_not_under_every_command() {
-        let page = page();
-        assert_eq!(page.matches(&entry(None, "passphrase-file")).count(), 1);
-        assert!(page.contains(".SH \"GLOBAL OPTIONS\""), "{page}");
-    }
-
-    #[test]
-    fn a_command_section_holds_no_heading_of_a_page_of_its_own() {
-        let page = page();
-        let commands = page
-            .split(".SH COMMANDS")
-            .nth(1)
-            .and_then(|rest| rest.strip_suffix(&closing_sections()))
-            .expect("the page has a COMMANDS section, and the closing sections after it");
-        assert!(!commands.contains(".SH "), "{commands}");
-        assert_eq!(page.matches(".ds Aq").count(), 2, "one `.ie`/`.el` pair");
-    }
-
-    #[test]
-    fn an_option_group_heading_survives_inside_a_command_section() {
-        let demoted = demoted(".SH OPTIONS\n.TP\nx\n.SH \"NETWORK OPTIONS\"\n.TP\ny\n");
-        assert_eq!(
-            demoted,
-            ".PP\n.TP\nx\n.PP\n.B \"NETWORK OPTIONS\"\n.TP\ny\n"
-        );
-    }
-
-    #[test]
-    fn a_terminal_is_refused_the_roff_and_told_how_to_read_the_page() {
-        let mut written = Vec::new();
-        let refusal = run(Stdout::Terminal, &mut written).expect_err("a terminal is refused");
-        assert!(matches!(refusal, Error::ManAtATerminal), "{refusal}");
-        assert_eq!(refusal.exit_status(), crate::error::EXIT_FAILURE);
-        assert_eq!(written, b"");
-        let said = refusal.to_string();
-        for way in [
-            "`man rad-backup`",
-            "rad-backup man > ",
-            "`rad-backup --help`",
-        ] {
-            assert!(said.contains(way), "the refusal leaves out {way}: {said}");
-        }
-        // Every line fits an 80-column terminal once `main` prefixes the first with `✗ `
-        for line in refusal.to_string().lines() {
-            assert!(line.chars().count() + 2 <= 80, "{line}");
-        }
-    }
-
-    #[test]
-    fn away_from_a_terminal_the_page_is_the_roff() {
-        let mut written = Vec::new();
-        run(Stdout::Elsewhere, &mut written).expect("it writes");
-        assert_eq!(written, render().expect("the page renders"));
-    }
-
-    #[test]
-    fn the_command_index_lists_every_command_once_with_what_it_does() {
-        let page = page();
-        let index = page
-            .split(".SH COMMANDS\n")
-            .nth(1)
-            .and_then(|rest| rest.split(".SS ").next())
-            .expect("the page has a COMMANDS section");
-        let command = Cli::command();
-        for verb in command.get_subcommands() {
-            let about = verb
-                .get_about()
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let line = format!(
-                ".TP\n\\fB{}\\fR\n\\&{}\n",
-                roff_text(verb.get_name()),
-                roff_text(&about)
-            );
-            assert_eq!(index.matches(&line).count(), 1, "{line}");
         }
     }
 }

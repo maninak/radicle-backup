@@ -206,8 +206,20 @@ pub fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Says that a test about a mode-000 path checked nothing, because this process reads
+    /// through any mode (root, or anything holding `CAP_DAC_OVERRIDE`). CI runs unprivileged,
+    /// so a skip there is a run that only looks covered and fails instead.
+    #[cfg(unix)]
+    pub(crate) fn skip_as_privileged_from_env(what: &str) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI reads through mode 000, so this checks nothing: {what}"
+        );
+        eprintln!("skipping {what}: this process reads through mode 000");
+    }
 
     #[test]
     fn a_replacement_that_cannot_even_be_staged_leaves_the_original_alone() {

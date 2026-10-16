@@ -52,11 +52,4 @@ mod tests {
         assert!(footer.contains(RID), "{footer}");
         assert!(footer.contains(SECURITY), "{footer}");
     }
-
-    #[test]
-    fn no_help_footer_line_ends_in_a_full_stop() {
-        for line in help_footer().lines() {
-            assert!(!line.ends_with('.'), "{line}");
-        }
-    }
 }

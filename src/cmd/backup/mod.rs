@@ -910,6 +910,10 @@ mod tests {
                 "the unreadable directory costs nothing to the total"
             );
             assert_eq!(missed, 1, "and is counted rather than passed over");
+        } else {
+            crate::perms::tests::skip_as_privileged_from_env(
+                "a directory the estimate cannot read",
+            );
         }
 
         let _ = std::fs::remove_dir_all(root);

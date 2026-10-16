@@ -1492,12 +1492,13 @@ mod tests {
     #[test]
     fn a_backup_older_than_the_stale_mark_warns_but_does_not_fail() {
         let now: jiff::Timestamp = "2026-08-14T12:00:00Z".parse().expect("a valid instant");
+        // 31 and 30 days, either side of the mark
         assert_eq!(
-            found_freshness("2026-05-01T12:00:00Z", now).verdict,
+            found_freshness("2026-07-14T12:00:00Z", now).verdict,
             Verdict::Warn
         );
         assert_eq!(
-            found_freshness("2026-08-13T12:00:00Z", now).verdict,
+            found_freshness("2026-07-15T12:00:00Z", now).verdict,
             Verdict::Pass
         );
     }

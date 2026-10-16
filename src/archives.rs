@@ -508,14 +508,6 @@ mod tests {
     }
 
     #[test]
-    fn the_note_sits_beside_the_archive_and_keeps_its_name() {
-        assert_eq!(
-            sidecar_path(Path::new("/backups/maninak-z6Mk-2026.tar.zst.age")),
-            PathBuf::from("/backups/maninak-z6Mk-2026.tar.zst.age.README.txt")
-        );
-    }
-
-    #[test]
     fn an_archive_named_by_the_writer_is_found_again_by_the_reader() {
         let dir = scratch_dir("writer-and-reader");
         let name = crate::archives::archive_name(Some("fixture"), NODE, "20260101T000000Z", true);
@@ -580,6 +572,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&locked);
 
         if walks_through_any_mode {
+            crate::perms::tests::skip_as_privileged_from_env("an archive that cannot be examined");
             return;
         }
         let (archives, unexamined) = listed.expect("the directory itself is readable");

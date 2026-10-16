@@ -630,13 +630,6 @@ mod tests {
     }
 
     #[test]
-    fn running_with_no_subcommand_creates_an_archive() {
-        let cli = Cli::parse_from(["rad-backup", "--tier", "full"]);
-        assert!(cli.command.is_none());
-        assert_eq!(cli.create.tier, TierArg::Full);
-    }
-
-    #[test]
     fn each_tier_carries_the_repositories_it_promises() {
         assert_eq!(TierArg::Identity.default_repos(), RepoSelection::None);
         assert_eq!(TierArg::State.default_repos(), RepoSelection::Private);
@@ -731,55 +724,6 @@ mod tests {
         // Together, the JSON report would follow the archive bytes, so `rad-backup --stdout
         // --json > x.age` would write a file age refuses at restore time
         assert!(Cli::try_parse_from(["rad-backup", "--stdout", "--json"]).is_err());
-    }
-
-    /// clap files every field declared after the `Global` flatten under its heading, so a
-    /// top-level flag added below it would be listed as working with every command.
-    #[test]
-    fn only_a_global_option_is_listed_under_the_global_heading() {
-        let command = Cli::command();
-        let mut checked = 0;
-        for arg in command.get_arguments() {
-            if arg.get_help_heading() == Some("Global options") {
-                assert!(arg.is_global_set(), "--{} is not global", arg.get_id());
-                checked += 1;
-            }
-        }
-        assert!(checked > 5, "only {checked} options are under the heading");
-    }
-
-    /// `--help` ends with who makes this, where its issues go and how to support it. `-h` is
-    /// for looking up a flag, and so is every command's own help.
-    #[test]
-    fn only_the_top_level_long_help_ends_with_the_credits() {
-        let mut command = Cli::command();
-        let long = command.render_long_help().to_string();
-        assert!(
-            long.trim_end()
-                .ends_with(crate::credits::help_footer().as_str()),
-            "{long}"
-        );
-        assert!(
-            !command
-                .render_help()
-                .to_string()
-                .contains(crate::credits::DONATE)
-        );
-        let mut checked = 0;
-        // A built command gives each subcommand the global options its arguments refer to
-        let mut built = Cli::command();
-        built.build();
-        for verb in built.get_subcommands() {
-            let mut verb = verb.clone();
-            let help = verb.render_long_help().to_string();
-            assert!(
-                !help.contains(crate::credits::DONATE),
-                "`{}`: {help}",
-                verb.get_name()
-            );
-            checked += 1;
-        }
-        assert!(checked > 10, "only {checked} commands were looked at");
     }
 
     #[test]

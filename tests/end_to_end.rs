@@ -243,7 +243,7 @@ impl Fixture {
     /// the given `visibility`.
     ///
     /// The stub prints `STUB-RAD-UNSTUBBED` on stderr and fails on any call it was not taught.
-    /// It appends every `cob`, `issue` and `patch` call to `rad-calls`.
+    /// The stub appends every `cob`, `issue` and `patch` call to `rad-calls`.
     #[cfg(unix)]
     fn stub_rad(&self, visibility: &str) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -287,7 +287,7 @@ esac
 
     fn command(&self, args: &[&str], home: &Path) -> Command {
         let stub = self.path("bin/rad");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rad-backup"));
+        let mut command = hermetic_from_env(env!("CARGO_BIN_EXE_rad-backup"));
         command
             .args(args)
             .arg("--home")
@@ -328,8 +328,38 @@ impl Drop for Fixture {
     }
 }
 
+/// A child process with every `RAD*` and `GIT*` variable, each `env = "..."` in `src/cli.rs`,
+/// and the global and system gitconfig removed
+fn hermetic_from_env(program: &str) -> Command {
+    const CLI: &str = include_str!("../src/cli.rs");
+    let declared: Vec<&str> = CLI
+        .split("env = \"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    assert!(
+        declared.contains(&"RAD_BACKUP_DIR"),
+        "no `env = \"...\"` found in src/cli.rs, so nothing it declares is cleared"
+    );
+
+    let mut command = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with("RAD") || name_text.starts_with("GIT") {
+            command.env_remove(&name);
+        }
+    }
+    for name in declared {
+        command.env_remove(name);
+    }
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command
+}
+
 fn git(args: &[&str], cwd: &Path) -> String {
-    let ran = Command::new("git")
+    let ran = hermetic_from_env("git")
         .args(args)
         .current_dir(cwd)
         .output()
@@ -462,7 +492,7 @@ fn probe_shells() -> Vec<&'static str> {
 /// variable or an unchecked status that aborts the real restore.
 #[cfg(unix)]
 fn under_shell(shell: &str, fragment: &str, variables: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(shell);
+    let mut command = hermetic_from_env(shell);
     if shell == "busybox" {
         command.arg("ash");
     }
@@ -505,6 +535,28 @@ fn only_archive(directory: &Path) -> PathBuf {
     archives.sort();
     assert_eq!(archives.len(), 1, "expected one archive in {directory:?}");
     archives.remove(0)
+}
+
+/// Rename an archive and the note beside it to the name a run at `stamp` would have given it,
+/// so a test can take a second archive within the same second
+fn backdate(archive: &Path, stamp: &str) -> PathBuf {
+    let name = archive
+        .file_name()
+        .expect("an archive has a name")
+        .to_string_lossy()
+        .into_owned();
+    let end = name
+        .find(".tar.zst")
+        .expect("an archive name ends in .tar.zst");
+    let older = format!("{}{stamp}{}", &name[..end - stamp.len()], &name[end..]);
+    let moved = archive.with_file_name(&older);
+    std::fs::rename(archive, &moved).expect("the archive is renamable");
+    std::fs::rename(
+        archive.with_file_name(format!("{name}.README.txt")),
+        archive.with_file_name(format!("{older}.README.txt")),
+    )
+    .expect("the note beside the archive is renamable");
+    moved
 }
 
 /// `--replay-policies` needs `rad`, so without one the restore exits `4` before writing.
@@ -683,8 +735,8 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     assert_success(&ran, "taking a plaintext backup");
     let archive = only_archive(&backups);
 
-    // The archive is plaintext, so the manifest's digests catch the damage. About one
-    // single-byte flip in five thousand still decodes to an intact tar, so a run is flipped.
+    // The archive is plaintext, so age cannot be what notices. About one single-byte flip in
+    // five thousand still decodes to an intact tar, so a run is flipped.
     let mut bytes = std::fs::read(&archive).expect("the archive is readable");
     let middle = bytes.len() / 2;
     for byte in &mut bytes[middle..middle + 64] {
@@ -692,10 +744,13 @@ fn an_archive_that_lost_a_byte_fails_verification_instead_of_restoring_quietly()
     }
     std::fs::write(&archive, &bytes).expect("the archive is writable");
 
+    // Verify exits 1 when zstd cannot decode the damage, and 3 when a digest disagrees.
+    // Which one depends on where the flip lands, and the archive differs on every run.
     let ran = fixture.run(&["verify", &archive.to_string_lossy()], &fixture.home());
     assert!(
-        !ran.status.success(),
-        "a damaged archive verified clean: {}",
+        matches!(ran.status.code(), Some(1 | 3)),
+        "a damaged archive should fail verification, and it exited {:?}: {}",
+        ran.status.code(),
         stderr(&ran)
     );
 }
@@ -1286,7 +1341,7 @@ impl BothWays {
     fn settings(&self, home: &Path) -> String {
         let repo = home.join(format!("storage/{RID}"));
         // `--local` keeps the global git config of whoever runs the suite out of the answer
-        let ran = Command::new("git")
+        let ran = hermetic_from_env("git")
             .args([
                 "--git-dir",
                 &repo.to_string_lossy(),
@@ -1302,7 +1357,7 @@ impl BothWays {
 
     fn is_bare(&self, home: &Path) -> bool {
         let repo = home.join(format!("storage/{RID}"));
-        let ran = Command::new("git")
+        let ran = hermetic_from_env("git")
             .args([
                 "--git-dir",
                 &repo.to_string_lossy(),
@@ -1357,7 +1412,7 @@ fn restore_with_planted_config(fixture: &Fixture, planted: &str) -> BothWays {
     assert_success(&ran, "extracting the archive");
 
     let by_script = fixture.path("by-script");
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .args(["restore.sh", &by_script.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -1670,8 +1725,7 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
         &fixture.home(),
     );
     assert_success(&ran, "taking the first archive");
-    // The name carries a whole-second stamp, so two archives need a second between them
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    backdate(&only_archive(&backups), "20200101T000000Z");
     fixture.advance();
     let ran = fixture.run(
         &["--repos", "none", "--output", &dir, "--yes"],
@@ -1701,21 +1755,23 @@ fn with_no_archive_named_a_command_acts_on_the_newest_one_and_says_which() {
         "the archive it chose must be named on stderr: {}",
         stderr(&ran)
     );
-    let manifest: serde_json::Value =
-        serde_json::from_str(&stdout(&ran)).expect("--json prints json");
-    let shown = manifest["created"].as_str().expect("a created stamp");
+    let shown = stdout(&ran);
 
-    let ran = fixture
-        .command(
-            &["show", "--json", &archives[0].to_string_lossy()],
+    let named = |archive: &Path| {
+        stdout(&fixture.run(
+            &["show", "--json", &archive.to_string_lossy()],
             &fixture.home(),
-        )
-        .output()
-        .expect("rad-backup runs");
-    let older: serde_json::Value = serde_json::from_str(&stdout(&ran)).expect("--json prints json");
-    assert!(
-        shown > older["created"].as_str().expect("a created stamp"),
-        "the newest archive is the one that should have been chosen"
+        ))
+    };
+    assert_eq!(
+        shown,
+        named(&archives[1]),
+        "the newest archive was not the one shown"
+    );
+    assert_ne!(
+        shown,
+        named(&archives[0]),
+        "the two archives cannot be told apart"
     );
 }
 
@@ -1725,14 +1781,22 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
     let backups = fixture.path("backups");
     let dir = backups.to_string_lossy().into_owned();
 
-    for _ in 0..2 {
-        let ran = fixture.run(
-            &["--repos", "none", "--output", &dir, "--yes"],
-            &fixture.home(),
-        );
-        assert_success(&ran, "taking an archive");
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-    }
+    let ran = fixture.run(
+        &["--repos", "none", "--output", &dir, "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking the older archive");
+    backdate(&only_archive(&backups), "20200102T000000Z");
+    let ran = fixture.run(
+        &["--repos", "none", "--output", &dir, "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking the newer archive");
+    let newer = files_under(&backups)
+        .into_iter()
+        .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+        .find(|name| name.ends_with(".age") && !name.contains("20200102T000000Z"))
+        .expect("the newer archive is there");
     let bystander = backups.join("holiday-photos.tar.zst");
     let other = backups.join("someone-z6MkvAFBkdph-20200101T000000Z.tar.zst.age");
     std::fs::write(&bystander, b"not an archive").expect("the fixture file is writable");
@@ -1756,12 +1820,49 @@ fn prune_deletes_older_archives_of_this_identity_and_nothing_else() {
     );
     assert!(other.exists(), "another identity's archive must survive");
     assert_eq!(
-        left.iter()
+        left.into_iter()
             .filter(|name| name.starts_with("fixture-"))
-            .count(),
-        1,
-        "exactly one archive of this identity should be left: {left:?}"
+            .collect::<Vec<_>>(),
+        [newer],
+        "only the newest archive of this identity should be left"
     );
+}
+
+/// `--keep 0` would delete every archive of the identity, so each verb that reads it refuses
+/// before it writes or deletes anything.
+#[test]
+fn a_retention_of_zero_is_refused_before_any_archive_is_written_or_deleted() {
+    let fixture = Fixture::create("keep-zero");
+    let backups = fixture.path("backups");
+    let dir = backups.to_string_lossy().into_owned();
+    let ran = fixture.run(
+        &["--repos", "none", "--output", &dir, "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking an archive");
+    backdate(&only_archive(&backups), "20200101T000000Z");
+    // A second, newer complete archive leaves the first one deletable, so a prune that went
+    // ahead would change the listing
+    let ran = fixture.run(
+        &["--repos", "none", "--output", &dir, "--yes"],
+        &fixture.home(),
+    );
+    assert_success(&ran, "taking a second archive");
+    let listing = || {
+        let mut files = files_under(&backups);
+        files.sort();
+        files
+    };
+    let before = listing();
+
+    for args in [
+        ["--repos", "none", "--keep", "0", "--output", &dir, "--yes"].as_slice(),
+        ["prune", "--keep", "0", "--dir", &dir, "--yes"].as_slice(),
+    ] {
+        let ran = fixture.run(args, &fixture.home());
+        assert_eq!(ran.status.code(), Some(4), "{args:?}: {}", stderr(&ran));
+        assert_eq!(listing(), before, "{args:?}: {}", stderr(&ran));
+    }
 }
 
 #[test]
@@ -1785,26 +1886,32 @@ fn keep_deletes_archives_missing_repositories_but_never_the_newest_complete_one(
     fixture.stub_rad("private");
     let ran = fixture.run(&["--output", &dir, "--yes"], &fixture.home());
     assert_success(&ran, "taking the complete archive");
-    let complete = archives();
+    let complete = backdate(&only_archive(&backups), "20200101T000000Z");
     std::fs::remove_file(fixture.path("bin/rad")).expect("the stub is removable");
 
     // Without `rad` the selection carries no repositories. The first run proves the complete
     // archive outlives `--keep 1`, and the second that an incomplete one does not.
-    let mut newest = Vec::new();
-    for _ in 0..2 {
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+    let incomplete = || {
         let before = archives();
         let ran = fixture.run(&["--keep", "1", "--output", &dir, "--yes"], &fixture.home());
         assert_eq!(ran.status.code(), Some(3), "{}", stderr(&ran));
-        newest = archives()
+        let mut new: Vec<String> = archives()
             .into_iter()
             .filter(|name| !before.contains(name))
             .collect();
-    }
+        assert_eq!(new.len(), 1, "one run writes one archive: {new:?}");
+        backups.join(new.remove(0))
+    };
+    backdate(&incomplete(), "20200102T000000Z");
+    let newest = incomplete();
 
-    let mut expected = [complete, newest].concat();
-    expected.sort();
-    assert_eq!(archives(), expected);
+    let name = |path: &Path| {
+        path.file_name()
+            .expect("an archive has a name")
+            .to_string_lossy()
+            .into_owned()
+    };
+    assert_eq!(archives(), [name(&complete), name(&newest)]);
 
     // A script may feed `prune`'s stdout to `rm`, so it must name nothing `prune` keeps
     let ran = fixture.run(
@@ -1931,7 +2038,7 @@ fn the_shipped_script_skips_a_bundle_whose_name_is_not_a_repository_id() {
         .expect("the planted bundle is writable");
 
     let target = fixture.path("by-script");
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .args(["restore.sh", &target.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -1994,7 +2101,7 @@ fn the_shipped_script_and_this_tool_rebuild_the_same_home() {
     assert_success(&ran, "extracting the archive");
 
     let by_script = fixture.path("by-script");
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .args(["restore.sh", &by_script.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -2225,7 +2332,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     // script that ignored its argument fails.
     let target = fixture.path("by-script");
     let decoy = fixture.path("decoy-home");
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .args(["restore.sh", &target.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -2284,7 +2391,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
             continue;
         }
         let elsewhere = fixture.path(&format!("by-{shell}"));
-        let mut command = Command::new(shell);
+        let mut command = hermetic_from_env(shell);
         if shell == "busybox" {
             command.arg("ash");
         }
@@ -2304,7 +2411,7 @@ fn the_shipped_restore_script_rebuilds_a_home_without_this_tool() {
     }
 
     // A second run into the home it built, named through RAD_HOME, must refuse
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .arg("restore.sh")
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -2344,7 +2451,7 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
         .and_then(|rest| rest.split("```").next())
         .expect("the sheet opens with a shell block");
 
-    let ran = std::process::Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .arg("-c")
         .arg(block)
         .current_dir(&stage)
@@ -2369,7 +2476,7 @@ fn the_hand_restore_sheet_refuses_to_paste_a_key_over_one_already_there() {
         std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is made");
         std::os::unix::fs::symlink(&elsewhere, linked.join(name)).expect("a symlink is creatable");
 
-        let ran = std::process::Command::new("sh")
+        let ran = hermetic_from_env("sh")
             .arg("-c")
             .arg(block)
             .current_dir(&stage)
@@ -2467,7 +2574,7 @@ fn the_shipped_script_refuses_a_head_that_does_not_name_a_ref() {
     .expect("the manifest is writable");
 
     let target = fixture.path("by-script");
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .args(["restore.sh", &target.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -2585,7 +2692,7 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
         }
         std::os::unix::fs::symlink(&elsewhere, home.join(name)).expect("a symlink is creatable");
 
-        let ran = Command::new("sh")
+        let ran = hermetic_from_env("sh")
             .args(["restore.sh", &home.to_string_lossy()])
             .current_dir(&extracted)
             .env("HOME", fixture.path("fake-home"))
@@ -2627,7 +2734,7 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
     std::os::unix::fs::symlink(&elsewhere, home.join("storage").join(RID))
         .expect("a symlink is creatable");
 
-    let ran = Command::new("sh")
+    let ran = hermetic_from_env("sh")
         .args(["restore.sh", &home.to_string_lossy()])
         .current_dir(&extracted)
         .env("HOME", fixture.path("fake-home"))
@@ -3069,8 +3176,12 @@ fn a_node_database_that_will_not_open_costs_the_checks_that_read_it_and_not_the_
     }
 
     // This fixture cannot build a routing table, so a unit test in `doctor` checks this
-    // reader's answer. Here it only has to answer.
-    assert_ne!(verdict_of(&ran, "private-repositories"), "", "{report}");
+    // reader's answer. Here it only has to answer, `unknown` for want of `rad`.
+    assert_eq!(
+        verdict_of(&ran, "private-repositories"),
+        "unknown",
+        "{report}"
+    );
 }
 
 /// The verdict of the doctor check with `checkId` `id`, out of a `--json` run.
@@ -3201,7 +3312,7 @@ fn an_archive_encrypted_to_an_ssh_key_opens_again_with_that_key_and_its_passphra
 /// A package build runs `rad-backup man > rad-backup.1`, so a pipe gets the page itself.
 #[test]
 fn the_man_page_written_to_a_pipe_is_roff_a_package_can_install() {
-    let ran = Command::new(env!("CARGO_BIN_EXE_rad-backup"))
+    let ran = hermetic_from_env(env!("CARGO_BIN_EXE_rad-backup"))
         .arg("man")
         .output()
         .expect("rad-backup runs");

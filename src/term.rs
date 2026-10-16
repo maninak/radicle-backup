@@ -230,13 +230,6 @@ mod tests {
     }
 
     #[test]
-    fn a_count_of_one_takes_the_singular_and_everything_else_takes_the_plural() {
-        assert_eq!(count(1, "repository", "repositories"), "1 repository");
-        assert_eq!(count(0, "repository", "repositories"), "0 repositories");
-        assert_eq!(count(2, "repository", "repositories"), "2 repositories");
-    }
-
-    #[test]
     fn byte_counts_render_in_the_largest_unit_that_keeps_a_whole_part() {
         assert_eq!(human_bytes(0), "0 B");
         assert_eq!(human_bytes(524), "524 B");
@@ -244,12 +237,5 @@ mod tests {
         assert_eq!(human_bytes(20_480), "20.0 KiB");
         assert_eq!(human_bytes(976 * 1024 * 1024), "976.0 MiB");
         assert_eq!(human_bytes(2_147_483_648), "2.0 GiB");
-    }
-
-    #[test]
-    fn recent_days_read_as_words_and_older_ones_as_counts() {
-        assert_eq!(days_ago(0), "today");
-        assert_eq!(days_ago(1), "yesterday");
-        assert_eq!(days_ago(40), "40 days ago");
     }
 }

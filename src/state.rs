@@ -404,6 +404,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         if reads_through_any_mode {
+            crate::perms::tests::skip_as_privileged_from_env("an unreadable state record");
             return;
         }
         let Stored::Unreadable { path, reason } = &stored else {

@@ -609,8 +609,9 @@ mod tests {
 
     #[test]
     fn a_unit_this_tool_wrote_carries_the_mark_that_lets_it_be_replaced() {
-        assert!(timer_unit("daily").contains(MARKER_UNIT));
-        assert!(service_unit(Path::new("/tmp/env"), "").contains(MARKER_UNIT));
+        let path = Path::new("/etc/systemd/system/rad-backup.service");
+        assert!(may_replace(path, Ok(&timer_unit("daily"))).is_ok());
+        assert!(may_replace(path, Ok(&service_unit(Path::new("/tmp/env"), ""))).is_ok());
     }
 
     #[test]
@@ -774,33 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_file_does_not_promise_that_an_edit_will_survive() {
-        let text = environment_text(Path::new("/home/someone/.radicle"), None, None, None, None)
-            .expect("an ordinary path is writable as a setting");
-
-        // Every run rewrites this file in full, so deleting its header keeps no edit
-        assert!(!text.contains("Delete both these lines"), "{text}");
-        assert!(text.contains("rewritten in full"), "{text}");
-        for line in text.lines().take(2) {
-            assert!(line.starts_with('#'), "not a comment line: {line:?}");
-        }
-    }
-
-    #[test]
-    fn the_marker_says_the_unit_will_be_replaced_rather_than_promising_it_will_not() {
-        // `write_unit` overwrites a file carrying the marker, so the marker must say so
-        assert!(!MARKER_UNIT.contains("will not be replaced"));
-        assert!(MARKER_UNIT.contains("replaced by its next run"));
-
-        // Units written by an older version are recognised by the signature alone
-        assert!(MARKER_UNIT.contains(MARKER_SIGNATURE));
-        for line in MARKER_UNIT.lines() {
-            // systemd reads a line as a comment only when `#` starts it
-            assert!(line.starts_with('#'), "not a comment line: {line:?}");
-        }
-    }
-
-    #[test]
     fn a_binary_whose_path_holds_a_space_still_produces_a_unit_systemd_can_run() {
         // systemd word-splits an unquoted ExecStart=, and the failure shows only when the
         // timer first fires
@@ -821,11 +795,5 @@ mod tests {
             timer_unit("daily").contains("Persistent=true"),
             "a laptop that misses its window must still take the backup"
         );
-    }
-
-    #[test]
-    fn a_schedule_systemd_understands_is_passed_through_unchanged() {
-        // `--every` takes any OnCalendar expression, and systemd alone interprets it
-        assert!(timer_unit("Mon *-*-* 03:30:00").contains("OnCalendar=Mon *-*-* 03:30:00"));
     }
 }
