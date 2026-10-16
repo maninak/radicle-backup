@@ -28,6 +28,15 @@ shell:
 pins:
     ci/pins.sh
 
+# Fix a refusal with `cargo update -p <crate> --precise <older>` and rerun only the last line,
+# because `just deps` would bump the crate straight back
+
+# Bump crates, list stale actions, then refuse any crate under a week old
+deps:
+    cargo update --verbose
+    -./.github/outdated-action-pins.sh
+    ./.github/check-lockfile-age.py --base HEAD
+
 # Compile the suite the way a target that is not unix sees it
 nonunix:
     ci/nonunix.sh

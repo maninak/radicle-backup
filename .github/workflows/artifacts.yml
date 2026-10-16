@@ -127,7 +127,7 @@ jobs:
 
       # Transport only. `publish the release` re-uploads these to the GitHub Release in the
       # same run. Fourteen days lets a re-run of the apt publish find its input.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}
           path: dist/*
@@ -176,7 +176,7 @@ jobs:
       - name: Lint
         run: just lint-deb-at target/${{ matrix.target }}/debian
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: deb-${{ matrix.arch }}
           path: target/${{ matrix.target }}/debian/*.deb

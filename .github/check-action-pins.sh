@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every action pin is a commit SHA at least MIN_AGE_DAYS old, hand-typed ones included
+# Every action pin is a commit SHA at least MIN_AGE_DAYS old
 set -euo pipefail
 
 MIN_AGE_DAYS=${MIN_AGE_DAYS:-7}

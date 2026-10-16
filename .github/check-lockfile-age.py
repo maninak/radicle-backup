@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """Refuse a dependency version published less than `--min-age-days` (default 7) days ago.
 
-Dependabot's cooldown holds back only the pull requests it raises, so this reads Cargo.lock
-and also catches a hand-run `cargo update`.
-
 Given `--base`, it checks only versions added since that ref, because an existing pin only
 ever gets older. Without `--base`, or with `--all`, it sweeps the whole lockfile, spacing
 requests a second apart for the crates.io rate limit.
