@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - A restored home now automatically lists its issues and patches. `rad issue list` and `rad patch list` used to show nothing after a restore, until their cache was rebuilt by manually running `rad cob migrate`, then `rad issue cache --repo <rid>` and `rad patch cache --repo <rid>` for each repository.
+- `ls`, `show`, `verify` and `prune` now say when the directory they look in for archives does not exist, such as one your last archive went to that has since been moved. They used to say it held no archive. `prune` now exits `4` there. It used to exit `0`.
 
 ## [0.4.0] - 2026-09-14
 

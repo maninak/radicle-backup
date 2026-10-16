@@ -100,6 +100,12 @@ pub fn archive_dir_from_env(flag: Option<&Path>, record: Option<&crate::state::R
     )
 }
 
+/// Whether `directory` is certainly not there. A directory that cannot be checked is not
+/// called gone.
+pub fn is_gone(directory: &Path) -> bool {
+    matches!(directory.try_exists(), Ok(false))
+}
+
 /// The archive a command was pointed at, or else this identity's newest one.
 ///
 /// Prints the newest archive's path, because a command reading a file the user did not name
@@ -113,11 +119,12 @@ pub fn resolve_archive(ctx: &Ctx, given: Option<&Path>) -> Result<PathBuf> {
     let directory = archive_dir_from_env(None, record.record());
     let found = crate::archives::newest(&directory, &node_id)?;
     let Some(archive) = found else {
+        let why = match is_gone(&directory) {
+            true => format!("{} does not exist", directory.display()),
+            false => format!("no archive of your identity is in {}", directory.display()),
+        };
         return Err(Error::refused(
-            format!(
-                "no archive was given, and no archive of your identity is in {}",
-                directory.display()
-            ),
+            format!("no archive was given, and {why}"),
             "pass the path to an archive, or set RAD_BACKUP_DIR to the directory that holds them",
         ));
     };

@@ -50,6 +50,15 @@ pub fn run(ctx: &Ctx, args: &Ls) -> Result<()> {
         return Ok(());
     }
 
+    if present.is_empty() && crate::cmd::is_gone(&directory) {
+        ctx.term
+            .headline(&format!("{} does not exist", directory.display()));
+        ctx.term.hint(match args.dir {
+            Some(_) => "check the path given to --dir or RAD_BACKUP_DIR",
+            None => "pass --dir, or set RAD_BACKUP_DIR to the directory that holds your archives",
+        });
+        return Ok(());
+    }
     if present.is_empty() {
         ctx.term.headline(&format!(
             "no archive of {} in {}",

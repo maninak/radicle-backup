@@ -53,6 +53,17 @@ pub fn run(ctx: &Ctx, args: &Prune) -> Result<()> {
         .map(|(archive, _)| archive)
         .collect();
 
+    if present.is_empty() && crate::cmd::is_gone(&directory) {
+        return Err(Error::refused(
+            format!("{} does not exist", directory.display()),
+            match args.dir {
+                Some(_) => "check the path given to --dir or RAD_BACKUP_DIR",
+                None => {
+                    "pass --dir, or set RAD_BACKUP_DIR to the directory that holds your archives"
+                }
+            },
+        ));
+    }
     if doomed.is_empty() {
         ctx.term.ok(&format!(
             "nothing to delete. {} holds {} of your identity, and --keep is {}",
