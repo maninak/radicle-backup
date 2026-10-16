@@ -2,5 +2,5 @@
 # reproducible builds. Bump this pin in its own commit. The CI MSRV job overrides it with
 # RUSTUP_TOOLCHAIN to check `rust-version` in Cargo.toml.
 [toolchain]
-channel = "1.96.0"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]
