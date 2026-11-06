@@ -16,7 +16,7 @@ A Radicle key cannot be reissued: lose it and nothing on the network can give ba
 rad backup doctor               # what would you lose right now, and what fixes it
 rad backup                      # one encrypted archive of what the network cannot replace
 rad backup restore <archive>    # put it all back, here or on another machine
-rad backup move <output-path>   # move everything to a new computer, with nothing to fix by hand after
+rad backup move <output-path>   # move everything to a new computer
 ```
 
 Beyond copying files:

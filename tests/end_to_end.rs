@@ -56,8 +56,10 @@ impl Fixture {
         create_private_dir(&root).expect("the fixture root is creatable and was not already there");
         let fixture = Self { root };
 
-        fixture.restore_from_words();
+        // The config goes first, so the words restore keeps it and runs no `rad`
+        std::fs::create_dir(fixture.home()).expect("the home is creatable");
         fixture.write_config();
+        fixture.restore_from_words();
         fixture.write_policies();
         fixture.write_repository();
         fixture
@@ -72,7 +74,10 @@ impl Fixture {
     }
 
     fn restore_from_words(&self) {
-        let ran = self.run_with_stdin(&["restore", "--words", "--yes"], &self.home(), WORDS);
+        let ran = run_piping(
+            self.command(&["restore", "--words", "--yes"], &self.home()),
+            WORDS,
+        );
         assert_success(&ran, "restoring the fixture identity from words");
         assert!(
             stderr(&ran).contains(DID),
@@ -220,25 +225,6 @@ impl Fixture {
         self.command(args, home).output().expect("rad-backup runs")
     }
 
-    fn run_with_stdin(&self, args: &[&str], home: &Path, input: &str) -> Output {
-        use std::io::Write as _;
-
-        let mut child = self
-            .command(args, home)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("rad-backup starts");
-        child
-            .stdin
-            .as_mut()
-            .expect("stdin is piped")
-            .write_all(format!("{input}\n").as_bytes())
-            .expect("stdin is writable");
-        child.wait_with_output().expect("rad-backup finishes")
-    }
-
     /// Puts a stub `rad` where this fixture's runs find it, answering for a repository of
     /// the given `visibility`.
     ///
@@ -294,6 +280,7 @@ esac
             .arg(home)
             // A test run must never rewrite the real state that `doctor` reads
             .env("XDG_STATE_HOME", self.path("state"))
+            .env("XDG_CONFIG_HOME", self.path("config"))
             .env("RAD_PASSPHRASE", KEY_PASSPHRASE)
             .env("RAD_BACKUP_PASSPHRASE", ARCHIVE_PASSPHRASE)
             .env("NO_COLOR", "1")
@@ -307,6 +294,48 @@ esac
             );
         command
     }
+}
+
+/// Runs `command` with `input` and a line ending on its stdin.
+fn run_piping(mut command: Command, input: &str) -> Output {
+    use std::io::Write as _;
+
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("rad-backup starts");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin is piped")
+        .write_all(format!("{input}\n").as_bytes())
+        .expect("stdin is writable");
+    child.wait_with_output().expect("rad-backup finishes")
+}
+
+/// Writes a `rad` into `bin` that appends its arguments to `calls` and succeeds.
+#[cfg(unix)]
+fn write_recording_rad(bin: &Path, calls: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all(bin).expect("the stub directory is creatable");
+    let path = bin.join("rad");
+    let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", calls.display());
+    std::fs::write(&path, script).expect("the stub is writable");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the stub is executable");
+    path
+}
+
+#[cfg(not(unix))]
+fn write_recording_rad(bin: &Path, calls: &Path) -> PathBuf {
+    std::fs::create_dir_all(bin).expect("the stub directory is creatable");
+    let path = bin.join("rad.cmd");
+    let script = format!("@echo %*>> \"{}\"\r\n", calls.display());
+    std::fs::write(&path, script).expect("the stub is writable");
+    path
 }
 
 /// Creates an owner-only directory, failing when the path exists, as `crate::perms` does.
@@ -1184,6 +1213,27 @@ fn a_home_whose_directories_point_elsewhere_is_asked_about_and_never_assumed() {
     );
 }
 
+/// A home without `config.json` cannot start a node, so the words restore has `rad` write one
+#[test]
+fn rebuilding_from_words_into_an_empty_home_has_rad_write_the_alias() {
+    let fixture = Fixture::create("words-alias");
+    let home = fixture.path("empty");
+    let calls = fixture.path("rad-calls");
+    let mut command = fixture.command(&["restore", "--words", "--yes", "--alias", "kept"], &home);
+    command.env("RAD", write_recording_rad(&fixture.path("bin"), &calls));
+    let ran = run_piping(command, WORDS);
+    assert_success(&ran, "rebuilding from words into an empty home");
+    assert_eq!(
+        std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .last(),
+        Some("config init --alias kept"),
+        "{}",
+        stderr(&ran)
+    );
+}
+
 /// `--words` writes into `keys` without an archive, so it skips the archive restore's checks.
 #[cfg(unix)]
 #[test]
@@ -1195,9 +1245,17 @@ fn rebuilding_from_words_asks_about_a_linked_keys_directory_before_writing_a_key
     std::fs::create_dir_all(&elsewhere).expect("the directory pointed at is creatable");
     std::os::unix::fs::symlink(&elsewhere, home.join("keys")).expect("a symlink is creatable");
 
-    let ran = fixture.run_with_stdin(&["restore", "--words"], &home, WORDS);
+    let ran = run_piping(
+        fixture.command(&["restore", "--words", "--alias", "fixture"], &home),
+        WORDS,
+    );
     let said = stderr(&ran);
     assert_eq!(ran.status.code(), Some(4), "{said}");
+    // The link is named, so the refusal is the link question and not a later one
+    assert!(
+        said.contains(&home.join("keys").display().to_string()),
+        "{said}"
+    );
     assert_eq!(
         std::fs::read_dir(&elsewhere)
             .expect("the directory pointed at is listable")
@@ -2751,6 +2809,16 @@ fn the_shipped_script_refuses_a_home_whose_names_are_symlinks() {
     );
 }
 
+/// The `say` function from `assets/restore.sh`, which every block lifted from it prints with.
+#[cfg(unix)]
+fn shipped_say(script: &str) -> String {
+    let start = script
+        .find("say() {")
+        .expect("the shipped script still defines say");
+    let end = start + script[start..].find("\n}\n").expect("say is still closed") + 3;
+    script[start..end].to_string()
+}
+
 /// Runs the `case` lifted from `assets/restore.sh`, so a change to one reader alone fails.
 ///
 /// The table repeats a unit test in `git::tests` and adds the cases only a shell gets wrong,
@@ -2769,13 +2837,13 @@ fn the_shipped_script_refuses_every_head_this_tool_refuses() {
             .find("\n\t\tesac")
             .expect("the case about HEAD is still closed by an esac")
         + "\n\t\tesac".len();
-    let lifted = script[start..end]
+    let lifted = (shipped_say(&script) + &script[start..end])
         .replace(
             "git --git-dir \"$target\" symbolic-ref HEAD \"$head\"",
             "echo ACCEPT",
         )
         .replace(
-            "echo \"skipping HEAD for $rid: '$head' does not name a ref\" >&2",
+            "say \"skipping HEAD for $rid: '$head' does not name a ref\" >&2",
             "echo SKIP",
         );
     assert!(
@@ -2851,7 +2919,8 @@ fn the_shipped_script_warns_about_the_same_gits_this_tool_warns_about() {
             .expect("the version case is still closed")
         + "\nesac".len();
     // `$SAID` lets the table ask about versions this machine does not have installed
-    let lifted = script[start..end].replace("$(git --version 2>/dev/null || true)", "$SAID");
+    let lifted = (shipped_say(&script) + &script[start..end])
+        .replace("$(git --version 2>/dev/null || true)", "$SAID");
     assert!(
         lifted.contains("$SAID") && lifted.contains("2.46"),
         "the block no longer has what this substitutes, so it is not being tested: {lifted}"
@@ -3114,8 +3183,7 @@ fn a_home_restored_from_an_ordinary_backup_is_told_the_source_machine_still_hold
     let ran = fixture.run(&["doctor", "--json"], &fixture.home());
     assert_eq!(verdict_of(&ran, "key-copies"), "pass");
 
-    // This count pairs with the hand-written check list in `doctor.rs`. A new check in
-    // `examine` raises both, and joins `every_topic` too.
+    // `ci/pins.sh` holds this count equal to the `check_` functions in `doctor.rs`
     let report: serde_json::Value =
         serde_json::from_str(&stdout(&ran)).expect("the doctor report is json");
     assert_eq!(report["total"], 9, "{report}");

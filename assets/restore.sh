@@ -14,17 +14,22 @@
 
 set -eu
 
+# `echo` in dash and some other shells turns a backslash in a path or value into an escape
+say() {
+	printf '%s\n' "$*"
+}
+
 RAD_HOME="${1:-${RAD_HOME:-$HOME/.radicle}}"
 
 if [ ! -f manifest.json ]; then
-	echo "run this from the directory the archive was extracted into" >&2
+	say "run this from the directory the archive was extracted into" >&2
 	exit 1
 fi
 
 # `-L` as well, because a dangling symlink at the key's name fails `-e`, and the `cp` below
 # would follow it and write the private key outside the home
 if [ -e "$RAD_HOME/keys/radicle" ] || [ -L "$RAD_HOME/keys/radicle" ]; then
-	echo "$RAD_HOME already holds an identity; move it aside first" >&2
+	say "$RAD_HOME already holds an identity; move it aside first" >&2
 	exit 1
 fi
 
@@ -34,13 +39,13 @@ fi
 for name in keys node storage keys/radicle.pub config.json \
 	node/policies.db node/notifications.db node/node.db; do
 	if [ -L "$RAD_HOME/$name" ]; then
-		echo "$RAD_HOME/$name is a symlink, so restoring would write through it;" \
+		say "$RAD_HOME/$name is a symlink, so restoring would write through it;" \
 			"move it aside first" >&2
 		exit 1
 	fi
 done
 
-echo "restoring into $RAD_HOME"
+say "restoring into $RAD_HOME"
 mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node" "$RAD_HOME/storage"
 
 # The identity. The umask applies before the bytes land, so the key is never readable by
@@ -96,15 +101,15 @@ case "$git_major:$git_minor" in
 *[!0-9:]* | :* | *:)
 	# Git printing nothing means git is missing, and the next git call reports that clearly
 	if [ -n "$bundles" ] && [ -n "$git_said" ]; then
-		echo "the version of git could not be read, so it is not known whether the objects" >&2
-		echo "inside each bundle were checked on the way in" >&2
+		say "the version of git could not be read, so it is not known whether the objects" >&2
+		say "inside each bundle were checked on the way in" >&2
 	fi
 	;;
 *)
 	if [ -n "$bundles" ] && { [ "$git_major" -lt 2 ] ||
 		{ [ "$git_major" -eq 2 ] && [ "$git_minor" -lt 46 ]; }; }; then
-		echo "this git does not check the objects inside a bundle it fetches from, so the" >&2
-		echo "repositories below are written without that check; git 2.46 or newer runs it" >&2
+		say "this git does not check the objects inside a bundle it fetches from, so the" >&2
+		say "repositories below are written without that check; git 2.46 or newer runs it" >&2
 	fi
 	;;
 esac
@@ -117,7 +122,7 @@ for bundle in repos/*.bundle; do
 	# keeps `..` out, and this check keeps it out if ids are ever read from manifest.json.
 	case "$rid" in
 	'' | *[!A-Za-z0-9]*)
-		echo "skipping $bundle: '$rid' is not a repository id" >&2
+		say "skipping $bundle: '$rid' is not a repository id" >&2
 		continue
 		;;
 	esac
@@ -125,7 +130,7 @@ for bundle in repos/*.bundle; do
 	# Initialising follows a link at the repository's own name, and the archive's author knows
 	# which name to plant. It is skipped, because earlier repositories are already back.
 	if [ -L "$target" ]; then
-		echo "skipping $rid: $target is a symlink, so it would be restored outside the home" >&2
+		say "skipping $rid: $target is a symlink, so it would be restored outside the home" >&2
 		continue
 	fi
 
@@ -145,7 +150,7 @@ for bundle in repos/*.bundle; do
 				# A key with no value prints nothing, and would come back as an empty name
 				[ -n "$value" ] || continue
 				git --git-dir "$target" config "$key" "$value" 2>/dev/null ||
-					echo "skipping $key for $rid: git would not take that value" >&2
+					say "skipping $key for $rid: git would not take that value" >&2
 			done
 			# Names every key left out, except those a fresh repository writes about this
 			# disk. `--name-only` needs git 2.19, and an older git reports nothing here.
@@ -156,18 +161,18 @@ for bundle in repos/*.bundle; do
 				grep -vxE "user\.(name|email)|$init_writes|extensions\.(compat)?objectformat" ||
 				[ $? -eq 1 ])
 			if [ -n "$left_out" ]; then
-				echo "$rid: git runs what a repository config tells it to, and this" \
+				say "$rid: git runs what a repository config tells it to, and this" \
 					"archive is vouched for by nobody, so these were left out:" >&2
-				echo "$left_out" | sed 's/^/  /' >&2
+				say "$left_out" | sed 's/^/  /' >&2
 			fi
 		else
-			echo "the config in the archive for $rid could not be read, so it came back" \
+			say "the config in the archive for $rid could not be read, so it came back" \
 				"without its name and DID" >&2
 		fi
 	fi
 
 	if ! command -v jq >/dev/null 2>&1; then
-		echo "jq is not installed, so $rid came back without its HEAD" >&2
+		say "jq is not installed, so $rid came back without its HEAD" >&2
 	else
 		head=$(jq -r --arg rid "rad:$rid" \
 			'.repos[] | select(.rid==$rid) | .head // empty' manifest.json)
@@ -178,9 +183,9 @@ for bundle in repos/*.bundle; do
 		'') ;;
 		*[[:cntrl:]]* | *..* | */.* | *//* | */ | *.lock | *.lock/* \
 		| *' '* | *'~'* | *'^'* | *':'* | *'?'* | *'*'* | *'['* | *\\*)
-			echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
+			say "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
 		refs/?*) git --git-dir "$target" symbolic-ref HEAD "$head" ;;
-		*) echo "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
+		*) say "skipping HEAD for $rid: '$head' does not name a ref" >&2 ;;
 		esac
 	fi
 
@@ -192,21 +197,23 @@ case "$restored" in
 *) counted="$restored repositories" ;;
 esac
 if [ -f node/policies.db ]; then
-	echo "restored the identity, its policies and $counted"
+	say "restored the identity, its policies and $counted"
 else
-	echo "restored the identity and $counted; this archive carried no policies"
+	say "restored the identity and $counted; this archive carried no policies"
 fi
+# The home as one shell word, so a pasted command survives a `'` in the path
+home_word="RAD_HOME='$(printf '%s' "$RAD_HOME" | sed "s/'/'\\\\''/g")'"
 if [ "$restored" -gt 0 ]; then
-	echo
-	echo "to see your issues and patches again, run this once:"
-	echo "    RAD_HOME='$RAD_HOME' rad cob migrate"
-	echo "and then this for each repository:"
-	echo "    RAD_HOME='$RAD_HOME' rad issue cache --repo <rid>"
-	echo "    RAD_HOME='$RAD_HOME' rad patch cache --repo <rid>"
+	say
+	say "to see your issues and patches again, run this once:"
+	say "    $home_word rad cob migrate"
+	say "and then this for each repository:"
+	say "    $home_word rad issue cache --repo <rid>"
+	say "    $home_word rad patch cache --repo <rid>"
 fi
-echo
-echo "before writing to any restored repository, fetch what the network has:"
-echo "    RAD_HOME='$RAD_HOME' rad sync <rid> --fetch"
-echo "writing on top of refs the network has already moved past forks your own history."
-echo
-echo "and never run two nodes with this key at once."
+say
+say "before writing to any restored repository, fetch what the network has:"
+say "    $home_word rad sync <rid> --fetch"
+say "writing on top of refs the network has already moved past forks your own history."
+say
+say "and never run two nodes with this key at once."

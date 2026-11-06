@@ -11,7 +11,7 @@ use crate::perms::{MODE_DOC, set_dir_owner_only, write_atomically, write_owner_o
 const TYPED_LINE: usize = 24 * 8 + 23 + 2;
 
 /// Rebuild an identity from a mnemonic, for when the paper sheet is all that is left.
-pub fn restore(ctx: &Ctx) -> Result<()> {
+pub fn restore(ctx: &Ctx, alias: Option<&str>) -> Result<()> {
     use std::io::BufRead;
 
     let home = &ctx.home;
@@ -63,6 +63,21 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
         return Err(Error::refused("nothing was written", remedy));
     }
 
+    // `rad` cannot start a node without an alias in `config.json`, so a key alone is a home
+    // that does not work. The config is written before the key, so a run that stops on a bad
+    // alias leaves nothing a re-run refuses over.
+    let config = home.config();
+    if config.symlink_metadata().is_ok() {
+        ctx.term
+            .ok(&format!("kept the alias already in {}", config.display()));
+        if alias.is_some() {
+            ctx.term
+                .warn("--alias was not used, because that file already sets one");
+        }
+    } else {
+        write_config(ctx, alias)?;
+    }
+
     let passphrase = crypt::read_passphrase(
         crypt::Protects::RadicleKey,
         // `--passphrase-file` holds the archive passphrase, so reading it here would silently
@@ -92,9 +107,48 @@ pub fn restore(ctx: &Ctx) -> Result<()> {
     ctx.term
         .ok(&format!("wrote the key into {}", home.keys_dir().display()));
     ctx.term
-        .hint("only the key was restored. Run `rad node start` to reconnect to the network");
+        .hint("your key and alias are restored. Run `rad node start` to reconnect to the network");
     ctx.term
         .hint("to get your repositories back, run `rad clone <rid>` for each one");
+    Ok(())
+}
+
+/// Asks for the alias when none was given, and has `rad` write `config.json` with it.
+fn write_config(ctx: &Ctx, alias: Option<&str>) -> Result<()> {
+    use std::io::BufRead;
+
+    let rad = crate::rad::Rad::new(ctx.home.path());
+    if !rad.is_available() {
+        return Err(Error::refused(
+            format!(
+                "nothing was written, because {}",
+                crate::exec::rad_missing(crate::exec::rad_override_from_env().as_deref())
+            ),
+            "install rad, which writes the config that holds your alias, then run again",
+        ));
+    }
+    let alias = match alias {
+        Some(alias) => alias.to_string(),
+        None if ctx.term.is_interactive() => {
+            ctx.term
+                .headline("Type your alias. It is printed on your recovery sheet:");
+            let mut typed = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut typed)
+                .map_err(Error::PathlessIo)?;
+            typed.trim().to_string()
+        }
+        None => String::new(),
+    };
+    if alias.is_empty() {
+        return Err(Error::refused(
+            "nothing was written, because your node needs an alias",
+            "pass --alias <name> with the alias printed on your recovery sheet",
+        ));
+    }
+    rad.init_config(&alias)?;
+    ctx.term.ok(&format!("set your alias to {alias}"));
     Ok(())
 }
 

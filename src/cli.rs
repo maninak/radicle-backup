@@ -424,6 +424,11 @@ pub struct Restore {
     /// Use it when you have the recovery sheet and no archive.
     #[arg(long, conflicts_with = "archive")]
     pub words: bool,
+
+    /// The alias your node shows to others, for `--words`. It is printed on the recovery
+    /// sheet. Without this flag, the restore asks for it.
+    #[arg(long, requires = "words", value_name = "NAME")]
+    pub alias: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]

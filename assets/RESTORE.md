@@ -87,7 +87,7 @@ for bundle in repos/*.bundle; do
   # pointed somewhere else builds the repository there instead. This is a separate paste from
   # the block in step 1, so it asks again rather than trusting that you ran that one.
   if [ -L "$RAD_HOME/storage" ] || [ -L "$RAD_HOME/storage/$rid" ]; then
-    echo "skipping $rid: it would be restored outside $RAD_HOME" >&2
+    printf '%s\n' "skipping $rid: it would be restored outside $RAD_HOME" >&2
     continue
   fi
   git init --bare --quiet "$RAD_HOME/storage/$rid"

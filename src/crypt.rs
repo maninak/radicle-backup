@@ -161,9 +161,18 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
         let reader = decryptor
             .decrypt(std::iter::once(&identity as &dyn age::Identity))
-            // Unwrapping the file key is the step a passphrase can be wrong at, so every
-            // failure here is a wrong passphrase. Payload errors arrive later, as io errors.
-            .map_err(|_| Error::WrongPassphrase)?;
+            // Unwrapping the file key is where a passphrase can be wrong. Payload errors arrive
+            // later, as io errors. `ExcessiveWork` comes before the passphrase is tried, so
+            // reporting it as a wrong passphrase tells the user a good backup is lost.
+            .map_err(|failure| match failure {
+                // Exit 1, because a retry on this machine meets the same limit
+                age::DecryptError::ExcessiveWork { .. } => Error::Age(
+                    "the passphrase was not checked. Checking it takes more work than age \
+                     allows on this machine\nopen the archive on a faster machine"
+                        .to_string(),
+                ),
+                _ => Error::WrongPassphrase,
+            })?;
         return Ok(Box::new(AuthenticatingReader(reader)));
     }
 

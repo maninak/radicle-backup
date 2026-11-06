@@ -130,6 +130,14 @@ impl Rad {
         }
     }
 
+    /// Writes a new `config.json` with the alias the node announces.
+    pub fn init_config(&self, alias: &str) -> Result<()> {
+        // `rad config init` prints the new config on stdout, which is noise to the user
+        self.tool
+            .output(&["config", "init", "--alias", alias])
+            .map(drop)
+    }
+
     pub fn block_peer(&self, nid: &str) -> Result<bool> {
         self.tool.passthrough(&["block", nid])
     }
@@ -160,7 +168,7 @@ pub enum Cached {
 impl Cached {
     pub const ALL: [Self; 2] = [Self::Issues, Self::Patches];
 
-    fn subcommand(self) -> &'static str {
+    pub fn subcommand(self) -> &'static str {
         match self {
             Self::Issues => "issue",
             Self::Patches => "patch",

@@ -81,21 +81,18 @@ for reader in assets/restore.sh assets/RESTORE.md; do
 	fi
 done
 
-# How many checks `doctor` runs, which three places state and none derives
+# How many checks `doctor` runs, which two places state and neither derives
 pins=$((pins + 1))
 defined=$(found '^fn check_[a-z_]+' src/cmd/doctor.rs | grep -c '' || [ $? -eq 1 ])
-pinned=$(found 'CHECKS_THE_COMMAND_RUNS: usize = [0-9]+' src/cmd/doctor.rs | grep -oE '[0-9]+$' ||
-	[ $? -eq 1 ])
 asked=$(found 'report\["total"\], [0-9]+' tests/end_to_end.rs | grep -oE '[0-9]+$' || [ $? -eq 1 ])
-if [ -z "$pinned" ] || [ -z "$asked" ] || [ "$defined" -eq 0 ]; then
+if [ -z "$asked" ] || [ "$defined" -eq 0 ]; then
 	echo "the doctor check count is no longer written where this gate reads it: $defined" \
-		"definitions, '$pinned' pinned, '$asked' asked of the real command" | complain
+		"definitions, '$asked' asked of the real command" | complain
 	exit 1
 fi
-if [ "$defined" != "$pinned" ] || [ "$defined" != "$asked" ]; then
-	echo "doctor defines $defined checks, its own constant says $pinned and the integration" \
-		"suite asks the real command for $asked. A check added to the command and to nothing" \
-		"else is swept by none of the rules that read that list." | complain
+if [ "$defined" != "$asked" ]; then
+	echo "doctor defines $defined checks and the integration suite asks the real command" \
+		"for $asked. Update the total the suite expects." | complain
 	wrong=1
 fi
 

@@ -207,8 +207,7 @@ impl<'a> Reader<'a> {
     /// Reads the whole archive without writing anything, hashing as it goes.
     pub fn scan(self, archive_path: &Path) -> Result<Scan> {
         self.walk(archive_path, |_, reader| {
-            io::copy(reader, &mut io::sink()).map_err(Error::PathlessIo)?;
-            Ok(())
+            copy_entry(reader, archive_path, &mut io::sink(), archive_path)
         })
     }
 
@@ -224,9 +223,8 @@ impl<'a> Reader<'a> {
                 std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
             }
             let mut file = crate::perms::create_private_file(&destination)?;
-            io::copy(reader, &mut file).map_err(Error::PathlessIo)?;
-            file.flush().map_err(Error::PathlessIo)?;
-            Ok(())
+            copy_entry(reader, archive_path, &mut file, &destination)?;
+            file.flush().map_err(|e| Error::io(&destination, e))
         })
     }
 
@@ -238,9 +236,12 @@ impl<'a> Reader<'a> {
         let mut manifest = None;
         let mut observed = BTreeMap::new();
 
-        for entry in self.archive.entries().map_err(Error::PathlessIo)? {
-            let mut entry = entry.map_err(Error::PathlessIo)?;
-            let entry_name_os = entry.path().map_err(Error::PathlessIo)?.into_owned();
+        // A damaged archive fails here with zstd's or age's bare message, so each error names
+        // the archive
+        let damaged = |e| Error::io(archive_path, e);
+        for entry in self.archive.entries().map_err(damaged)? {
+            let mut entry = entry.map_err(damaged)?;
+            let entry_name_os = entry.path().map_err(damaged)?.into_owned();
             // A lossy conversion maps two non-UTF-8 names to one string, and one file then
             // silently overwrites the other. Entry names this tool writes are ASCII.
             let entry_path = entry_name_os
@@ -270,7 +271,7 @@ impl<'a> Reader<'a> {
                     });
                 }
                 let mut json = String::new();
-                entry.read_to_string(&mut json).map_err(Error::PathlessIo)?;
+                entry.read_to_string(&mut json).map_err(damaged)?;
                 // The error names the archive, because serde alone names no file
                 manifest = Some(serde_json::from_str::<Manifest>(&json).map_err(|e| {
                     Error::NotAnArchive {
@@ -310,6 +311,27 @@ impl<'a> Reader<'a> {
             reject_hostile_rid(&repo.rid, archive_path)?;
         }
         Ok(Scan { manifest, observed })
+    }
+}
+
+/// Copies one entry out, naming the archive for a read error and `destination` for a write one.
+fn copy_entry(
+    reader: &mut dyn Read,
+    archive_path: &Path,
+    writer: &mut impl Write,
+    destination: &Path,
+) -> Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(Error::io(archive_path, e)),
+        };
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|e| Error::io(destination, e))?;
     }
 }
 

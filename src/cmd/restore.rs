@@ -218,7 +218,8 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     // The links are settled before the `--words` branch, which also writes a key into `keys`
     let settled = settle_directories_that_point_elsewhere(ctx)?;
     if args.words {
-        return crate::cmd::words::restore(ctx).map(|()| std::process::ExitCode::SUCCESS);
+        return crate::cmd::words::restore(ctx, args.alias.as_deref())
+            .map(|()| std::process::ExitCode::SUCCESS);
     }
 
     let Some(archive) = &args.archive else {
@@ -331,6 +332,9 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
 
     install(ctx, &staging, &settled)?;
     let restored = restore_repositories(ctx, &staging, &manifest, &settled)?;
+    // Recorded before the slow cache rebuild, so an interrupted rebuild still leaves the
+    // record of a home that is already restored
+    remember(ctx, &manifest, &restored.repos, archive, encrypted);
     rebuild_caches(ctx, &restored.repos);
 
     let policies_missed = if args.replay_policies {
@@ -339,16 +343,12 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         Vec::new()
     };
 
-    // The record is written before the comparison's error propagates, because the identity,
-    // repositories and policies are on disk by now. A failed `rad node start` must not leave a
-    // fully restored home that has no record of its archive.
     let comparison = if args.no_reconcile {
         term.warn("--no-reconcile: nothing was compared with the network");
         Ok(nothing_compared(&restored.repos, NetworkCheck::Declined))
     } else {
         reconcile(ctx, &manifest, &restored.repos)
     };
-    remember(ctx, &manifest, &restored.repos, archive, encrypted);
     let reconciled = comparison?;
 
     report(ctx, &manifest, &restored, &reconciled, &policies_missed)
@@ -394,7 +394,8 @@ fn remember(
     });
     if let Err(e) = state::write(&record) {
         ctx.term.warn(&format!(
-            "the restore is done, but it could not be recorded: {e}"
+            "the restore could not be recorded: {e}. `doctor` and `diff` will not know which \
+             archive this home came from"
         ));
     }
 }
@@ -692,10 +693,17 @@ fn rebuild_caches(ctx: &Ctx, restored: &[RepoRecord]) {
     if restored.is_empty() {
         return;
     }
-    let home = format!("RAD_HOME='{}'", ctx.home.path().display());
+    let home = format!(
+        "RAD_HOME={}",
+        shell_quoted(&ctx.home.path().display().to_string())
+    );
+    let migrate = format!("run `{home} rad cob migrate`");
+    let recache =
+        |kind: Cached, rid: &str| format!("`{home} rad {} cache --repo {rid}`", kind.subcommand());
     let by_hand = &format!(
-        "run `{home} rad cob migrate`, then `{home} rad issue cache --repo <rid>` and \
-         `{home} rad patch cache --repo <rid>` for each repository"
+        "{migrate}, then {} and {} for each repository",
+        recache(Cached::Issues, "<rid>"),
+        recache(Cached::Patches, "<rid>")
     );
     let rad = Rad::new(ctx.home.path());
     if !rad.is_available() {
@@ -723,7 +731,12 @@ fn rebuild_caches(ctx: &Ctx, restored: &[RepoRecord]) {
                 .recache(kind, &repo.rid)
                 .unwrap_or_else(|e| Some(e.one_line()))
             {
-                failed.push(format!("{}, {}: {why}", repo.display_name(), kind.noun()));
+                failed.push(format!(
+                    "{}, {}: {why}. To retry, run {}",
+                    repo.display_name(),
+                    kind.noun(),
+                    recache(kind, &repo.rid)
+                ));
             }
         }
     }
@@ -732,8 +745,12 @@ fn rebuild_caches(ctx: &Ctx, restored: &[RepoRecord]) {
         for line in &failed {
             ctx.term.detail(line);
         }
-        ctx.term.detail(by_hand);
     }
+}
+
+/// Quotes `text` as one word for a POSIX shell.
+fn shell_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 /// What came back out of the bundles, and what did not.

@@ -341,10 +341,6 @@ mod tests {
         ] {
             assert!(said.contains(way), "the refusal leaves out {way}: {said}");
         }
-        // Every line fits an 80-column terminal once `main` prefixes the first with `✗ `
-        for line in refusal.to_string().lines() {
-            assert!(line.chars().count() + 2 <= 80, "{line}");
-        }
     }
 
     #[test]

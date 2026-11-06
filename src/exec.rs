@@ -5,7 +5,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use crate::error::{Error, Result};
@@ -32,7 +32,7 @@ pub struct Spoken {
 /// A program to spawn, with the Radicle home and passphrases its environment carries.
 pub struct Tool {
     program: OsString,
-    home: Option<String>,
+    home: Option<PathBuf>,
     secrets: Secrets,
 }
 
@@ -69,7 +69,7 @@ impl Tool {
     pub fn rad(home: &Path) -> Self {
         Self {
             program: rad_override_from_env().unwrap_or_else(|| OsString::from("rad")),
-            home: Some(home.to_string_lossy().into_owned()),
+            home: Some(home.to_path_buf()),
             secrets: Secrets::Only(crate::crypt::Protects::RadicleKey),
         }
     }
@@ -151,14 +151,9 @@ impl Tool {
         if finished.status.success() {
             return Ok(None);
         }
-        let said = String::from_utf8_lossy(&finished.stderr).trim().to_string();
+        let said = what_it_said(&finished);
         if !said.is_empty() {
             return Ok(Some(said));
-        }
-        // Only the last line of stdout, because the lines before it are progress
-        let stdout = String::from_utf8_lossy(&finished.stdout);
-        if let Some(last) = stdout.lines().rev().find(|line| !line.trim().is_empty()) {
-            return Ok(Some(last.trim().to_string()));
         }
         Ok(Some(match finished.status.code() {
             Some(code) => format!(
@@ -256,9 +251,7 @@ impl Tool {
                 Some(code) => format!("exit code {code}"),
                 None => "a signal".to_string(),
             },
-            stderr: String::from_utf8_lossy(&finished.stderr)
-                .trim_end()
-                .to_string(),
+            stderr: what_it_said(finished),
         }
     }
 
@@ -270,6 +263,22 @@ impl Tool {
         }
         line
     }
+}
+
+/// A failed program's stderr, else the last line of its stdout, because `rad` reports some
+/// errors there and the lines before the last are progress.
+fn what_it_said(finished: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&finished.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    String::from_utf8_lossy(&finished.stdout)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

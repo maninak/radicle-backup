@@ -37,13 +37,18 @@ const SERVICE: &str = "rad-backup.service";
 const TIMER: &str = "rad-backup.timer";
 
 pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
-    ctx.home.require_identity()?;
     // A bad `--keep` here would be installed into a file a timer reads every night
     if let Some(keep) = args.keep {
         crate::cmd::refuse_keep_zero(keep)?;
     }
     let systemctl = Tool::on_path("systemctl");
     if !systemctl.is_available() {
+        if args.off {
+            return Err(Error::refused(
+                "this machine has no systemd, so there is no timer to turn off",
+                "if you added a rad-backup line with `crontab -e`, remove it there",
+            ));
+        }
         return refuse_without_systemd(ctx, args);
     }
 
@@ -63,6 +68,8 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
         ctx.term.hint("turn it back on with `rad backup schedule`");
         return Ok(());
     }
+    // Only now, because `--off` must work on a home whose key `move` retired
+    ctx.home.require_identity()?;
 
     // An unattended run cannot be asked for a passphrase, so a timer without one fails every
     // night. A `RAD_BACKUP_PASSPHRASE` exported in this shell never reaches the timer, which
@@ -349,6 +356,34 @@ fn unit_dir_from_env() -> Result<PathBuf> {
         None => home_dir_from_env()?.join(".config"),
     };
     Ok(base.join("systemd").join("user"))
+}
+
+/// Whether the timer is on and backs up `home`. Anything that cannot be read counts as no.
+pub fn backs_up_from_env(home: &Path) -> bool {
+    let Ok(text) = environment_file_from_env()
+        .and_then(|path| std::fs::read_to_string(&path).map_err(|e| Error::io(&path, e)))
+    else {
+        return false;
+    };
+    names_home(&text, home)
+        && Tool::on_path("systemctl")
+            .spoken(&["--user", "is-enabled", TIMER])
+            .is_ok_and(|said| timer_is_on(&said.stdout))
+}
+
+/// Whether `a` and `b` name one directory, however each is spelled.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Whether the environment file `text` points the timer at `home`.
+fn names_home(text: &str, home: &Path) -> bool {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("RAD_HOME="))
+        .any(|value| same_path(Path::new(value), home))
 }
 
 fn environment_file_from_env() -> Result<PathBuf> {

@@ -105,6 +105,15 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
     } else {
         retire(ctx, &archive)?;
     }
+    // The archive carries no timer, so without these lines the new machine takes no backups
+    // and nothing says so
+    let scheduled = crate::cmd::schedule::backs_up_from_env(ctx.home.path());
+    if scheduled && !args.keep_source {
+        ctx.term.hint(
+            "the backup timer on this machine has no key to back up now. Turn it off with \
+             `rad backup schedule --off`",
+        );
+    }
 
     ctx.term.blank();
     ctx.term.headline("on the other machine");
@@ -119,6 +128,12 @@ pub fn run(ctx: &Ctx, args: &Migrate) -> Result<()> {
         "it then compares them with the network and warns about any repository you should not \
          write to yet",
     );
+    if scheduled {
+        ctx.term.hint(
+            "the archive does not carry your backup timer. Run `rad backup schedule` there \
+             with the flags you used here",
+        );
+    }
     Ok(())
 }
 
