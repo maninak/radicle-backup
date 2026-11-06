@@ -41,7 +41,7 @@ ssh-key = { version = "0.6.7", features = ["encryption", "ed25519", "getrandom"]
 tar = "0.4.46"
 thiserror = "2.0.21"
 zeroize = "1.9.0"
-zstd = "0.14.0"
+zstd = "0.14.3"
 
 [profile.release]
 opt-level = 3
@@ -61,7 +61,7 @@ unwrap_used = "deny"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.151"
 # The hygiene test decodes a plaintext archive itself, so it checks the bytes on disk
-zstd = "0.14.0"
+zstd = "0.14.3"
 
 # Debian packaging, used by `just deb` and by the release workflow alike
 [package.metadata.deb]

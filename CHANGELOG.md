@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html). The archive format has its own version, tracked in `ARCHIVE-FORMAT.md`.
 
+## [Unreleased]
+
+### Security
+
+- The zstd library that compresses and reads archives is updated to a release that fixes several memory-safety bugs. One of them could expose uninitialised memory while reading a damaged or crafted archive.
+
 ## [0.4.1] - 2026-10-16
 
 ### Fixed
