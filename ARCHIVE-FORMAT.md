@@ -44,7 +44,7 @@ Keys are camelCase. Unknown keys must be ignored, and unknown values of `tier` a
 ```json
 {
   "format": 1,
-  "tool": { "name": "rad-backup", "version": "0.4.1" },
+  "tool": { "name": "rad-backup", "version": "0.4.2" },
   "created": "2026-08-14T16:56:09Z",
   "tier": "state",
   "repoSelection": "private",
