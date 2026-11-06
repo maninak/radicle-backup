@@ -74,13 +74,16 @@
   <ol>
     <li>Install Radicle, then <code>rad-backup</code>, on the machine you are recovering to.</li>
     <li>If this sheet shows words: run <code>rad-backup restore --words</code> and type them in.
-        It will rebuild the key and ask you for a new passphrase.</li>
+        It will rebuild the key, ask for the alias shown on this sheet, and ask you for a new
+        passphrase.</li>
     <li>If this sheet shows a key file: scan or retype it into
         <code>$RAD_HOME/keys/radicle</code>, then run <code>chmod 600</code> on it, and derive
         the public half with
         <code>ssh-keygen -y -f $RAD_HOME/keys/radicle &gt; $RAD_HOME/keys/radicle.pub</code>.</li>
     <li>Check that you got the right one: <code>ssh-keygen -l -f $RAD_HOME/keys/radicle.pub</code>
         should print the fingerprint above.</li>
+    <li>If <code>$RAD_HOME/config.json</code> does not exist, set your alias with
+        <code>rad config init --alias {{ALIAS}}</code>.</li>
     <li>Start the node with <code>rad node start</code>. Your public repositories come back from
         the network with <code>rad clone</code>. Private ones do not: only your own archives
         have those.</li>

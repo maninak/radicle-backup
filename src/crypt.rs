@@ -1,7 +1,7 @@
 //! Encryption of the archive, and where the passphrase for it comes from.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -130,23 +130,22 @@ pub struct Identities {
     pub is_interactive: bool,
 }
 
+/// The highest scrypt work factor this tool raises age's limit to, about 4 GiB of memory.
+/// age's own documentation calls values above 22 a denial-of-service risk
+const MAX_SCRYPT_WORK_FACTOR: u8 = 22;
+
 /// Wraps a reader so that it yields plaintext, whatever the archive was encrypted with.
-pub fn decrypting_reader<'a, R: Read + 'a>(
-    input: R,
+pub fn decrypting_reader<'a, R: Read + Seek + 'a>(
+    mut input: R,
     archive_passphrase: Option<&Zeroizing<String>>,
     identities: &Identities,
 ) -> Result<Box<dyn Read + 'a>> {
-    let buffered = io::BufReader::new(input);
-    let decryptor = match age::Decryptor::new_buffered(buffered) {
-        Ok(decryptor) => decryptor,
-        // `looks_encrypted` has already seen the age magic, so an unparseable header is
-        // damage. age's own parse error names internals nobody can act on.
-        Err(_) => {
-            return Err(Error::Age(
-                "the archive's encryption header is damaged".to_string(),
-            ));
-        }
-    };
+    let work = scrypt_work(&mut input)?;
+    input
+        .rewind()
+        .map_err(|e| Error::Age(format!("the archive could not be reread: {e}")))?;
+    let decryptor =
+        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(|_| damaged_header())?;
 
     if decryptor.is_scrypt() {
         let passphrase = archive_passphrase.ok_or_else(|| {
@@ -158,7 +157,24 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
                 ),
             )
         })?;
-        let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
+        let mut identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
+        // age refuses past four steps above this machine's one-second target, so an archive from
+        // a much faster machine would not open here. The limit is set even below that, because
+        // the probe times its own target, which can come out one step higher
+        if let Some(Work { required, target }) = work
+            && required <= MAX_SCRYPT_WORK_FACTOR
+        {
+            identity.set_max_work_factor(required);
+            if required > target.saturating_add(4) {
+                // Announced, because nothing else is printed while scrypt runs
+                eprintln!(
+                    "! this machine is slower than the one that wrote the archive. Checking the \
+                     passphrase takes about {} and {} MiB of memory",
+                    rough_duration(1u64 << (required - target)),
+                    1u64 << (required - 10)
+                );
+            }
+        }
         let reader = decryptor
             .decrypt(std::iter::once(&identity as &dyn age::Identity))
             // Unwrapping the file key is where a passphrase can be wrong. Payload errors arrive
@@ -167,10 +183,11 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
             .map_err(|failure| match failure {
                 // Exit 1, because a retry on this machine meets the same limit
                 age::DecryptError::ExcessiveWork { .. } => Error::Age(
-                    "the passphrase was not checked. Checking it takes more work than age \
-                     allows on this machine\nopen the archive on a faster machine"
+                    "the passphrase was not checked. Checking it on this machine takes more \
+                     memory and time than is safe to try\nopen the archive on a faster machine"
                         .to_string(),
                 ),
+                age::DecryptError::InvalidHeader => damaged_header(),
                 _ => Error::WrongPassphrase,
             })?;
         return Ok(Box::new(AuthenticatingReader(reader)));
@@ -194,6 +211,45 @@ pub fn decrypting_reader<'a, R: Read + 'a>(
         .decrypt(identity_refs.into_iter())
         .map_err(|failure| offered.explain(failure))?;
     Ok(Box::new(AuthenticatingReader(reader)))
+}
+
+// `looks_encrypted` has already seen the age magic, so an unparseable header is damage.
+// age's own parse error names internals nobody can act on
+fn damaged_header() -> Error {
+    Error::Age("the archive's encryption header is damaged".to_string())
+}
+
+/// The scrypt work factor a passphrase archive asks for, and this machine's one-second one.
+struct Work {
+    required: u8,
+    target: u8,
+}
+
+/// Reads the work factor from the header without running scrypt, by offering a passphrase
+/// identity that accepts no work at all. `None` for an archive encrypted to a key.
+fn scrypt_work(input: &mut impl Read) -> Result<Option<Work>> {
+    let decryptor =
+        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(|_| damaged_header())?;
+    if !decryptor.is_scrypt() {
+        return Ok(None);
+    }
+    let mut probe = age::scrypt::Identity::new(SecretString::from(String::new()));
+    probe.set_max_work_factor(0);
+    match decryptor.decrypt(std::iter::once(&probe as &dyn age::Identity)) {
+        Err(age::DecryptError::ExcessiveWork { required, target }) => {
+            Ok(Some(Work { required, target }))
+        }
+        // The real attempt meets the same header and reports what is wrong with it
+        _ => Ok(None),
+    }
+}
+
+fn rough_duration(seconds: u64) -> String {
+    if seconds < 120 {
+        format!("{seconds} seconds")
+    } else {
+        format!("{} minutes", seconds / 60)
+    }
 }
 
 /// A reader that says what a failure in the encrypted payload means.
@@ -811,6 +867,44 @@ mod tests {
             &Identities::default(),
         );
         assert!(matches!(opened, Err(Error::WrongPassphrase)));
+    }
+
+    #[test]
+    fn an_archive_asking_for_more_work_than_is_safe_is_not_reported_as_a_wrong_passphrase() {
+        let passphrase = Zeroizing::new("right".to_string());
+        let mut buffer = Vec::new();
+        let mut sink = Sink::new(
+            Box::new(io::Cursor::new(&mut buffer)),
+            &Encryption::Passphrase(passphrase.clone()),
+        )
+        .expect("sink is buildable");
+        sink.write_all(b"secret").expect("plaintext is writable");
+        sink.finish().expect("sink finishes");
+        let header_end = buffer
+            .windows(4)
+            .position(|w| w == b"\n---")
+            .expect("an age header ends in a MAC line");
+        let header = std::str::from_utf8(&buffer[..header_end]).expect("an age header is text");
+        let stanza = header
+            .lines()
+            .find(|line| line.starts_with("-> scrypt "))
+            .expect("a passphrase archive has a scrypt stanza");
+        let (salt, _) = stanza
+            .rsplit_once(' ')
+            .expect("the stanza ends in its work factor");
+        let crafted = header.replacen(stanza, &format!("{salt} 40"), 1);
+        let mut tampered = crafted.into_bytes();
+        tampered.extend_from_slice(&buffer[header_end..]);
+
+        let opened = decrypting_reader(
+            io::Cursor::new(&tampered),
+            Some(&passphrase),
+            &Identities::default(),
+        );
+        assert!(
+            matches!(&opened, Err(Error::Age(message)) if message.starts_with("the passphrase was not checked")),
+            "a good archive is neither damaged nor locked by a wrong passphrase"
+        );
     }
 
     #[test]

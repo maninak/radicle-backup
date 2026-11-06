@@ -19,8 +19,7 @@ export RAD_HOME="${RAD_HOME:-$HOME/.radicle}"
 if [ -e "$RAD_HOME/keys/radicle" ] || [ -L "$RAD_HOME/keys/radicle" ]; then
   echo "a key is already there; move it aside, or point RAD_HOME somewhere empty" >&2
 elif [ -L "$RAD_HOME/keys" ] || [ -L "$RAD_HOME/node" ] || [ -L "$RAD_HOME/storage" ]; then
-  echo "a directory this restore fills is a symlink, so the steps below would write" \
-    "outside $RAD_HOME; move it aside first" >&2
+  printf '%s\n' "a directory this restore fills is a symlink, so the steps below would write outside $RAD_HOME; move it aside first" >&2
 else
   mkdir -p "$RAD_HOME/keys" "$RAD_HOME/node"
 

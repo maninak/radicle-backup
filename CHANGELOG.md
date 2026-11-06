@@ -6,20 +6,20 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
-- `restore --words` now also sets your node's alias, so `rad node start` works right after it. It used to restore only the key, and `rad` could not start a node from that home.
-- A wrong-passphrase error no longer shows up when the passphrase is right but the machine is too slow. age makes a passphrase cost about a second to check on the machine that wrote the archive, and refuses to check one that would take far longer on this machine. The error now says the passphrase was not checked, and to use a faster machine.
-- `move` now reminds you to set up timed backups again on the other machine, and to turn off the timer on this one. The archive does not carry the timer, so the other machine took no backups and nothing said so.
+- `restore --words` now also sets your node's alias, so `rad node start` works right after it. It asks for the alias printed on your recovery sheet. It used to restore only the key, and `rad` could not start a node from that home.
+- A passphrase-protected archive written on a much faster machine now opens on a slow one. `age` makes a passphrase cost about a second to check on the machine that wrote the archive, so a slower machine takes longer. `rad backup` first says how long the check will take and how much memory it needs. It used to refuse, and said the right passphrase was wrong.
+- `move` now reminds you to set up timed backups again on the other machine, and to turn off the timer on this one. The archive does not carry the timer, so the other machine took no backups and nothing said so. `schedule --off` now also works after `move` retired the key on this machine.
 - Several small `restore` fixes:
   - When rebuilding a repository's issue or patch list fails, `restore` now prints the exact command to retry it.
   - The commands `restore` and `restore.sh` print to run by hand now work when the Radicle home's path holds a `'`.
-  - A restore stopped while it rebuilds those lists is still recorded, so `doctor` and `diff` know where the home came from.
-  - A home whose path is not valid UTF-8 no longer gets a stray empty directory beside it.
-  - The `restore.sh` script inside a new archive no longer mangles paths that hold a backslash.
+  - A restore stopped while it rebuilds the issue and patch lists still records which archive it came from, so `doctor` and `diff` know.
+  - The messages `restore.sh` prints no longer garble a path that holds a backslash.
+  - `restore --replay-policies` now works when your Radicle cannot read the archived policy database, which is what the flag is for. It used to copy that database in anyway, which could break the replay.
 - A damaged archive is now named in the error that reports the damage. `verify` and `restore` used to print only a bare message such as "Data corruption detected".
 
 ### Security
 
-- The zstd library that compresses and reads archives is updated to a release that fixes several memory-safety advisories.
+- The zstd library that compresses and reads archives is updated to a release that fixes several memory-safety advisories. As far as the advisories describe them, none reach the way `rad backup` uses zstd.
 
 ## [0.4.1] - 2026-10-16
 

@@ -211,7 +211,7 @@ pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
 
 /// How much room [`fill`] needs before it writes anything.
 ///
-/// Each value counts once per marker that asks for it, because `{{ALIAS}}` appears twice in
+/// Each value counts once per marker that asks for it, because `{{ALIAS}}` appears more than once in
 /// the recovery sheet, and a buffer that grows midway frees a block holding the key.
 fn room_for(template: &str, values: &[(&str, &str)]) -> usize {
     template.len()

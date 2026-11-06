@@ -330,7 +330,12 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
         ));
     }
 
-    install(ctx, &staging, &settled)?;
+    let policies = if args.replay_policies {
+        PolicySource::Replay
+    } else {
+        PolicySource::Copy
+    };
+    install(ctx, &staging, &settled, policies)?;
     let restored = restore_repositories(ctx, &staging, &manifest, &settled)?;
     // Recorded before the slow cache rebuild, so an interrupted rebuild still leaves the
     // record of a home that is already restored
@@ -338,7 +343,11 @@ pub fn run(ctx: &Ctx, args: &Restore) -> Result<std::process::ExitCode> {
     rebuild_caches(ctx, &restored.repos);
 
     let policies_missed = if args.replay_policies {
-        replay_policies(ctx, &staging)?
+        let replayed = replay_policies(ctx, &staging);
+        // Recorded again, even after a failed replay, because the first record ran before the
+        // replay wrote any policy
+        remember(ctx, &manifest, &restored.repos, archive, encrypted);
+        replayed?
     } else {
         Vec::new()
     };
@@ -567,8 +576,17 @@ fn appended(existing: &str, note: &str) -> String {
     format!("{existing}\n{note}")
 }
 
+/// How the seeding and follow policies reach the restored home.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PolicySource {
+    Copy,
+    /// Left for `replay_policies`, because a database the installed Radicle cannot read would
+    /// also break the `rad` commands that replay it
+    Replay,
+}
+
 /// Moves the identity, the config and the databases into place.
-fn install(ctx: &Ctx, staging: &Path, settled: &[Settled]) -> Result<()> {
+fn install(ctx: &Ctx, staging: &Path, settled: &[Settled], policies: PolicySource) -> Result<()> {
     let home = &ctx.home;
     // Asked again after the unpack, which takes long enough for a node to start. A node
     // writing to the home while its databases are copied over corrupts both.
@@ -613,7 +631,28 @@ fn install(ctx: &Ctx, staging: &Path, settled: &[Settled]) -> Result<()> {
     copy_secret(&staging.join("keys/radicle"), &home.secret_key())?;
     copy_doc(&staging.join("keys/radicle.pub"), &home.public_key())?;
     copy_doc(&staging.join("config.json"), &home.config())?;
-    copy_secret(&staging.join("node/policies.db"), &home.policies_db())?;
+    match policies {
+        PolicySource::Copy => {
+            copy_secret(&staging.join("node/policies.db"), &home.policies_db())?;
+        }
+        // A database left by the home `--force` overwrites would merge its policies into the
+        // replayed ones
+        PolicySource::Replay => {
+            let db = home.policies_db();
+            for stale in [
+                db.clone(),
+                db.with_extension("db-wal"),
+                db.with_extension("db-shm"),
+            ] {
+                match std::fs::remove_file(&stale) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(Error::io(&stale, e));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     copy_secret(
         &staging.join("node/notifications.db"),
         &home.notifications_db(),

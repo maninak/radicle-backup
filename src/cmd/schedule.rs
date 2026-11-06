@@ -43,11 +43,13 @@ pub fn run(ctx: &Ctx, args: &Schedule) -> Result<()> {
     }
     let systemctl = Tool::on_path("systemctl");
     if !systemctl.is_available() {
+        // Exit 0, because no timer of ours exists here, and a crontab line is the user's to remove
         if args.off {
-            return Err(Error::refused(
-                "this machine has no systemd, so there is no timer to turn off",
-                "if you added a rad-backup line with `crontab -e`, remove it there",
-            ));
+            ctx.term
+                .warn("this machine has no systemd, so there is no timer to turn off");
+            ctx.term
+                .detail("if you added a rad-backup line with `crontab -e`, remove it there");
+            return Ok(());
         }
         return refuse_without_systemd(ctx, args);
     }
