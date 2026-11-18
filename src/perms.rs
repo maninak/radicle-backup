@@ -31,10 +31,7 @@ pub fn copy_doc(from: &Path, to: &Path) -> Result<()> {
     write_atomically(to, &bytes, MODE_DOC)
 }
 
-/// The mode of a private key, and of the archives that carry one.
-pub const MODE_SECRET: u32 = 0o600;
-/// The mode of what a Radicle home keeps world-readable, such as a public key or a config.
-pub const MODE_DOC: u32 = 0o644;
+pub use crate::container::{MODE_DOC, MODE_SECRET};
 /// The mode of a working directory, or a home.
 pub const MODE_DIR: u32 = 0o700;
 

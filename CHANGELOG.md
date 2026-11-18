@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html). The archive format has its own version, tracked in `ARCHIVE-FORMAT.md`.
 
+## [Unreleased]
+
+### Added
+
+- `radicle-backup` is now also a Rust library, so another program can read and write `rad backup` archives. Built with `default-features = false`, it leaves out the command line, SQLite and terminal prompts, touches no file system, and builds for WebAssembly in a browser. It writes and reads over any byte stream, takes a pinned scrypt work factor for passphrase archives, and can unwrap an archive's file key once so a second read runs no scrypt.
+- `tests/fixtures` holds three small conformance archives that another implementation of the format can test against. They ship in the published crate, and `tests/fixtures/README.md` says what each one is.
+
+### Security
+
+- `verify` and `restore` now refuse an archive whose file names are not in the one form the format allows, such as `./a/b` beside `a/b`, or that holds two names differing only in case. Such an archive could pass `verify --deep` and then restore bytes its record does not describe. `rad backup` never writes one, and the library now refuses to.
+- `verify` and `restore` now refuse an archive holding anything but regular files, such as a link or a long-name record, before reading it. A long-name record of a few kilobytes could make them hold hundreds of megabytes in memory, or more from a larger file, and a link was written as a plain file. `rad backup` never writes either.
+
 ## [0.4.2] - 2026-11-06
 
 ### Fixed

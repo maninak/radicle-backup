@@ -1,9 +1,12 @@
 //! Naming the archives of one identity and finding them again on disk.
 
+#[cfg(feature = "cli")]
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "cli")]
 use crate::error::{Error, Result};
 
+#[cfg(feature = "cli")]
 /// The archive suffixes this tool writes.
 const SUFFIXES: [&str; 2] = [".tar.zst.age", ".tar.zst"];
 
@@ -13,8 +16,10 @@ pub const SHORT_NODE_ID_LEN: usize = 12;
 
 // The stamp in an archive name (`20260814T165609Z`) and its fixed length in bytes
 const STAMP_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+#[cfg(feature = "cli")]
 const STAMP_LEN: usize = 16;
 
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Archive {
     pub path: PathBuf,
@@ -28,6 +33,7 @@ pub struct Archive {
     pub encrypted: Option<bool>,
 }
 
+#[cfg(feature = "cli")]
 /// What a run knows it left out of the archive it wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Missing {
@@ -37,6 +43,7 @@ pub enum Missing {
     Repositories,
 }
 
+#[cfg(feature = "cli")]
 impl Missing {
     /// The value of the note's `missing` row.
     ///
@@ -49,6 +56,7 @@ impl Missing {
     }
 }
 
+#[cfg(feature = "cli")]
 /// The `--tier` and `--repos` an archive was taken with, as the note beside it spells them.
 ///
 /// A complete archive stands in for an older one only when their settings are equal, because
@@ -56,6 +64,7 @@ impl Missing {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Settings(String);
 
+#[cfg(feature = "cli")]
 impl Settings {
     pub fn new(tier: &str, repos: &str) -> Self {
         Self(format!("--tier {tier} --repos {repos}"))
@@ -66,6 +75,7 @@ impl Settings {
     }
 }
 
+#[cfg(feature = "cli")]
 /// Whether an archive holds every repository its settings selected.
 ///
 /// The answer comes from the plaintext note beside the archive, because deciding what to
@@ -79,14 +89,18 @@ pub enum Completeness {
     Unknown,
 }
 
+#[cfg(feature = "cli")]
 // The note rows that carry `Completeness`, indented like the note's other rows so no prose
 // line or recipient key reads as one
 const SETTINGS_ROW: &str = "  settings ";
+#[cfg(feature = "cli")]
 const MISSING_ROW: &str = "  missing ";
 
+#[cfg(feature = "cli")]
 /// The number of bytes of a note that are read.
 const NOTE_LIMIT: u64 = 64 * 1024;
 
+#[cfg(feature = "cli")]
 impl Completeness {
     /// Reads the completeness a note states.
     ///
@@ -116,6 +130,7 @@ impl Completeness {
     }
 }
 
+#[cfg(feature = "cli")]
 /// The value of the one row starting with `prefix`, or `None` when there are none or several.
 ///
 /// A value filled into the note, such as an alias with a line break, can add a second row.
@@ -127,6 +142,7 @@ fn only_row<'a>(note: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+#[cfg(feature = "cli")]
 /// The completeness each archive's note states, in the listing's order, and the errors of
 /// notes that exist and could not be read.
 ///
@@ -149,6 +165,7 @@ pub fn completeness(archives: &[Archive]) -> (Vec<Completeness>, Vec<Error>) {
     (notes, unreadable)
 }
 
+#[cfg(feature = "cli")]
 /// The start of a note, or `None` when there is no note.
 fn read_note(note: &Path) -> std::io::Result<Option<String>> {
     use std::io::Read as _;
@@ -168,6 +185,7 @@ fn read_note(note: &Path) -> std::io::Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+#[cfg(feature = "cli")]
 /// What a retention of `keep` does to one archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fate {
@@ -179,6 +197,7 @@ pub enum Fate {
     Deleted,
 }
 
+#[cfg(feature = "cli")]
 /// Decides each archive's fate under a retention of `keep`, given its notes newest first.
 ///
 /// The newest `keep` stay. For each settings in the listing, every `Unknown` down to the first
@@ -221,6 +240,7 @@ pub fn fates(completeness: &[Completeness], keep: usize) -> Vec<Fate> {
     decided
 }
 
+#[cfg(feature = "cli")]
 impl Archive {
     pub fn name(&self) -> String {
         self.path
@@ -230,6 +250,7 @@ impl Archive {
     }
 }
 
+#[cfg(feature = "cli")]
 /// Lists every archive of this identity in `directory`, newest first, with an error for each
 /// file named like one that could not be examined.
 ///
@@ -282,6 +303,7 @@ pub fn listing(directory: &Path, node_id: &str) -> Result<(Vec<Archive>, Vec<Err
     Ok((archives, unexamined))
 }
 
+#[cfg(feature = "cli")]
 /// When the archive named `name` was taken, if `name` is exactly what [`archive_name`] writes
 /// for a node id starting with `short`.
 ///
@@ -309,6 +331,7 @@ fn taken_by_name(name: &str, short: &str) -> Option<jiff::Timestamp> {
     (file_stamp(taken) == stamp).then_some(taken)
 }
 
+#[cfg(feature = "cli")]
 /// Lists every archive of this identity in `directory`, newest first, failing when any could
 /// not be examined.
 ///
@@ -322,6 +345,7 @@ pub fn in_dir(directory: &Path, node_id: &str) -> Result<Vec<Archive>> {
     }
 }
 
+#[cfg(feature = "cli")]
 /// The newest archive of this identity in `directory`, if there is one.
 pub fn newest(directory: &Path, node_id: &str) -> Result<Option<Archive>> {
     Ok(in_dir(directory, node_id)?.into_iter().next())
@@ -339,6 +363,7 @@ pub fn archive_name(alias: Option<&str>, node_id: &str, stamp: &str, encrypted: 
     format!("{alias}-{short}-{stamp}.{extension}")
 }
 
+#[cfg(feature = "cli")]
 /// The path of the plaintext note written beside an archive.
 pub fn sidecar_path(archive: &Path) -> PathBuf {
     let mut name = archive

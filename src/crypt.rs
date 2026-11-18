@@ -1,12 +1,17 @@
 //! Encryption of the archive, and where the passphrase for it comes from.
 
+use std::cell::RefCell;
+#[cfg(feature = "cli")]
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, Write};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "cli")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
+#[cfg(feature = "cli")]
 use std::sync::{Arc, Mutex};
 
-use age::secrecy::SecretString;
+use age::secrecy::{ExposeSecret as _, SecretBox, SecretString};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -65,17 +70,40 @@ pub enum Sink<'a> {
 }
 
 impl<'a> Sink<'a> {
-    pub fn new(output: Box<dyn Write + 'a>, encryption: &Encryption) -> Result<Self> {
-        let encryptor = match encryption {
-            Encryption::Plaintext => return Ok(Self::Plaintext(output)),
-            Encryption::Passphrase(passphrase) => {
+    /// Opens the encryption layer over `output`.
+    ///
+    /// `work_factor` pins a passphrase archive's scrypt work factor. `None` lets age time this
+    /// machine, which is what `rad-backup` writes. A pin suits a writer that cannot time itself
+    /// or whose archives must open on slower devices, such as a browser.
+    pub fn new(
+        output: Box<dyn Write + 'a>,
+        encryption: &Encryption,
+        work_factor: Option<u8>,
+    ) -> Result<Self> {
+        let encryptor = match (encryption, work_factor) {
+            (Encryption::Plaintext, None) => return Ok(Self::Plaintext(output)),
+            (Encryption::Passphrase(passphrase), None) => {
                 age::Encryptor::with_user_passphrase(SecretString::from(passphrase.to_string()))
             }
-            Encryption::Recipients(specs) => {
+            // `with_user_passphrase` is this same recipient with age's timed work factor, so
+            // a pin changes the factor and nothing else in the header
+            (Encryption::Passphrase(passphrase), Some(work_factor)) => {
+                let recipient = pinned_recipient(passphrase, work_factor)?;
+                age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?
+            }
+            (Encryption::Recipients(specs), None) => {
                 let recipients = parse_recipients(specs)?;
                 let recipient_refs: Vec<&dyn age::Recipient> =
                     recipients.iter().map(std::convert::AsRef::as_ref).collect();
                 age::Encryptor::with_recipients(recipient_refs.into_iter())?
+            }
+            // Refused rather than ignored, because the caller believes it chose how hard the
+            // archive is to open
+            (Encryption::Plaintext | Encryption::Recipients(_), Some(_)) => {
+                return Err(Error::refused(
+                    "a scrypt work factor was given for an archive that has no passphrase",
+                    "give a work factor only with a passphrase",
+                ));
             }
         };
         // This error is pathless, because `output` may be any sink and the failure is age
@@ -96,6 +124,24 @@ impl<'a> Sink<'a> {
             }
         }
     }
+}
+
+/// A passphrase recipient with its scrypt work factor pinned.
+///
+/// age panics on a factor of 0 or of 64 and above, so those are refused here instead.
+fn pinned_recipient(
+    passphrase: &Zeroizing<String>,
+    work_factor: u8,
+) -> Result<age::scrypt::Recipient> {
+    if !(1..64).contains(&work_factor) {
+        return Err(Error::refused(
+            format!("{work_factor} is not a scrypt work factor age can write"),
+            "give a work factor from 1 to 63",
+        ));
+    }
+    let mut recipient = age::scrypt::Recipient::new(SecretString::from(passphrase.to_string()));
+    recipient.set_work_factor(work_factor);
+    Ok(recipient)
 }
 
 impl Write for Sink<'_> {
@@ -135,70 +181,87 @@ pub struct Identities {
 const MAX_SCRYPT_WORK_FACTOR: u8 = 22;
 
 /// Wraps a reader so that it yields plaintext, whatever the archive was encrypted with.
+///
+/// `max_work_factor` is the highest scrypt work factor a passphrase archive may ask for.
+/// age refuses above it before scrypt allocates, as [`Error::ExcessiveWork`]. `None` accepts
+/// what this machine can afford, up to about 4 GiB of memory, which is what `rad-backup` does.
+/// On wasm32 pass `Some`, because `None` lets an archive ask for those 4 GiB whatever a tab can
+/// spare, and age cannot time a worker to know better.
 pub fn decrypting_reader<'a, R: Read + Seek + 'a>(
     mut input: R,
     archive_passphrase: Option<&Zeroizing<String>>,
     identities: &Identities,
+    max_work_factor: Option<u8>,
 ) -> Result<Box<dyn Read + 'a>> {
     let work = scrypt_work(&mut input)?;
     input
         .rewind()
         .map_err(|e| Error::Age(format!("the archive could not be reread: {e}")))?;
     let decryptor =
-        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(|_| damaged_header())?;
+        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(header_failure)?;
 
     if decryptor.is_scrypt() {
         let passphrase = archive_passphrase.ok_or_else(|| {
+            // The remedy names the CLI's own ways in only where there is a CLI to use them
+            #[cfg(feature = "cli")]
+            let remedy = format!(
+                "run again and type the passphrase, pass --passphrase-file <path>, or set \
+                 {ARCHIVE_PASSPHRASE_ENV}"
+            );
+            #[cfg(not(feature = "cli"))]
+            let remedy = "give the passphrase the archive was written with";
             Error::refused(
                 "this archive is protected by a passphrase, and none was given",
-                format!(
-                    "run again and type the passphrase, pass --passphrase-file <path>, or set \
-                     {ARCHIVE_PASSPHRASE_ENV}"
-                ),
+                remedy,
             )
         })?;
         let mut identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
         // age refuses past four steps above this machine's one-second target, so an archive from
         // a much faster machine would not open here. The limit is set even below that, because
-        // the probe times its own target, which can come out one step higher
-        if let Some(Work { required, target }) = work
-            && required <= MAX_SCRYPT_WORK_FACTOR
+        // the probe times its own target, which can come out one step higher. A caller's own
+        // ceiling replaces the raise, because a browser knows its memory and age cannot.
+        if let Some(max) = max_work_factor {
+            identity.set_max_work_factor(max);
+        } else if let Some(work) = work
+            && work.required <= MAX_SCRYPT_WORK_FACTOR
         {
+            let required = work.required;
             identity.set_max_work_factor(required);
-            if required > target.saturating_add(4) {
-                // Announced, because nothing else is printed while scrypt runs
+            // Announced, because nothing else is printed while scrypt runs. Only the CLI has a
+            // terminal to announce it on
+            #[cfg(feature = "cli")]
+            if required > work.target.saturating_add(4) {
                 eprintln!(
                     "! this machine is slower than the one that wrote the archive. Checking the \
                      passphrase takes about {} and {} MiB of memory",
-                    rough_duration(1u64 << (required - target)),
+                    rough_duration(1u64 << (required - work.target)),
                     1u64 << (required - 10)
                 );
             }
         }
         let reader = decryptor
             .decrypt(std::iter::once(&identity as &dyn age::Identity))
-            // Unwrapping the file key is where a passphrase can be wrong. Payload errors arrive
-            // later, as io errors. `ExcessiveWork` comes before the passphrase is tried, so
-            // reporting it as a wrong passphrase tells the user a good backup is lost.
-            .map_err(|failure| match failure {
-                // Exit 1, because a retry on this machine meets the same limit
-                age::DecryptError::ExcessiveWork { .. } => Error::Age(
-                    "the passphrase was not checked. Checking it on this machine takes more \
-                     memory and time than is safe to try\nopen the archive on a faster machine"
-                        .to_string(),
-                ),
-                age::DecryptError::InvalidHeader => damaged_header(),
-                _ => Error::WrongPassphrase,
-            })?;
+            .map_err(passphrase_failure)?;
         return Ok(Box::new(AuthenticatingReader(reader)));
     }
 
+    // Only the CLI takes key files, so a build without it answers from its own stub below
+    #[cfg(feature = "cli")]
     if identities.files.is_empty() {
         return Err(Error::refused(
             "this archive is encrypted to a public key, not to a passphrase",
             "pass --identity <file> with the matching age or ssh private key",
         ));
     }
+    open_with_key_files(decryptor, identities)
+}
+
+/// Opens a recipient archive with the `--identity` key files.
+#[cfg(feature = "cli")]
+fn open_with_key_files<'a, R: Read + 'a>(
+    decryptor: age::Decryptor<io::BufReader<R>>,
+    identities: &Identities,
+) -> Result<Box<dyn Read + 'a>> {
     let offered = OfferedKeys::read(identities)?;
     let identity_refs: Vec<&dyn age::Identity> = offered
         .identities
@@ -213,23 +276,212 @@ pub fn decrypting_reader<'a, R: Read + Seek + 'a>(
     Ok(Box::new(AuthenticatingReader(reader)))
 }
 
+/// Refuses a recipient archive, because its key files are read from disk and a build without
+/// the `cli` feature reads no disk.
+#[cfg(not(feature = "cli"))]
+fn open_with_key_files<'a, R: Read + 'a>(
+    _: age::Decryptor<io::BufReader<R>>,
+    _: &Identities,
+) -> Result<Box<dyn Read + 'a>> {
+    Err(not_a_passphrase_archive())
+}
+
+/// Says why a passphrase did not unwrap the file key.
+///
+/// Unwrapping the file key is where a passphrase can be wrong. Payload errors arrive later, as
+/// io errors. `ExcessiveWork` comes before the passphrase is tried, so reporting it as a wrong
+/// passphrase tells the user a good backup is lost.
+fn passphrase_failure(failure: age::DecryptError) -> Error {
+    match failure {
+        // Exit 1, because a retry on this machine meets the same limit
+        age::DecryptError::ExcessiveWork { required, .. } => Error::ExcessiveWork { required },
+        age::DecryptError::InvalidHeader => damaged_header(),
+        _ => Error::WrongPassphrase,
+    }
+}
+
+fn not_a_passphrase_archive() -> Error {
+    Error::refused(
+        "this archive is encrypted to a public key, not to a passphrase",
+        "open it with the private key it was encrypted to",
+    )
+}
+
+/// The key age encrypts an archive's payload with, as the passphrase unwraps it from the
+/// header.
+///
+/// Holding it lets a second reader decrypt the payload without running scrypt, whose memory
+/// (1 GiB at work factor 20) is then not held while the archive is read.
+///
+/// The key lives on the heap, as age keeps its own, because a key held inline is copied by
+/// every move and only its last place is wiped on drop.
+pub struct FileKey(SecretBox<[u8; age_core::format::FILE_KEY_BYTES]>);
+
+impl FileKey {
+    /// Copies the key into a heap buffer that is wiped on drop. `bytes` stays the caller's to
+    /// wipe.
+    pub fn from_bytes(bytes: &[u8; age_core::format::FILE_KEY_BYTES]) -> Self {
+        Self(SecretBox::init_with_mut(
+            |key: &mut [u8; age_core::format::FILE_KEY_BYTES]| key.copy_from_slice(bytes),
+        ))
+    }
+
+    /// Borrows the key. A copy taken from this reference is the caller's to wipe, for example
+    /// by holding it in a `Zeroizing` buffer.
+    pub fn as_bytes(&self) -> &[u8; age_core::format::FILE_KEY_BYTES] {
+        self.0.expose_secret()
+    }
+
+    fn to_age(&self) -> age_core::format::FileKey {
+        age_core::format::FileKey::init_with_mut(|key| key.copy_from_slice(self.0.expose_secret()))
+    }
+}
+
+/// Prints no key bytes, because a derived `Debug` would put the key in any log or panic message
+/// that formats a result holding one.
+impl std::fmt::Debug for FileKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FileKey(..)")
+    }
+}
+
+/// Unwraps the file key of a passphrase archive, reading only its header.
+///
+/// The errors are the passphrase path's of [`decrypting_reader`]: [`Error::ExcessiveWork`]
+/// above `max_work_factor` before scrypt runs, [`Error::PathlessIo`] with the reader's own
+/// kind when `input` fails to read, a damaged header, a wrong passphrase.
+pub fn unwrap_file_key<R: Read>(
+    input: R,
+    passphrase: &Zeroizing<String>,
+    max_work_factor: u8,
+) -> Result<FileKey> {
+    let decryptor =
+        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(header_failure)?;
+    if !decryptor.is_scrypt() {
+        return Err(not_a_passphrase_archive());
+    }
+    let mut scrypt = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
+    scrypt.set_max_work_factor(max_work_factor);
+    let keeper = KeyKeeper {
+        scrypt,
+        kept: RefCell::new(None),
+    };
+    // Opening derives the payload key, which checks the header's MAC with the unwrapped key,
+    // so a key handed back is one that opens this header. No payload byte is read.
+    decryptor
+        .decrypt(std::iter::once(&keeper as &dyn age::Identity))
+        .map_err(passphrase_failure)?;
+    keeper.kept.into_inner().ok_or_else(|| {
+        Error::Age("age opened the archive without unwrapping its passphrase stanza".to_string())
+    })
+}
+
+/// Opens a passphrase archive with a file key [`unwrap_file_key`] took from it, running none of
+/// the archive's scrypt work. The payload is authenticated as [`decrypting_reader`]
+/// authenticates it.
+pub fn reader_with_file_key<'a, R: Read + 'a>(
+    input: R,
+    key: &FileKey,
+) -> Result<Box<dyn Read + 'a>> {
+    let decryptor =
+        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(header_failure)?;
+    if !decryptor.is_scrypt() {
+        return Err(not_a_passphrase_archive());
+    }
+    let mut format = age::scrypt::Identity::new(SecretString::from(String::new()));
+    format.set_max_work_factor(0);
+    let known = KnownKey { key, format };
+    let reader = decryptor
+        .decrypt(std::iter::once(&known as &dyn age::Identity))
+        .map_err(|failure| match failure {
+            age::DecryptError::InvalidHeader => damaged_header(),
+            other => Error::Age(format!(
+                "{other}. The file key does not open this archive, which changed after the key \
+                 was taken from it or is damaged"
+            )),
+        })?;
+    Ok(Box::new(AuthenticatingReader(reader)))
+}
+
+/// age's passphrase identity, keeping a copy of the file key it unwraps.
+struct KeyKeeper {
+    scrypt: age::scrypt::Identity,
+    kept: RefCell<Option<FileKey>>,
+}
+
+impl age::Identity for KeyKeeper {
+    fn unwrap_stanza(
+        &self,
+        stanza: &age_core::format::Stanza,
+    ) -> Option<std::result::Result<age_core::format::FileKey, age::DecryptError>> {
+        let unwrapped = self.scrypt.unwrap_stanza(stanza)?;
+        Some(unwrapped.inspect(|key| {
+            *self.kept.borrow_mut() = Some(FileKey::from_bytes(key.expose_secret()));
+        }))
+    }
+}
+
+/// Answers a passphrase stanza with a file key already unwrapped from it.
+///
+/// `format` is age's own passphrase identity accepting no work. It checks the stanza's shape
+/// (two arguments, a 16-byte base64 salt, a canonical decimal work factor, a 32-byte body) and
+/// refuses a malformed one as `InvalidHeader` before any work, so this refuses exactly what age
+/// refuses. Past those checks it would try the passphrase, which it refuses as `ExcessiveWork`
+/// for any factor a writer can produce. age checks that a passphrase stanza is the header's
+/// only one before any identity is asked, and checks the header's MAC with the key returned
+/// here, so a wrong key is still refused.
+struct KnownKey<'k> {
+    key: &'k FileKey,
+    format: age::scrypt::Identity,
+}
+
+impl age::Identity for KnownKey<'_> {
+    fn unwrap_stanza(
+        &self,
+        stanza: &age_core::format::Stanza,
+    ) -> Option<std::result::Result<age_core::format::FileKey, age::DecryptError>> {
+        match self.format.unwrap_stanza(stanza)? {
+            Err(age::DecryptError::InvalidHeader) => Some(Err(age::DecryptError::InvalidHeader)),
+            // Every well-formed stanza arrives here as `ExcessiveWork`, since age reads a work
+            // factor of 0 as malformed and any other is above the ceiling of 0. The arm takes
+            // any outcome so that no scrypt result could ever stand in for the key
+            _ => Some(Ok(self.key.to_age())),
+        }
+    }
+}
+
 // `looks_encrypted` has already seen the age magic, so an unparseable header is damage.
 // age's own parse error names internals nobody can act on
 fn damaged_header() -> Error {
     Error::Age("the archive's encryption header is damaged".to_string())
 }
 
-/// The scrypt work factor a passphrase archive asks for, and this machine's one-second one.
-struct Work {
-    required: u8,
-    target: u8,
+/// A header age could not read. A file that fails to read is not a damaged archive, so its io
+/// error keeps its kind for the caller to tell the two apart. A header cut short is damage.
+fn header_failure(error: age::DecryptError) -> Error {
+    match error {
+        age::DecryptError::Io(e) if e.kind() != io::ErrorKind::UnexpectedEof => {
+            Error::PathlessIo(e)
+        }
+        _ => damaged_header(),
+    }
 }
 
-/// Reads the work factor from the header without running scrypt, by offering a passphrase
-/// identity that accepts no work at all. `None` for an archive encrypted to a key.
-fn scrypt_work(input: &mut impl Read) -> Result<Option<Work>> {
+/// The scrypt work factor a passphrase archive asks for, and this machine's one-second one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Work {
+    pub required: u8,
+    /// age's estimate of this machine's one-second factor, from one scrypt at work factor 10.
+    /// 18 where age cannot time itself, as in a browser.
+    pub target: u8,
+}
+
+/// Reads the work factor from the header without running the archive's scrypt, by offering a
+/// passphrase identity that accepts no work at all. `None` for an archive encrypted to a key,
+/// and [`Error::Age`] for a passphrase stanza age cannot read.
+pub fn scrypt_work(input: &mut impl Read) -> Result<Option<Work>> {
     let decryptor =
-        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(|_| damaged_header())?;
+        age::Decryptor::new_buffered(io::BufReader::new(input)).map_err(header_failure)?;
     if !decryptor.is_scrypt() {
         return Ok(None);
     }
@@ -239,11 +491,13 @@ fn scrypt_work(input: &mut impl Read) -> Result<Option<Work>> {
         Err(age::DecryptError::ExcessiveWork { required, target }) => {
             Ok(Some(Work { required, target }))
         }
-        // The real attempt meets the same header and reports what is wrong with it
-        _ => Ok(None),
+        // A well-formed stanza always asks for more work than none, so any other answer means
+        // age could not read it
+        _ => Err(damaged_header()),
     }
 }
 
+#[cfg(feature = "cli")]
 fn rough_duration(seconds: u64) -> String {
     if seconds < 120 {
         format!("{seconds} seconds")
@@ -262,6 +516,13 @@ struct AuthenticatingReader<R>(R);
 impl<R: Read> Read for AuthenticatingReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.0.read(buffer).map_err(|e| {
+            // A file that fails to read is not damage, so its error passes through as it is
+            if !matches!(
+                e.kind(),
+                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+            ) {
+                return e;
+            }
             io::Error::new(
                 e.kind(),
                 format!("{e}. The archive is damaged or was changed after it was written"),
@@ -270,16 +531,46 @@ impl<R: Read> Read for AuthenticatingReader<R> {
     }
 }
 
-/// Whether a file begins with an age header. A reader decides to decrypt by this, never by
-/// the file name.
+/// The bytes every age file begins with.
+const AGE_MAGIC: &[u8] = b"age-encryption.org/";
+/// The bytes every zstd frame begins with.
+const ZSTD_MAGIC: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd];
+
+/// How many leading bytes [`envelope`] needs to decide.
+pub const ENVELOPE_PROBE_BYTES: usize = AGE_MAGIC.len();
+
+/// What the outermost layer of an archive is, read from its first bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Envelope {
+    /// An age header, so the archive is encrypted.
+    Encrypted,
+    /// A zstd frame, so the archive was written with `--plaintext`.
+    Plaintext,
+    /// Neither, or too few bytes to tell.
+    Unknown,
+}
+
+/// Tells an age header from a zstd stream by the first [`ENVELOPE_PROBE_BYTES`] bytes. A
+/// reader decides to decrypt by this, never by the file name.
+pub fn envelope(head: &[u8]) -> Envelope {
+    if head.starts_with(AGE_MAGIC) {
+        Envelope::Encrypted
+    } else if head.starts_with(ZSTD_MAGIC) {
+        Envelope::Plaintext
+    } else {
+        Envelope::Unknown
+    }
+}
+
+/// Whether a file begins with an age header.
+#[cfg(feature = "cli")]
 pub fn looks_encrypted(path: &Path) -> Result<bool> {
     use std::io::Read as _;
 
-    const AGE_MAGIC: &[u8] = b"age-encryption.org/";
     let mut file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
     let mut head = [0u8; AGE_MAGIC.len()];
     match file.read_exact(&mut head) {
-        Ok(()) => Ok(head == AGE_MAGIC),
+        Ok(()) => Ok(envelope(&head) == Envelope::Encrypted),
         // A file shorter than the magic is not encrypted. Any other failure is a file this
         // function could not read, and calling it unencrypted makes `doctor` claim anyone can
         // read it.
@@ -293,13 +584,16 @@ pub fn looks_encrypted(path: &Path) -> Result<bool> {
 /// Every age file starts with the same magic, so `looks_encrypted` cannot tell a passphrase
 /// archive from a recipient one, and whether `--identity` was passed cannot either. A prompt
 /// for a recipient archive blocks an unattended restore that has nobody to answer it.
+#[cfg(feature = "cli")]
 pub fn needs_passphrase(path: &Path) -> Result<bool> {
     if !looks_encrypted(path)? {
         return Ok(false);
     }
     let file = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
-    match age::Decryptor::new_buffered(io::BufReader::new(file)) {
+    match age::Decryptor::new_buffered(io::BufReader::new(file)).map_err(header_failure) {
         Ok(decryptor) => Ok(decryptor.is_scrypt()),
+        // A file that failed to read says nothing about which key opens it
+        Err(Error::PathlessIo(e)) => Err(Error::io(path, e)),
         // No passphrase opens an unparseable header, and the open that follows reports it
         Err(_) => Ok(false),
     }
@@ -366,6 +660,7 @@ impl Protects {
     ///
     /// The Radicle key has none, because `words` asks for that passphrase to choose a new one,
     /// and a file holding an existing secret would give the restored key someone else's.
+    #[cfg(feature = "cli")]
     fn passphrase_file_flag(self) -> Option<&'static str> {
         match self {
             Self::Archive => Some("--passphrase-file"),
@@ -375,6 +670,7 @@ impl Protects {
     }
 
     /// Which passphrase this is, in the words a refusal uses.
+    #[cfg(feature = "cli")]
     fn named(self) -> &'static str {
         match self {
             Self::Archive => "the archive passphrase",
@@ -385,6 +681,7 @@ impl Protects {
 
     /// What to do about an empty passphrase. `--plaintext` is offered only when an archive is
     /// being sealed, because the flag turns off the archive's encryption and nothing else.
+    #[cfg(feature = "cli")]
     fn remedy_for_empty(self, purpose: Purpose) -> &'static str {
         match (self, purpose) {
             (Self::Archive, Purpose::Sealing) => {
@@ -401,6 +698,7 @@ impl Protects {
     }
 }
 
+#[cfg(feature = "cli")]
 /// Reads a passphrase from the environment, a file, or the person at the terminal.
 pub fn read_passphrase(
     protects: Protects,
@@ -464,6 +762,7 @@ pub fn read_passphrase(
 ///
 /// age accepts an empty passphrase, and the file it writes reports as encrypted everywhere
 /// and opens for anyone who presses Enter.
+#[cfg(feature = "cli")]
 fn refuse_if_empty(
     passphrase: Zeroizing<String>,
     because: &str,
@@ -491,7 +790,7 @@ fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {
             continue;
         }
         return Err(Error::refused(
-            format!("`{spec}` is not a public key rad-backup can encrypt to"),
+            format!("`{spec}` is not a public key an archive can be encrypted to"),
             "pass an age public key (age1...) or an ssh public key (ssh-ed25519 AAAA...)",
         ));
     }
@@ -503,6 +802,7 @@ fn parse_recipients(specs: &[String]) -> Result<Vec<Box<dyn age::Recipient>>> {
 /// age answers `NoMatchingKeys` both for a key that is not a recipient and for one that stayed
 /// locked. The record tells the two apart, so the holder of the right key is not told it is
 /// the wrong one in the middle of a recovery.
+#[cfg(feature = "cli")]
 struct OfferedKeys {
     identities: Vec<Box<dyn age::Identity>>,
     /// The key file behind each entry of `identities`, in the same order age tries them.
@@ -513,6 +813,7 @@ struct OfferedKeys {
     skipped: Vec<String>,
 }
 
+#[cfg(feature = "cli")]
 impl OfferedKeys {
     fn read(identities: &Identities) -> Result<Self> {
         let passphrases = KeyPassphrases::default();
@@ -642,8 +943,10 @@ impl OfferedKeys {
 ///
 /// age's own explanation is a multi-line block that names `rage`, a tool the reader did not
 /// run.
+#[cfg(feature = "cli")]
 struct WhyUnsupported<'a>(&'a age::ssh::UnsupportedKey);
 
+#[cfg(feature = "cli")]
 impl std::fmt::Display for WhyUnsupported<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
@@ -674,10 +977,12 @@ impl std::fmt::Display for WhyUnsupported<'_> {
 ///
 /// A remembered answer means an archive with several stanzas asks a person once. A remembered
 /// refusal lets `OfferedKeys::explain` name the key that stayed locked.
+#[cfg(feature = "cli")]
 #[derive(Clone, Default)]
 struct KeyPassphrases(Arc<Mutex<Answers>>);
 
 /// What has been asked so far, and of whom last.
+#[cfg(feature = "cli")]
 #[derive(Default)]
 struct Answers {
     by_key: BTreeMap<PathBuf, Asked>,
@@ -687,6 +992,7 @@ struct Answers {
 }
 
 /// What came back when one key file's passphrase was asked for.
+#[cfg(feature = "cli")]
 enum Asked {
     Given(Zeroizing<String>),
     /// Nothing to ask, nobody to ask, or nothing typed. Carries the reason, so the run says
@@ -694,6 +1000,7 @@ enum Asked {
     Refused(String),
 }
 
+#[cfg(feature = "cli")]
 impl KeyPassphrases {
     /// Locks the answers, taking them back from a poisoned lock.
     ///
@@ -736,6 +1043,7 @@ impl KeyPassphrases {
 ///
 /// age asks lazily, once it holds an encrypted key and a stanza that key might open, so an
 /// unencrypted key or a plaintext archive never prompts.
+#[cfg(feature = "cli")]
 #[derive(Clone)]
 struct KeyPassphraseSource {
     key_file: PathBuf,
@@ -744,6 +1052,7 @@ struct KeyPassphraseSource {
     asked: KeyPassphrases,
 }
 
+#[cfg(feature = "cli")]
 impl age::Callbacks for KeyPassphraseSource {
     /// Prints age's message to stderr. The message bypasses `Term`, because age sends it to
     /// ask a person to touch a hardware key, and `--quiet` must not drop that.
@@ -799,6 +1108,29 @@ impl age::Callbacks for KeyPassphraseSource {
 mod tests {
     use super::*;
 
+    struct Unreadable;
+
+    impl Read for Unreadable {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the drive went away",
+            ))
+        }
+    }
+
+    /// A browser reading the user's file tells a failed read from damage by the error's kind.
+    #[test]
+    fn a_header_that_failed_to_read_is_not_reported_as_damaged() {
+        let unreadable = scrypt_work(&mut Unreadable);
+        assert!(
+            matches!(&unreadable, Err(Error::PathlessIo(e)) if e.kind() == io::ErrorKind::PermissionDenied),
+            "{unreadable:?}"
+        );
+        let cut_short = scrypt_work(&mut &b"age-encryption.org/v1\n-> scrypt"[..]);
+        assert!(matches!(cut_short, Err(Error::Age(_))), "{cut_short:?}");
+    }
+
     /// `doctor` renders "not encrypted" as readable by anyone, so that claim must never come
     /// from a failed read.
     #[test]
@@ -829,6 +1161,7 @@ mod tests {
         let mut sink = Sink::new(
             Box::new(io::Cursor::new(&mut buffer)),
             &Encryption::Passphrase(passphrase.clone()),
+            None,
         )
         .expect("sink is buildable");
         sink.write_all(plaintext).expect("plaintext is writable");
@@ -840,6 +1173,7 @@ mod tests {
             io::Cursor::new(&buffer),
             Some(&passphrase),
             &Identities::default(),
+            None,
         )
         .expect("reader opens");
         let mut round_tripped = Vec::new();
@@ -855,6 +1189,7 @@ mod tests {
         let mut sink = Sink::new(
             Box::new(io::Cursor::new(&mut buffer)),
             &Encryption::Passphrase(Zeroizing::new("right".to_string())),
+            None,
         )
         .expect("sink is buildable");
         sink.write_all(b"secret").expect("plaintext is writable");
@@ -865,17 +1200,19 @@ mod tests {
             io::Cursor::new(&buffer),
             Some(&wrong),
             &Identities::default(),
+            None,
         );
         assert!(matches!(opened, Err(Error::WrongPassphrase)));
     }
 
     #[test]
-    fn an_archive_asking_for_more_work_than_is_safe_is_not_reported_as_a_wrong_passphrase() {
+    fn an_archive_asking_for_more_work_than_is_safe_is_refused_before_scrypt_runs() {
         let passphrase = Zeroizing::new("right".to_string());
         let mut buffer = Vec::new();
         let mut sink = Sink::new(
             Box::new(io::Cursor::new(&mut buffer)),
             &Encryption::Passphrase(passphrase.clone()),
+            Some(10),
         )
         .expect("sink is buildable");
         sink.write_all(b"secret").expect("plaintext is writable");
@@ -896,15 +1233,79 @@ mod tests {
         let mut tampered = crafted.into_bytes();
         tampered.extend_from_slice(&buffer[header_end..]);
 
-        let opened = decrypting_reader(
-            io::Cursor::new(&tampered),
-            Some(&passphrase),
-            &Identities::default(),
-        );
-        assert!(
-            matches!(&opened, Err(Error::Age(message)) if message.starts_with("the passphrase was not checked")),
-            "a good archive is neither damaged nor locked by a wrong passphrase"
-        );
+        // Work factor 40 is 128 TiB of scrypt memory, so any of these that ran scrypt would
+        // fail some other way or never return
+        for max_work_factor in [None, Some(20)] {
+            let opened = decrypting_reader(
+                io::Cursor::new(&tampered),
+                Some(&passphrase),
+                &Identities::default(),
+                max_work_factor,
+            );
+            assert!(
+                matches!(opened, Err(Error::ExcessiveWork { required: 40 })),
+                "a good archive is neither damaged nor locked by a wrong passphrase"
+            );
+        }
+        assert!(matches!(
+            unwrap_file_key(io::Cursor::new(&tampered), &passphrase, 20),
+            Err(Error::ExcessiveWork { required: 40 })
+        ));
+    }
+
+    #[test]
+    fn a_pinned_work_factor_is_the_one_the_header_asks_for_and_a_ceiling_below_it_refuses() {
+        let passphrase = Zeroizing::new("right".to_string());
+        let mut buffer = Vec::new();
+        let mut sink = Sink::new(
+            Box::new(io::Cursor::new(&mut buffer)),
+            &Encryption::Passphrase(passphrase.clone()),
+            // Far below the one-second factor age times on any machine, which a busy machine
+            // can bring down to 12, so a pin that was ignored cannot pass
+            Some(2),
+        )
+        .expect("sink is buildable");
+        sink.write_all(b"secret").expect("plaintext is writable");
+        sink.finish().expect("sink finishes");
+
+        let work = scrypt_work(&mut io::Cursor::new(&buffer))
+            .expect("the header reads")
+            .expect("a passphrase archive asks for work");
+        assert_eq!(work.required, 2);
+
+        // A damaged stanza must not read as an archive encrypted to a key
+        let header_end = buffer
+            .windows(4)
+            .position(|w| w == b"\n---")
+            .expect("the header ends");
+        let header = String::from_utf8(buffer[..header_end].to_vec()).expect("the header is text");
+        let salt = header
+            .lines()
+            .find_map(|line| line.strip_prefix("-> scrypt "))
+            .and_then(|args| args.split(' ').next())
+            .expect("the stanza has a salt");
+        let damaged = [
+            header.replacen(salt, &salt[..salt.len() - 2], 1).as_bytes(),
+            &buffer[header_end..],
+        ]
+        .concat();
+        let refused = scrypt_work(&mut io::Cursor::new(&damaged));
+        assert!(matches!(refused, Err(Error::Age(_))), "{refused:?}");
+
+        // The caller's ceiling is the one applied, not age's calibrated default
+        assert!(matches!(
+            decrypting_reader(
+                io::Cursor::new(&buffer),
+                Some(&passphrase),
+                &Identities::default(),
+                Some(1),
+            ),
+            Err(Error::ExcessiveWork { required: 2 })
+        ));
+        assert!(matches!(
+            unwrap_file_key(io::Cursor::new(&buffer), &passphrase, 1),
+            Err(Error::ExcessiveWork { required: 2 })
+        ));
     }
 
     #[test]
@@ -914,6 +1315,7 @@ mod tests {
         let mut sink = Sink::new(
             Box::new(io::Cursor::new(&mut buffer)),
             &Encryption::Passphrase(passphrase.clone()),
+            None,
         )
         .expect("sink is buildable");
         sink.write_all(&[7u8; 4096]).expect("plaintext is writable");
@@ -927,6 +1329,7 @@ mod tests {
             io::Cursor::new(&buffer),
             Some(&passphrase),
             &Identities::default(),
+            None,
         )
         .expect("the header still opens, because the passphrase is right");
         let mut read_back = Vec::new();
@@ -950,7 +1353,7 @@ mod tests {
     fn written_archive(scratch: &TestScratch, name: &str, encryption: &Encryption) -> PathBuf {
         let path = scratch_path(scratch, name);
         let file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
-        let mut sink = Sink::new(Box::new(file), encryption).expect("sink is buildable");
+        let mut sink = Sink::new(Box::new(file), encryption, None).expect("sink is buildable");
         sink.write_all(b"secret").expect("plaintext is writable");
         sink.finish().expect("sink finishes");
         path
@@ -1008,6 +1411,7 @@ mod tests {
                 passphrase_file: passphrase_file.map(Path::to_path_buf),
                 is_interactive: false,
             },
+            None,
         )?;
         let mut plaintext = Vec::new();
         reader
@@ -1249,6 +1653,7 @@ mod tests {
         let mut sink = Sink::new(
             Box::new(io::Cursor::new(&mut buffer)),
             &Encryption::Plaintext,
+            None,
         )
         .expect("sink is buildable");
         sink.write_all(b"no secrets here").expect("writable");

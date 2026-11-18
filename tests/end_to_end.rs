@@ -3,6 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+// Only the Grove-shaped archive's name and passphrase are read here
+#[allow(dead_code)]
+#[path = "support/fixtures.rs"]
+mod fixtures;
+
 /// The BIP-39 mnemonic for all-zero entropy, which rebuilds the same key on every run.
 const WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon \
                      abandon abandon abandon abandon abandon abandon abandon abandon abandon \
@@ -3388,4 +3393,55 @@ fn the_man_page_written_to_a_pipe_is_roff_a_package_can_install() {
     let page = stdout(&ran);
     assert!(page.contains("\n.TH rad-backup 1 "), "{page}");
     assert!(page.contains("\n.SH COMMANDS\n"), "{page}");
+}
+
+#[test]
+fn verify_and_restore_read_an_archive_written_the_way_grove_writes_one() {
+    let root = scratch_root(&format!("rad-backup-it-grove-{}", std::process::id()));
+    create_private_dir(&root).expect("the fixture root is creatable and was not already there");
+    let fixture = Fixture { root };
+    let archive = fixture.path(fixtures::GROVE);
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixtures::GROVE),
+        &archive,
+    )
+    .expect("the conformance archive is in the checkout");
+
+    let ran = fixture
+        .command(
+            &["verify", "--deep", &archive.to_string_lossy()],
+            &fixture.path("home"),
+        )
+        .env("RAD_BACKUP_PASSPHRASE", fixtures::PASSPHRASE)
+        .output()
+        .expect("rad-backup runs");
+    assert_success(
+        &ran,
+        "verifying an archive written at level 3 with a pinned work factor",
+    );
+    assert!(stderr(&ran).contains(DID), "{}", stderr(&ran));
+
+    let home = fixture.path("restored");
+    let ran = fixture
+        .command(&["restore", "--yes", &archive.to_string_lossy()], &home)
+        .env("RAD_BACKUP_PASSPHRASE", fixtures::PASSPHRASE)
+        .env("RAD_PASSPHRASE", fixtures::KEY_PASSPHRASE)
+        .output()
+        .expect("rad-backup runs");
+    assert_success(&ran, "restoring it into an empty home");
+    let pub_key =
+        std::fs::read_to_string(home.join("keys/radicle.pub")).expect("the public key came back");
+    assert!(
+        pub_key.starts_with("ssh-ed25519 "),
+        "the public key as written: {pub_key}"
+    );
+    assert!(stderr(&ran).contains(DID), "{}", stderr(&ran));
+    #[cfg(unix)]
+    assert_eq!(mode(&home.join("keys/radicle")) & 0o777, 0o600);
+    assert_eq!(
+        std::fs::read_to_string(home.join("config.json")).expect("the config came back"),
+        "{\"node\":{\"alias\":\"fixture\"}}\n"
+    );
 }

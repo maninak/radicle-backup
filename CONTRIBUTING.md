@@ -13,10 +13,10 @@ Open an issue for anything that changes behaviour, adds a flag or touches the ar
 ## The bar
 
 ```sh
-just check    # cargo fmt --check, the SECURITY.md audit map, the naming, message, shellcheck and cross-file pin gates, clippy, a non-unix build, then the tests: what CI runs, in that order
+just check    # cargo fmt --check, the SECURITY.md audit map, the naming, message, shellcheck and cross-file pin gates, clippy, a non-unix build, the library built for wasm without its `cli` feature, then the tests: what CI runs, in that order
 ```
 
-CI runs those nine, the shell gates among them out of `ci/` so that the recipe and the workflow cannot drift apart, on Linux, macOS and Windows, plus an MSRV check, a two-pass reproducibility check, `nix build --rebuild`, a Debian package built and linted, and the advisory, action-pin and dependency-age gates. Builds of the cross-compiled release targets run on every push to master and on a tag, not on a pull request. A pull request is ready when CI is green and the change carries a test that would have failed without it.
+CI runs those ten on Linux, the shell gates among them out of `ci/` so that the recipe and the workflow cannot drift apart, and the formatting, clippy and test steps also on macOS and Windows, plus an MSRV check, a two-pass reproducibility check, `nix build --rebuild`, a Debian package built and linted, and the advisory, action-pin and dependency-age gates. Builds of the cross-compiled release targets run on every push to master and on a tag, not on a pull request. A pull request is ready when CI is green and the change carries a test that would have failed without it.
 
 **Every bug fix gets a test that would have caught the bug.** Prove it is not vacuous: flip what it asserts, watch it go red, put it back.
 

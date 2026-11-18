@@ -15,7 +15,9 @@ pub const EXIT_REFUSED: u8 = 4;
 /// Exit code for a run that failed, as a number the tests can compare.
 pub const EXIT_FAILURE: u8 = 1;
 
+// A new variant must not break a library caller's `match`
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
@@ -57,6 +59,30 @@ pub enum Error {
     #[error("wrong passphrase")]
     WrongPassphrase,
 
+    /// A passphrase archive whose scrypt work factor is above what this reader accepts, found
+    /// before the passphrase is tried. Its own variant, so a caller can say which factor was
+    /// asked for, and because calling it a wrong passphrase tells the user a good backup is
+    /// lost.
+    #[error(
+        "the passphrase was not checked. Checking it on this machine takes more memory and time \
+         than is safe to try\nopen the archive on a faster machine"
+    )]
+    ExcessiveWork { required: u8 },
+
+    /// An entry whose bytes did not add up to the size its tar header already declared, which
+    /// leaves a tar no reader can walk.
+    #[error("`{entry}` was declared as {declared} bytes, but {given} bytes were given")]
+    EntryLength {
+        entry: String,
+        declared: u64,
+        given: u64,
+    },
+
+    /// An archive whose files differ from its own record of them, found while a reader that
+    /// already trusts that record checks each file against it.
+    #[error("{path} does not match its own record of its files: {problem}")]
+    Damaged { path: PathBuf, problem: String },
+
     #[error("{path} is not a rad-backup archive: {reason}")]
     NotAnArchive { path: PathBuf, reason: String },
 
@@ -95,6 +121,7 @@ pub enum Error {
     #[error("{0}")]
     Json(#[from] serde_json::Error),
 
+    #[cfg(feature = "cli")]
     #[error("{0}")]
     Sqlite(#[from] rusqlite::Error),
 
@@ -183,6 +210,7 @@ impl From<age::DecryptError> for Error {
         match e {
             // age reports a wrong passphrase as "no identity matched", which reads as a bug
             age::DecryptError::NoMatchingKeys => Self::WrongPassphrase,
+            age::DecryptError::ExcessiveWork { required, .. } => Self::ExcessiveWork { required },
             // Every remaining variant means the ciphertext did not authenticate, which with
             // the right passphrase is damage to the file
             other => Self::Age(format!(

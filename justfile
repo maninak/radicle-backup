@@ -6,7 +6,7 @@ default:
 # The workflow runs these same `ci/` gates, and `ci/pins.sh` holds the two lists equal
 
 # What CI runs on every push, in the order that fails fastest
-check: fmt-check audit-map names messages shell pins lint nonunix test
+check: fmt-check audit-map names messages shell pins lint nonunix wasm test
 
 # Every file SECURITY.md sends a reviewer to still exists
 audit-map:
@@ -40,6 +40,10 @@ deps:
 # Compile the suite the way a target that is not unix sees it
 nonunix:
     ci/nonunix.sh
+
+# Build the library without its `cli` feature for the browser, and keep it off the file system
+wasm:
+    ci/wasm.sh
 
 fmt:
     cargo fmt

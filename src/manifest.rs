@@ -15,6 +15,16 @@ pub const RESTORE_DOC_ENTRY: &str = "RESTORE.md";
 /// Entry name of the standalone restore script inside the archive.
 pub const RESTORE_SCRIPT_ENTRY: &str = "restore.sh";
 
+/// Whether a string may be handed to `rad` or `git` as an identifier, which is base58 with
+/// an optional `rad:` prefix.
+///
+/// Ids arrive from an unvouched archive, and a value beginning with `-` in an argv position
+/// reads as a flag.
+pub fn is_identifier(value: &str) -> bool {
+    let bare = value.strip_prefix("rad:").unwrap_or(value);
+    !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
 /// How much of a home an archive holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -128,12 +138,14 @@ pub struct ToolInfo {
     pub version: String,
 }
 
+/// rad-backup's own name and this library's version. Another program writing archives with this
+/// library names itself, so a report about its archive reaches its maintainers.
 impl Default for ToolInfo {
     fn default() -> Self {
         Self {
-            // Never derive this from CARGO_PKG_NAME, because the string is a documented
-            // archive field and a crate rename would silently rewrite it
-            name: env!("CARGO_BIN_NAME").to_string(),
+            // Spelled out, because the string is a documented archive field that a crate or
+            // binary rename must not rewrite, and a library build has no binary name to read
+            name: "rad-backup".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }

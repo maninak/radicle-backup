@@ -5,15 +5,7 @@ use std::path::Path;
 use crate::error::Result;
 use crate::exec::Tool;
 
-/// Whether a string may be handed to `rad` or `git` as an identifier, which is base58 with
-/// an optional `rad:` prefix.
-///
-/// Ids arrive from an unvouched archive, and a value beginning with `-` in an argv position
-/// reads as a flag.
-pub fn is_identifier(value: &str) -> bool {
-    let bare = value.strip_prefix("rad:").unwrap_or(value);
-    !bare.is_empty() && bare.chars().all(|c| c.is_ascii_alphanumeric())
-}
+pub use crate::manifest::is_identifier;
 
 /// What `rad` was able to say about one repository.
 ///

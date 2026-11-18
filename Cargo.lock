@@ -1679,6 +1679,7 @@ name = "radicle-backup"
 version = "0.4.2"
 dependencies = [
  "age",
+ "age-core",
  "bip39",
  "bs58",
  "clap",

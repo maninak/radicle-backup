@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use crate::archives::{self, Fate, Missing, Settings, sidecar_path};
 use crate::cli::Create;
 use crate::cmd::{Ctx, Scratch, fill, rfc3339_stamp};
-use crate::container::{MODE_DOC, MODE_SECRET, Writer};
+use crate::container::{COMPRESSION_LEVEL, MODE_DOC, MODE_SECRET, Writer};
 use crate::crypt::{self, Encryption};
 use crate::db;
 use crate::error::{Error, Result};
 use crate::git::{self, Git};
+use crate::instructions;
 use crate::inventory::{self, Inventory};
 use crate::key::{Identity, SecretKey};
 use crate::manifest::{
@@ -28,12 +29,7 @@ mod node;
 use destination::prepare;
 use node::quiesce;
 
-const RESTORE_DOC: &str = include_str!("../../../assets/RESTORE.md");
-const RESTORE_SCRIPT: &str = include_str!("../../../assets/restore.sh");
 const SIDECAR: &str = include_str!("../../../assets/sidecar.txt");
-
-/// The mode of the restore script, executable so it runs straight out of the archive.
-const SCRIPT_MODE: u32 = 0o755;
 
 /// What a run produced, and whether it produced all of it.
 ///
@@ -203,7 +199,7 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     };
 
     let output = destination.open()?;
-    let mut writer = Writer::create(output, &encryption)?;
+    let mut writer = Writer::create(output, &encryption, COMPRESSION_LEVEL, None)?;
 
     term.step("archiving the identity");
     writer.add_file("keys/radicle", &home.secret_key(), MODE_SECRET)?;
@@ -252,32 +248,15 @@ pub fn run(ctx: &Ctx, args: &Create, purpose: Purpose) -> Result<Outcome> {
     let dropped = bundled.failures.len();
     let mut said = bundled.failures;
 
-    let restore_doc = fill(
-        RESTORE_DOC,
-        &[
-            ("CREATED", &manifest.created),
-            ("RAD_HOME", &manifest.source.rad_home),
-            (
-                "HOST",
-                manifest.source.host.as_deref().unwrap_or("a machine"),
-            ),
-            (
-                "ALIAS",
-                manifest.identity.alias.as_deref().unwrap_or("unnamed"),
-            ),
-            ("DID", &manifest.identity.did),
-            ("FINGERPRINT", &manifest.identity.fingerprint),
-        ],
-    );
     writer.add_bytes(
         manifest::RESTORE_DOC_ENTRY,
-        restore_doc.as_bytes(),
+        instructions::restore_doc(&manifest).as_bytes(),
         MODE_DOC,
     )?;
     writer.add_bytes(
         manifest::RESTORE_SCRIPT_ENTRY,
-        RESTORE_SCRIPT.as_bytes(),
-        SCRIPT_MODE,
+        instructions::RESTORE_SCRIPT.as_bytes(),
+        instructions::SCRIPT_MODE,
     )?;
 
     // A count recorded as zero because its table was renamed would mislead a restore, so the

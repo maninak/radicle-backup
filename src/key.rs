@@ -1,5 +1,6 @@
 //! The ed25519 keypair that is a Radicle identity, with secrets held in `Zeroizing`.
 
+#[cfg(feature = "cli")]
 use std::path::Path;
 
 use ssh_key::rand_core::OsRng;
@@ -21,6 +22,7 @@ pub struct Identity {
 }
 
 impl Identity {
+    #[cfg(feature = "cli")]
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|e| Error::io(path, e))?;
@@ -96,14 +98,21 @@ pub struct SecretKey {
 }
 
 impl SecretKey {
+    #[cfg(feature = "cli")]
     pub fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let bytes = Zeroizing::new(std::fs::read(path).map_err(|e| Error::io(path, e))?);
-        let key = PrivateKey::from_openssh(&*bytes).map_err(|e| Error::BadKey {
+        Self::parse(&bytes).map_err(|e| Error::BadKey {
             path: path.to_path_buf(),
             reason: e.to_string(),
-        })?;
-        Ok(Self { key })
+        })
+    }
+
+    /// Parses an OpenSSH private key file's bytes, encrypted or not.
+    pub fn parse(openssh: &[u8]) -> Result<Self> {
+        Ok(Self {
+            key: PrivateKey::from_openssh(openssh)?,
+        })
     }
 
     pub fn protection(&self) -> Protection {

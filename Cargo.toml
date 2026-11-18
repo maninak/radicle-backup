@@ -10,30 +10,53 @@ repository = "https://github.com/maninak/radicle-backup"
 homepage = "https://radicle.tools"
 readme = "README.md"
 keywords = ["radicle", "backup", "restore", "git", "identity"]
-categories = ["command-line-utilities"]
-exclude = ["/.github", "/ci", "/packaging", "/tests/fixtures"]
+categories = ["command-line-utilities", "encoding"]
+exclude = ["/.github", "/ci", "/packaging"]
 
 # The binary must be `rad-backup`, because `rad backup` execs `rad-backup` from PATH
 [[bin]]
 name = "rad-backup"
 path = "src/main.rs"
+required-features = ["cli"]
+
+# Runs the binary, which a build without `cli` does not have
+[[test]]
+name = "end_to_end"
+required-features = ["cli"]
+
+# Additive, so the library a browser builds turns default features off and loses what only a
+# terminal program needs: sqlite, prompting, argument parsing and the paper sheet
+[features]
+default = ["cli"]
+cli = [
+    "dep:bip39",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:clap_mangen",
+    "dep:qrcode",
+    "dep:rpassword",
+    "dep:rusqlite",
+]
 
 [dependencies]
 age = { version = "0.12.1", features = ["ssh"] }
+# age names `FileKey` and `Stanza` in its `Identity` trait without re-exporting them, so an
+# identity of our own needs the version age itself depends on
+age-core = "0.12.0"
 # `zeroize` wipes the mnemonic, because its 24 words are the key and bip39's buffers are
 # otherwise dropped intact
-bip39 = { version = "2.2.2", features = ["zeroize"] }
+bip39 = { version = "2.2.2", features = ["zeroize"], optional = true }
 bs58 = "0.5.1"
-clap = { version = "4.6.7", features = ["derive", "env"] }
-clap_complete = "4.6.11"
+clap = { version = "4.6.7", features = ["derive", "env"], optional = true }
+clap_complete = { version = "4.6.11", optional = true }
 # `env` makes clap_mangen 0.3 render environment variables, or the man page silently loses
 # its `RAD_BACKUP_*` lines
-clap_mangen = { version = "0.3.2", features = ["env"] }
+clap_mangen = { version = "0.3.2", features = ["env"], optional = true }
 hex = "0.4.3"
 jiff = "0.2.38"
-qrcode = "0.14.1"
-rpassword = "7.5.4"
-rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+qrcode = { version = "0.14.1", optional = true }
+rpassword = { version = "7.5.4", optional = true }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
@@ -56,6 +79,11 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 unwrap_used = "deny"
+# `clippy.toml` lists what a browser does not have. The library denies it only without the
+# `cli` feature (`src/lib.rs`), because the command line is where those calls belong.
+disallowed_macros = "allow"
+disallowed_methods = "allow"
+disallowed_types = "allow"
 
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }

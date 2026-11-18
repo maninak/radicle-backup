@@ -2,6 +2,10 @@
 # Archives and recovery sheets are the one kind of file that must never be committed.
 *.tar.zst
 *.tar.zst.age
+# Except the conformance archives, whose only key is the all-zero-seed test identity that
+# tests/end_to_end.rs spells out
+!/tests/fixtures/*.tar.zst
+!/tests/fixtures/*.tar.zst.age
 *.partial
 *.README.txt
 recovery-sheet*.html

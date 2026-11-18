@@ -72,6 +72,14 @@ jobs:
       - name: Non-unix gates
         if: matrix.os == 'ubuntu-latest'
         run: ci/nonunix.sh
+      # zstd's C compiles for the browser only with a clang that emits wasm, which the runner
+      # image does not promise
+      - name: What the wasm build needs
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: Wasm library
+        if: matrix.os == 'ubuntu-latest'
+        run: ci/wasm.sh
       # The integration suite drives the real binary against a real git. Windows runs the path
       # where a file cannot be restricted to one user, and this is that path's only test.
       - name: Tests

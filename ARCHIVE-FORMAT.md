@@ -10,8 +10,8 @@ This document is the specification: enough for another program, or a person with
 ```
 
 - **age**: [age](https://age-encryption.org) v1, either an `scrypt` recipient (a passphrase) or one or more `X25519`/`ssh` recipients (`--recipient`). The file begins with the ASCII bytes `age-encryption.org/`, which is how a reader decides whether to decrypt rather than trusting the file name.
-- **zstd**: a standard zstd stream, level 10.
-- **tar**: a GNU tar stream. Entries are regular files only; no directories, symlinks, hardlinks or device nodes are ever written, and a reader must not create any, because a symlink or a device node in a hostile archive is how extraction escapes the directory it was pointed at or reaches into the system. Every header carries `uid=0`, `gid=0` and `mtime=0`, so an entry's bytes do not depend on who wrote it or when. The archive as a whole still differs between runs: `manifest.json` carries the creation time, and encryption adds a fresh salt.
+- **zstd**: a standard zstd stream. The level is the writer's choice (`rad-backup` writes 10, Grove writes 3), and nothing in the format depends on it.
+- **tar**: a GNU tar stream. Entries are regular files only; no directories, symlinks, hardlinks or device nodes are ever written, and a reader must not create any, because a symlink or a device node in a hostile archive is how extraction escapes the directory it was pointed at or reaches into the system. A reader refuses any other entry type, including GNU long-name and PAX records, before reading its body, because such a record is held in memory whole. So each name fits the header's 100-byte name field. Every header carries `uid=0`, `gid=0` and `mtime=0`, so an entry's bytes do not depend on who wrote it or when. The archive as a whole still differs between runs: `manifest.json` carries the creation time, and encryption adds a fresh salt.
 
 Nothing in the format depends on a `rad` version. An archive written next to Radicle 1.10 restores next to Radicle 2.x, because it carries the files and the git objects rather than a serialisation of anyone's internal types.
 
@@ -34,6 +34,8 @@ Nothing in the format depends on a `rad` version. An archive written next to Rad
 | `manifest.json` | `0644` | Always, and always **last**. |
 
 `<rid>` is the repository identifier without its `rad:` prefix.
+
+Each path appears once, in exactly the form the manifest lists it: `/`-separated parts of printable ASCII other than space, `\`, `:` and `~`, none of them empty or ending in `.`, so no platform reads a second spelling of it. A reader refuses an archive that holds two paths equal when case is ignored, because a file system that ignores case writes both to one file.
 
 The manifest is written after every other entry, so the digests in it describe what was actually written rather than what was intended. A streaming reader learns the expected digests only at the end: hash as you go, compare at the close.
 

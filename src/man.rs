@@ -36,7 +36,7 @@ impl Stdout {
 pub fn run(leads_to: Stdout, stdout: &mut dyn Write) -> Result<ExitCode> {
     match leads_to {
         Stdout::Terminal => Err(Error::ManAtATerminal),
-        Stdout::Elsewhere => crate::emit(stdout, &render()?),
+        Stdout::Elsewhere => crate::app::emit(stdout, &render()?),
     }
 }
 

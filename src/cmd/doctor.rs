@@ -1491,7 +1491,7 @@ mod tests {
         let path = dir.join(name);
         let file = std::fs::File::create(&path).expect("scratch archive is creatable");
         let mut sink =
-            crate::crypt::Sink::new(Box::new(file), encryption).expect("sink is buildable");
+            crate::crypt::Sink::new(Box::new(file), encryption, None).expect("sink is buildable");
         // The body is empty zstd, because opening an archive builds the decoder, and a junk
         // body would fail there for a reason unrelated to the key
         let body = zstd::encode_all(std::io::empty(), 0).expect("zstd encodes nothing");
