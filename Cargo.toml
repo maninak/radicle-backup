@@ -91,6 +91,12 @@ serde_json = "1.0.151"
 # The hygiene test decodes a plaintext archive itself, so it checks the bytes on disk
 zstd = "0.14.3"
 
+# `ci/wasm.sh` builds the library for a browser, where getrandom needs its `js` source. Listed
+# only so Cargo.lock holds those crates, because the wasm build may use no crate the
+# dependency-age gate has not seen.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }
+
 # Debian packaging, used by `just deb` and by the release workflow alike
 [package.metadata.deb]
 maintainer = "Konstantinos Maninakis <info@radicle.tools>"
