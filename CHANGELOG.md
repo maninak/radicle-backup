@@ -4,26 +4,21 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-### Upgrading
-
-- Nothing to do unless you build `rad backup` from source, which now needs Rust 1.89, up from 1.88. Archives written by earlier versions still verify and restore.
-
 ### Added
 
-- `radicle-backup` is now also a Rust library, so other programs can read and write `rad backup` archives. With `default-features = false` it has no command line, no SQLite and no file system access. It builds for WebAssembly in a browser or elsewhere. A program that opens the same passphrase archive twice runs the slow passphrase step only once.
-- `tests/fixtures` holds three small sample archives that another implementation of the format can test against. They ship in the published crate. `tests/fixtures/README.md` describes each one.
+- `radicle-backup` is now also a Rust library, so other programs can read and write `rad backup` archives. With `default-features = false` it has no command line, no SQLite and no file system access, and it builds for WebAssembly. `tests/fixtures` holds sample archives that another implementation can test against.
 
 ### Fixed
 
-- `--identity` now takes an age key file as `age-keygen` writes it, with its `#` comment lines. It used to call such a file an invalid SSH identity, so only `age -d` could open an archive encrypted to that key.
-- `restore --force` now restores the databases exactly as archived, even when the node it replaces crashed or was killed. Files the crashed node left behind could damage them.
-- `restore` now waits up to a minute for each node it asks when it compares your restored repositories with the network. It used to give up after 9 seconds. A large repository could then show as "could not be compared", though your copy was up to date.
-- `doctor` now reports a passphrase archive as failed when its encryption header cannot be read. No passphrase can open such an archive. `doctor` used to report it as fine.
+- `restore` now waits up to a minute for each node it asks when it compares your repositories with the network. It used to give up after 9 seconds, so a large repository could show as "could not be compared".
+- `restore --force` over a node that crashed or was killed could restore damaged databases, because of files the crashed node left behind. It now restores them exactly as archived.
+- `--identity` now takes an age key file as `age-keygen` writes it, with its `#` comment lines.
+- `doctor` now fails a passphrase archive whose encryption header cannot be read. It used to call it fine.
 
 ### Security
 
-- `verify` and `restore` now refuse an archive whose file names clash or are spelled in an unusual way. Examples are `./a/b` beside `a/b`, two names that differ only in case, and a Windows device name such as `NUL`. Such an archive could pass `verify --deep` and then restore different files from the ones it checked. `rad backup` never writes one, and the library refuses to.
-- `verify` and `restore` now refuse an archive that holds anything but plain files, such as a symlink or a special tar header for long names. A crafted header of a few kilobytes could make them use hundreds of megabytes of memory. A symlink used to be restored as a plain file. `rad backup` never writes either.
+- `verify` and `restore` now refuse an archive with clashing or oddly spelled file names, such as `./a/b` beside `a/b`, names that differ only in case, or `NUL`. Such an archive could pass `verify --deep` and then restore different files from the ones it checked.
+- `verify` and `restore` now refuse an archive that holds anything but plain files. A crafted tar header of a few kilobytes could make them use hundreds of megabytes of memory.
 
 ## [0.4.2] - 2026-11-06
 
