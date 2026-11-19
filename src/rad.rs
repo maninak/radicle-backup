@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::exec::Tool;
+use crate::git::parse_version;
 
 pub use crate::manifest::is_identifier;
 
@@ -40,6 +41,24 @@ impl Listing {
             Self::Private => "ls --private",
         }
     }
+}
+
+/// How long rad waits on each seed, both to connect and to fetch. rad's own default of 9
+/// seconds times out reading the control socket on a repository the size of a ports tree.
+const FETCH_TIMEOUT_SECS: u64 = 60;
+
+/// heartwood 1.7.0 reads `--timeout` as a duration (`60s`). Earlier rads read bare seconds
+/// and refuse a unit, and later ones refuse a bare number. The 1.7.0 release candidates still
+/// read bare seconds and get the wrong spelling.
+const TIMEOUT_TAKES_A_UNIT_SINCE: (u32, u32) = (1, 7);
+
+/// The `--timeout` value the rad that printed `said` reads as one minute, or `None` when
+/// its version cannot be read.
+pub fn fetch_timeout(said: &str) -> Option<String> {
+    Some(match parse_version(said)? >= TIMEOUT_TAKES_A_UNIT_SINCE {
+        true => format!("{FETCH_TIMEOUT_SECS}s"),
+        false => FETCH_TIMEOUT_SECS.to_string(),
+    })
 }
 
 pub struct Rad {
@@ -100,9 +119,15 @@ impl Rad {
     }
 
     /// Fetches a repository from the network, so a restored copy can be compared with what
-    /// other nodes hold.
-    pub fn fetch(&self, rid: &str) -> Result<bool> {
-        self.tool.passthrough(&["sync", rid, "--fetch"])
+    /// other nodes hold. `timeout` is a value from [`fetch_timeout`], and `None` leaves rad's
+    /// own default.
+    pub fn fetch(&self, rid: &str, timeout: Option<&str>) -> Result<bool> {
+        match timeout {
+            Some(timeout) => self
+                .tool
+                .passthrough(&["sync", rid, "--fetch", "--timeout", timeout]),
+            None => self.tool.passthrough(&["sync", rid, "--fetch"]),
+        }
     }
 
     /// Re-applies one seeding policy, for restoring into a Radicle whose schema has moved on.
@@ -298,5 +323,19 @@ mod tests {
         assert!(!is_identifier(""));
         assert!(!is_identifier("rad:"));
         assert!(!is_identifier("../../.ssh"));
+    }
+
+    #[test]
+    fn the_fetch_timeout_is_spelled_the_way_the_installed_rad_reads_it() {
+        assert_eq!(
+            fetch_timeout("rad 1.6.1 (8a2c3c9e4)").as_deref(),
+            Some("60")
+        );
+        assert_eq!(
+            fetch_timeout("rad 1.7.0 (4f3c1b2a0)").as_deref(),
+            Some("60s")
+        );
+        assert_eq!(fetch_timeout("rad 1.0.0-stub").as_deref(), Some("60"));
+        assert_eq!(fetch_timeout("rad pre-release"), None);
     }
 }

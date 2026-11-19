@@ -1468,8 +1468,19 @@ fn compare_with_network(
         if archived.is_some_and(|archived| !git::names_an_oid(archived)) {
             standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
+    let timeout = rad
+        .version()
+        .ok()
+        .as_deref()
+        .and_then(crate::rad::fetch_timeout);
+    if timeout.is_none() {
+        ctx.term.warn(
+            "could not read which version of rad this is, so each fetch gets rad's default \
+             timeout, and a large repository may not be compared",
+        );
+    }
         }
-        match rad.fetch(&repo.rid) {
+        match rad.fetch(&repo.rid, timeout.as_deref()) {
             Ok(true) => fetched.push((repo, archived)),
             Ok(false) => {
                 standings.insert(repo.rid.clone(), Standing::CouldNotAsk);

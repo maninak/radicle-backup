@@ -267,11 +267,11 @@ fn version_checks_a_bundle(said: &str) -> Option<bool> {
     Some(parse_version(said)? >= FSCK_ON_A_BUNDLE_SINCE)
 }
 
-/// The major and minor out of whatever `git --version` printed.
+/// The major and minor out of whatever `git --version` or `rad --version` printed.
 ///
 /// Tolerates distribution tails such as `2.51.0.windows.1` and `2.39.5 (Apple Git-154)`.
 /// `None` for anything unreadable, because a guess would turn "could not tell" into "no".
-fn parse_version(said: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_version(said: &str) -> Option<(u32, u32)> {
     let numbered = said
         .split_whitespace()
         .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
