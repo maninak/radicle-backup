@@ -633,37 +633,54 @@ fn install(ctx: &Ctx, staging: &Path, settled: &[Settled], policies: PolicySourc
     copy_doc(&staging.join("config.json"), &home.config())?;
     match policies {
         PolicySource::Copy => {
-            copy_secret(&staging.join("node/policies.db"), &home.policies_db())?;
+            install_database(&staging.join("node/policies.db"), &home.policies_db())?;
         }
         // A database left by the home `--force` overwrites would merge its policies into the
         // replayed ones
         PolicySource::Replay => {
             let db = home.policies_db();
-            for stale in [
-                db.clone(),
-                db.with_extension("db-wal"),
-                db.with_extension("db-shm"),
-            ] {
-                match std::fs::remove_file(&stale) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                        return Err(Error::io(&stale, e));
-                    }
-                    _ => {}
-                }
-            }
+            remove_sidecars(&db)?;
+            remove_if_present(&db)?;
         }
     }
-    copy_secret(
+    install_database(
         &staging.join("node/notifications.db"),
         &home.notifications_db(),
     )?;
-    copy_secret(&staging.join("node/node.db"), &home.node_db())?;
+    install_database(&staging.join("node/node.db"), &home.node_db())?;
 
     ctx.term.ok(&format!(
         "installed the identity into {}",
         home.path().display()
     ));
     Ok(())
+}
+
+/// Copies an archived database over the one at `to`, first removing the journals beside it.
+/// SQLite applies a journal a node left on an unclean shutdown to whatever database file sits
+/// beside it, so a stale one would rewrite the restored database.
+fn install_database(from: &Path, to: &Path) -> Result<()> {
+    if !from.is_file() {
+        return Ok(());
+    }
+    remove_sidecars(to)?;
+    copy_secret(from, to)
+}
+
+/// Removes the rollback journal, the write-ahead log and its index that SQLite keeps beside
+/// `db`. heartwood keeps `node.db` in WAL mode by default and the other two databases in
+/// rollback-journal mode.
+fn remove_sidecars(db: &Path) -> Result<()> {
+    remove_if_present(&db.with_extension("db-journal"))?;
+    remove_if_present(&db.with_extension("db-wal"))?;
+    remove_if_present(&db.with_extension("db-shm"))
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::io(path, e)),
+        _ => Ok(()),
+    }
 }
 
 /// The repository config settings a restore takes out of an archive.
@@ -1451,6 +1468,17 @@ fn compare_with_network(
         "comparing {} with the network",
         term::count(restored.len(), "repository", "repositories")
     ));
+    let timeout = rad
+        .version()
+        .ok()
+        .as_deref()
+        .and_then(crate::rad::fetch_timeout);
+    if timeout.is_none() {
+        ctx.term.warn(
+            "could not read which version of rad this is, so each fetch gets rad's default \
+             timeout, and a large repository may not be compared",
+        );
+    }
     let mut fetched = Vec::new();
     for repo in restored {
         // A repository no node can hold is not fetched, because the fetch would fail and
@@ -1468,17 +1496,6 @@ fn compare_with_network(
         if archived.is_some_and(|archived| !git::names_an_oid(archived)) {
             standings.insert(repo.rid.clone(), Standing::CouldNotAsk);
             continue;
-    let timeout = rad
-        .version()
-        .ok()
-        .as_deref()
-        .and_then(crate::rad::fetch_timeout);
-    if timeout.is_none() {
-        ctx.term.warn(
-            "could not read which version of rad this is, so each fetch gets rad's default \
-             timeout, and a large repository may not be compared",
-        );
-    }
         }
         match rad.fetch(&repo.rid, timeout.as_deref()) {
             Ok(true) => fetched.push((repo, archived)),
@@ -2721,5 +2738,24 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, MODE_SECRET);
+    }
+
+    #[test]
+    fn an_installed_database_takes_no_journal_from_the_home_it_overwrites() {
+        let scratch = crate::key::tests::TestScratch::create("restore-stale-journal");
+        let archived = scratch.path_of("archived.db");
+        std::fs::write(&archived, b"archived").expect("source is writable");
+        let db = scratch.path_of("node.db");
+        std::fs::write(&db, b"overwritten").expect("old database is writable");
+        std::fs::write(scratch.path_of("node.db-journal"), b"stale").expect("journal is writable");
+        std::fs::write(scratch.path_of("node.db-wal"), b"stale").expect("log is writable");
+        std::fs::write(scratch.path_of("node.db-shm"), b"stale").expect("index is writable");
+
+        install_database(&archived, &db).expect("install succeeds");
+
+        assert_eq!(std::fs::read(&db).expect("database exists"), b"archived");
+        assert!(!scratch.path_of("node.db-journal").exists());
+        assert!(!scratch.path_of("node.db-wal").exists());
+        assert!(!scratch.path_of("node.db-shm").exists());
     }
 }

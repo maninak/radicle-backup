@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - `restore` now waits up to a minute for each seed when it compares your restored copy with the network. It used to give up after 9 seconds, so a large repository could be reported as not compared though your copy was current.
+- `restore --force` over a home whose node did not shut down cleanly now restores the databases exactly as archived. A journal that node left behind could be written into them and damage them.
 
 ### Security
 
