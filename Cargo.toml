@@ -97,6 +97,11 @@ zstd = "0.14.3"
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 getrandom = { version = "0.2.17", features = ["js"] }
 
+# docs.rs shows the library a `default-features = false` consumer gets, without the items that
+# exist only for the binary
+[package.metadata.docs.rs]
+no-default-features = true
+
 # Debian packaging, used by `just deb` and by the release workflow alike
 [package.metadata.deb]
 maintainer = "Konstantinos Maninakis <info@radicle.tools>"

@@ -437,6 +437,15 @@ Unattended-Upgrade::Allowed-Origins {
 - **It does not talk to any service.** No telemetry, no upload, no phone home. Where the archive goes is entirely your business.
 - **It does not make Windows a Radicle machine.** There is a Windows build, and it reads, checks and lists archives properly. What it cannot do is promise that a file it writes is readable only by you, because Windows has no mode bits and this tool carries no Windows API dependency to set an ACL; it says so the first time it writes such a file. Radicle itself is a unix program, so the home a backup describes lives on the Linux or macOS side, WSL included.
 
+## As a library
+
+```toml
+[dependencies]
+radicle-backup = { version = "0.5", default-features = false }
+```
+
+Without default features it has no command line, no SQLite and no file system access, so it builds for `wasm32-unknown-unknown`. A wasm build needs two things from you. One is a randomness source for `getrandom` 0.2. In a browser, depend on it with its `js` feature. Elsewhere, register one with its `custom` feature. The other is a clang that targets wasm32 and an `llvm-ar`, for zstd's C. If the defaults cannot do it, name them in `CC_wasm32_unknown_unknown` and `AR_wasm32_unknown_unknown`. `ARCHIVE-FORMAT.md` is the specification, and [`tests/fixtures`](tests/fixtures/README.md) holds sample archives to test another implementation against.
+
 ## Development
 
 ```sh

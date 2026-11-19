@@ -32,7 +32,7 @@ impl Identity {
         })
     }
 
-    /// Pure counterpart of [`Identity::read`], so the parsing can be tested without a file.
+    /// Reads an OpenSSH public key from its text, so a caller with no file system can parse one.
     pub fn parse(openssh: &str) -> Result<Self> {
         let key = PublicKey::from_openssh(openssh.trim())?;
         if key.key_data().ed25519().is_none() {

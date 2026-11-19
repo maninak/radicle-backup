@@ -1,6 +1,6 @@
 # The archive format, version 1
 
-This document is the specification: enough for another program, or a person with a shell, to read an archive without this one.
+This document is the specification: enough for another program, or a person with a shell, to read an archive without this one. [`tests/fixtures`](tests/fixtures/README.md) holds sample archives to test an implementation against.
 
 ## Layers
 
@@ -149,3 +149,5 @@ Nobody vouches for an archive: it arrives from wherever it was kept. Three of it
 | Version | Released | Changes |
 |---|---|---|
 | 1 | 0.1.0 | The format described here. |
+
+`rad backup` 0.5.0 and later refuse an entry that is not a regular file, and a name outside the one spelling the format allows. No version of `rad backup` wrote either.
