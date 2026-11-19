@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
-- `radicle-backup` is now also a Rust library, so another program can read and write `rad backup` archives. Built with `default-features = false`, it leaves out the command line, SQLite and terminal prompts, touches no file system, and builds for WebAssembly in a browser. It writes and reads over any byte stream, takes a pinned scrypt work factor for passphrase archives, and can unwrap an archive's file key once so a second read runs no scrypt.
+- `radicle-backup` is now also a Rust library, so another program can read and write `rad backup` archives. Built with `default-features = false`, it leaves out the command line, SQLite and terminal prompts, touches no file system, and builds for WebAssembly in a browser or elsewhere. It writes and reads over any byte stream, takes a pinned scrypt work factor for passphrase archives, and can unwrap an archive's file key once so a second read runs no scrypt.
 - `tests/fixtures` holds three small conformance archives that another implementation of the format can test against. They ship in the published crate, and `tests/fixtures/README.md` says what each one is.
 
 ### Changed
