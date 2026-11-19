@@ -69,6 +69,14 @@ pub enum Error {
     )]
     ExcessiveWork { required: u8 },
 
+    /// A file key that does not open the passphrase archive it is offered. Its own variant, so a
+    /// caller holding a key from an earlier read can ask for the passphrase again.
+    #[error(
+        "the file key does not open this archive. It came from another archive, or this one \
+         changed or was damaged after the key was taken from it"
+    )]
+    StaleFileKey,
+
     /// An entry whose bytes did not add up to the size its tar header already declared, which
     /// leaves a tar no reader can walk.
     #[error("`{entry}` was declared as {declared} bytes, but {given} bytes were given")]

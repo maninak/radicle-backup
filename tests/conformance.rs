@@ -113,7 +113,7 @@ fn a_file_key_opens_only_the_archive_it_came_from() {
 
     let opened = crypt::reader_with_file_key(other.as_slice(), &key);
     assert!(
-        matches!(&opened, Err(Error::Age(message)) if message.contains("does not open this archive")),
+        matches!(opened, Err(Error::StaleFileKey)),
         "a foreign key is refused as the wrong key, not as damage"
     );
 }

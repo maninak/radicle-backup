@@ -378,7 +378,8 @@ pub fn unwrap_file_key<R: Read>(
 
 /// Opens a passphrase archive with a file key [`unwrap_file_key`] took from it, running none of
 /// the archive's scrypt work. The payload is authenticated as [`decrypting_reader`]
-/// authenticates it.
+/// authenticates it. A key from another archive, or from this one before it changed, is
+/// [`Error::StaleFileKey`].
 pub fn reader_with_file_key<'a, R: Read + 'a>(
     input: R,
     key: &FileKey,
@@ -395,10 +396,7 @@ pub fn reader_with_file_key<'a, R: Read + 'a>(
         .decrypt(std::iter::once(&known as &dyn age::Identity))
         .map_err(|failure| match failure {
             age::DecryptError::InvalidHeader => damaged_header(),
-            other => Error::Age(format!(
-                "{other}. The file key does not open this archive, which changed after the key \
-                 was taken from it or is damaged"
-            )),
+            _ => Error::StaleFileKey,
         })?;
     Ok(Box::new(AuthenticatingReader(reader)))
 }
