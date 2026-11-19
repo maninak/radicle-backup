@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format follows [Kee
 - `radicle-backup` is now also a Rust library, so another program can read and write `rad backup` archives. Built with `default-features = false`, it leaves out the command line, SQLite and terminal prompts, touches no file system, and builds for WebAssembly in a browser. It writes and reads over any byte stream, takes a pinned scrypt work factor for passphrase archives, and can unwrap an archive's file key once so a second read runs no scrypt.
 - `tests/fixtures` holds three small conformance archives that another implementation of the format can test against. They ship in the published crate, and `tests/fixtures/README.md` says what each one is.
 
+### Changed
+
+- Building `rad backup` from source now needs Rust 1.89, up from 1.88.
+
 ### Fixed
 
 - `restore` now waits up to a minute for each seed when it compares your restored copy with the network. It used to give up after 9 seconds, so a large repository could be reported as not compared though your copy was current.
