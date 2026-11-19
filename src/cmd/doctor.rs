@@ -646,12 +646,24 @@ fn check_archive_encryption(
     }
     if crate::crypt::needs_passphrase(&archive.path)? {
         // A passphrase archive stays unopened, because opening it means a prompt, and people
-        // stop running a health report that prompts. The header says which key it wants.
-        return Ok(Check::new(
-            ID,
-            Verdict::Pass,
-            format!("{name} opens only with the passphrase it was sealed under"),
-        ));
+        // stop running a health report that prompts. Its header is still read, because no
+        // passphrase opens one that is malformed.
+        let mut file =
+            std::fs::File::open(&archive.path).map_err(|e| Error::io(&archive.path, e))?;
+        return Ok(match crate::crypt::scrypt_work(&mut file) {
+            Ok(_) => Check::new(
+                ID,
+                Verdict::Pass,
+                format!("{name} opens only with the passphrase it was sealed under"),
+            ),
+            Err(Error::PathlessIo(e)) => return Err(Error::io(&archive.path, e)),
+            Err(e) => Check::new(
+                ID,
+                Verdict::Fail,
+                format!("{name} cannot be opened with any passphrase: {e}"),
+            )
+            .with_remedy("an archive nothing opens is not a backup; take another one"),
+        });
     }
 
     if identities.files.is_empty() {
@@ -1554,6 +1566,35 @@ mod tests {
         assert_eq!(check.verdict, Verdict::Pass, "{}", check.detail);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_passphrase_archive_whose_header_no_passphrase_can_read_fails() {
+        let scratch = TestScratch::create("doctor-damaged-scrypt");
+        let dir = scratch.path_of("backups");
+        let sealed = crate::crypt::Encryption::Passphrase(zeroize::Zeroizing::new(
+            "open sesame".to_string(),
+        ));
+        let archive = archive_at(&dir, "sealed.tar.zst.age", &sealed);
+        let bytes = std::fs::read(&archive.path).expect("the archive is readable");
+        let tag = b"-> scrypt ";
+        let salt = bytes
+            .windows(tag.len())
+            .position(|window| window == tag)
+            .expect("a passphrase archive carries a scrypt stanza")
+            + tag.len();
+        let salt_ends = salt
+            + bytes[salt..]
+                .iter()
+                .position(|&b| b == b' ')
+                .expect("the salt is followed by the work factor");
+        // A salt of the wrong length still parses as a scrypt stanza, and age refuses it
+        let damaged = [&bytes[..salt], b"AAAA", &bytes[salt_ends..]].concat();
+        std::fs::write(&archive.path, damaged).expect("the archive is writable");
+
+        let check = check_archive_encryption(&Default::default(), Some(&archive), None)
+            .expect("the file is readable");
+        assert_eq!(check.verdict, Verdict::Fail, "{}", check.detail);
     }
 
     #[test]
