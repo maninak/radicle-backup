@@ -8,7 +8,7 @@ pub const AUTHOR: &str = "Konstantinos Maninakis (maninak)";
 /// The site for the family of Radicle tools this belongs to.
 pub const RADICLE_TOOLS: &str = "https://radicle.tools";
 
-pub const DONATE: &str = "https://liberapay.com/maninak/donate";
+pub const DONATE: &str = "https://maninak.com/donate";
 
 /// Where a vulnerability goes, because an issue is public and every node that fetched it
 /// keeps a copy. The address `SECURITY.md` gives.

@@ -1,6 +1,6 @@
 # radicle-backup
 
-[![Sponsor maninak on Liberapay](https://img.shields.io/badge/Liberapay-Donate-F6C915?logo=liberapay&logoColor=black)](https://liberapay.com/maninak/donate)
+[![Support maninak](https://img.shields.io/badge/Support-Donate-F6C915)](https://maninak.com/donate)
 
 [![version](https://img.shields.io/github/v/release/maninak/radicle-backup?sort=semver&label=version&color=44CC11)](https://github.com/maninak/radicle-backup/releases/latest)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-orange.svg)](#license)
@@ -453,7 +453,7 @@ Contributions are welcome as pull requests or as Radicle patches. `CONTRIBUTING.
 
 If this tool is useful to you:
 
-- 💛 Chip in on [Liberapay](https://liberapay.com/maninak/donate).
+- 💛 Chip in with a [donation](https://maninak.com/donate).
 - 🌱 `rad seed rad:zwuwC3UnuVYy2tvG9dd11QCUbA7J` to keep a copy on the network, and ⭐ star it on [GitHub](https://github.com/maninak/radicle-backup).
 - 🗣️ Tell someone who doesn't keep Radicle home backups, or does them by hand.
 
