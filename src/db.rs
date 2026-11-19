@@ -421,16 +421,7 @@ mod tests {
                 .and_then(|p| p.alias.as_deref()),
             None
         );
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn a_null_alias_is_absence_rather_than_a_row_that_fails_the_whole_read() {
-        let path = scratch("null-alias");
-        write_policies_fixture(&path);
-
-        let policies = read_policies(&path).expect("a null alias does not fail the read");
+        // A null alias is absence too, and does not fail the whole read
         let null_alias = policies
             .following
             .iter()

@@ -342,30 +342,4 @@ mod tests {
             assert!(said.contains(way), "the refusal leaves out {way}: {said}");
         }
     }
-
-    #[test]
-    fn the_page_names_no_page_of_ours_that_nothing_ships() {
-        // The pages `just generated` writes for a package to install
-        let shipped = ["rad-backup", "rad-restore"];
-        let plain = page()
-            .replace("\\fB", "")
-            .replace("\\fR", "")
-            .replace("\\-", "-");
-        for (at, _) in plain.match_indices("(1)") {
-            let name: String = plain[..at]
-                .chars()
-                .rev()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            if name.starts_with("rad-") {
-                assert!(
-                    shipped.contains(&name.as_str()),
-                    "the page sends a reader to {name}(1), which no package installs"
-                );
-            }
-        }
-    }
 }

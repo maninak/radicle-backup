@@ -241,23 +241,7 @@ mod tests {
         let allowed = prepare(&args, &identity, None, &now, &Encryption::Plaintext, false)
             .expect("a pipe is a destination");
         assert!(matches!(allowed, Destination::Stdout));
-    }
-
-    #[test]
-    fn asking_for_stdout_never_touches_the_filesystem() {
-        let identity = Identity::parse(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOlfJT4YlvXMI9h98D4SSswNV5S0voNrQaUZMCq0s0zK",
-        )
-        .expect("the vector parses");
-        let now = jiff::Timestamp::from_second(1_786_000_000).expect("a valid instant");
-        let args = Create {
-            stdout: true,
-            ..blank_create()
-        };
-        let destination = prepare(&args, &identity, None, &now, &Encryption::Plaintext, false)
-            .expect("stdout is a destination");
-        assert!(matches!(destination, Destination::Stdout));
-        assert!(destination.directory().is_none());
+        assert!(allowed.directory().is_none());
     }
 
     fn blank_create() -> Create {

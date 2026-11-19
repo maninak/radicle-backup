@@ -686,16 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn a_flag_that_shapes_an_archive_is_refused_by_a_verb_that_makes_none() {
-        let matches = Cli::command()
-            .try_get_matches_from(["rad-backup", "--tier", "full", "doctor"])
-            .expect("clap itself allows it; the rule is ours");
-        let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
-        assert!(complaint.contains("--tier"), "{complaint}");
-        assert!(complaint.contains("doctor"), "{complaint}");
-    }
-
-    #[test]
     fn a_shaping_flag_from_the_environment_never_refuses_another_verb() {
         // RAD_BACKUP_TIER is set for every run in a shell that exports it, so refusing
         // `doctor` over it would make the variable unusable
@@ -775,6 +765,7 @@ mod tests {
     fn a_flag_the_verb_does_not_have_is_denied_rather_than_relocated() {
         let matches = Cli::command().get_matches_from(["rad-backup", "--tier", "full", "doctor"]);
         let complaint = misplaced_create_flag_complaint(&matches).expect("it is refused");
+        assert!(complaint.contains("--tier"), "{complaint}");
         assert!(
             complaint.contains("`doctor` does not create one"),
             "{complaint}"

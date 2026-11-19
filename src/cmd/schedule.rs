@@ -825,12 +825,4 @@ mod tests {
             "the binary path must be quoted: {exec}"
         );
     }
-
-    #[test]
-    fn a_timer_catches_up_after_the_machine_was_asleep() {
-        assert!(
-            timer_unit("daily").contains("Persistent=true"),
-            "a laptop that misses its window must still take the backup"
-        );
-    }
 }

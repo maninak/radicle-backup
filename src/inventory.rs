@@ -678,20 +678,19 @@ mod tests {
         std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o000))
             .expect("mode is settable");
 
+        let reads_through_any_mode = std::fs::read(&packed).is_ok();
         let answer = has_namespace_at(&dir, "z6MkMine");
         std::fs::set_permissions(&packed, std::fs::Permissions::from_mode(0o600))
             .expect("mode is settable back");
+        let _ = std::fs::remove_dir_all(&dir);
 
-        // Root reads the file whatever its mode, and then the test checks the answer it found
-        if let Ok(found) = answer {
-            assert!(found, "root read it, so it is ours");
-        } else {
-            assert!(
-                answer.is_err_and(|e| e.one_line().contains("packed-refs")),
-                "an unreadable file has to name itself"
-            );
+        if reads_through_any_mode {
+            crate::perms::tests::skip_as_privileged_from_env("an unreadable packed-refs");
+            return;
         }
-
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(
+            answer.is_err_and(|e| e.one_line().contains("packed-refs")),
+            "an unreadable file has to name itself"
+        );
     }
 }

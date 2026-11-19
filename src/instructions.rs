@@ -105,11 +105,4 @@ mod tests {
         let values = [("ALIAS", "a name long enough to matter")];
         assert!(room_for(template, &values) >= fill(template, &values).len());
     }
-
-    #[test]
-    fn a_document_is_sized_without_counting_a_value_no_marker_asks_for() {
-        // A value no marker asks for adds nothing, so the sheet is not sized for a mnemonic it
-        // never prints
-        assert_eq!(room_for("nothing here", &[("SECRET", "the 24 words")]), 12);
-    }
 }

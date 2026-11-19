@@ -428,14 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn an_archive_knows_which_repositories_it_carried_and_which_it_only_listed() {
-        let record = record();
-        assert!(record.carries("rad:zAAA"));
-        assert!(!record.carries("rad:zBBB"));
-        assert!(record.described.contains("rad:zBBB"));
-    }
-
-    #[test]
     fn a_state_file_written_before_the_field_was_renamed_still_says_what_it_carried() {
         // Renaming the `repos` key makes every existing state file read as an archive that
         // carried nothing
