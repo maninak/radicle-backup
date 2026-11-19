@@ -827,6 +827,17 @@ impl OfferedKeys {
                 offered.push(path.clone());
                 continue;
             }
+            // `age-keygen` writes its key under `#` comment lines, and a file may hold several
+            if let Ok(file) = age::IdentityFile::from_buffer(text.as_bytes())
+                && let Ok(keys) = file.into_identities()
+                && !keys.is_empty()
+            {
+                for key in keys {
+                    parsed.push(key);
+                    offered.push(path.clone());
+                }
+                continue;
+            }
             // The file name lets every message about this key say which file to go and find
             let key =
                 age::ssh::Identity::from_buffer(text.as_bytes(), Some(path.display().to_string()))
@@ -1436,6 +1447,34 @@ mod tests {
 
         let plaintext = opened_with(&archive, std::slice::from_ref(&key), Some(&unlocks))
             .expect("the right key with the right passphrase opens the archive");
+
+        assert_eq!(plaintext, b"secret");
+    }
+
+    /// `age-keygen` writes its key under two comment lines, and that file is what a user keeps
+    #[cfg(feature = "cli")]
+    #[test]
+    fn a_key_file_as_age_keygen_writes_it_opens_the_archive_it_is_a_recipient_of() {
+        use age::secrecy::ExposeSecret;
+        let scratch = TestScratch::create("crypt-age-keygen");
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string();
+        let archive = written_archive(
+            &scratch,
+            "age-keygen",
+            &Encryption::Recipients(vec![recipient.clone()]),
+        );
+        let key = scratch_path(&scratch, "age-keygen-key");
+        let mut file = crate::perms::create_private_file(&key).expect("scratch file is creatable");
+        write!(
+            file,
+            "# created: 2026-11-19T12:00:00Z\n# public key: {recipient}\n{}\n",
+            identity.to_string().expose_secret()
+        )
+        .expect("scratch key file is writable");
+
+        let plaintext =
+            opened_with(&archive, &[key], None).expect("the age key file opens the archive");
 
         assert_eq!(plaintext, b"secret");
     }

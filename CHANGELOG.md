@@ -4,25 +4,26 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Upgrading
+
+- Nothing to do unless you build `rad backup` from source, which now needs Rust 1.89, up from 1.88. Archives written by earlier versions still verify and restore.
+
 ### Added
 
-- `radicle-backup` is now also a Rust library, so another program can read and write `rad backup` archives. Built with `default-features = false`, it leaves out the command line, SQLite and terminal prompts, touches no file system, and builds for WebAssembly in a browser or elsewhere. It writes and reads over any byte stream, takes a pinned scrypt work factor for passphrase archives, and can unwrap an archive's file key once so a second read runs no scrypt.
-- `tests/fixtures` holds three small conformance archives that another implementation of the format can test against. They ship in the published crate, and `tests/fixtures/README.md` says what each one is.
-
-### Changed
-
-- Building `rad backup` from source now needs Rust 1.89, up from 1.88.
+- `radicle-backup` is now also a Rust library, so other programs can read and write `rad backup` archives. With `default-features = false` it has no command line, no SQLite and no file system access. It builds for WebAssembly in a browser or elsewhere. A program that opens the same passphrase archive twice runs the slow passphrase step only once.
+- `tests/fixtures` holds three small sample archives that another implementation of the format can test against. They ship in the published crate. `tests/fixtures/README.md` describes each one.
 
 ### Fixed
 
-- `restore` now waits up to a minute for each seed when it compares your restored copy with the network. It used to give up after 9 seconds, so a large repository could be reported as not compared though your copy was current.
-- `doctor` now fails a passphrase-protected archive whose encryption header is malformed. No passphrase opens such an archive, and `doctor` used to report it as fine.
-- `restore --force` over a home whose node did not shut down cleanly now restores the databases exactly as archived. A journal that node left behind could be written into them and damage them.
+- `--identity` now takes an age key file as `age-keygen` writes it, with its `#` comment lines. It used to call such a file an invalid SSH identity, so only `age -d` could open an archive encrypted to that key.
+- `restore --force` now restores the databases exactly as archived, even when the node it replaces crashed or was killed. Files the crashed node left behind could damage them.
+- `restore` now waits up to a minute for each node it asks when it compares your restored repositories with the network. It used to give up after 9 seconds. A large repository could then show as "could not be compared", though your copy was up to date.
+- `doctor` now reports a passphrase archive as failed when its encryption header cannot be read. No passphrase can open such an archive. `doctor` used to report it as fine.
 
 ### Security
 
-- `verify` and `restore` now refuse an archive whose file names are not in the one form the format allows, such as `./a/b` beside `a/b`, a name Windows keeps for a device such as `NUL`, or two names differing only in case. Such an archive could pass `verify --deep` and then restore bytes its record does not describe. `rad backup` never writes one, and the library now refuses to.
-- `verify` and `restore` now refuse an archive holding anything but regular files, such as a link or a long-name record, before reading it. A long-name record of a few kilobytes could make them hold hundreds of megabytes in memory, or more from a larger file, and a link was written as a plain file. `rad backup` never writes either.
+- `verify` and `restore` now refuse an archive whose file names clash or are spelled in an unusual way. Examples are `./a/b` beside `a/b`, two names that differ only in case, and a Windows device name such as `NUL`. Such an archive could pass `verify --deep` and then restore different files from the ones it checked. `rad backup` never writes one, and the library refuses to.
+- `verify` and `restore` now refuse an archive that holds anything but plain files, such as a symlink or a special tar header for long names. A crafted header of a few kilobytes could make them use hundreds of megabytes of memory. A symlink used to be restored as a plain file. `rad backup` never writes either.
 
 ## [0.4.2] - 2026-11-06
 
