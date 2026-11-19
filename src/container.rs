@@ -917,6 +917,7 @@ impl<R: Read> Read for HashingReader<R> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cli")]
     use std::path::PathBuf;
 
     use super::*;
@@ -953,6 +954,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     fn scratch_dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("rad-backup-archive-{name}-{}", std::process::id()));
@@ -961,6 +963,7 @@ mod tests {
         dir
     }
 
+    #[cfg(feature = "cli")]
     fn write_archive(path: &Path, encryption: &Encryption) {
         let file = std::fs::File::create(path).expect("archive is creatable");
         let mut writer = Writer::create(Box::new(file), encryption, COMPRESSION_LEVEL, None)
@@ -974,6 +977,7 @@ mod tests {
         writer.finish(&mut manifest()).expect("archive closes");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_archive_round_trips_and_reports_no_mismatches() {
         let dir = scratch_dir("round-trip");
@@ -990,6 +994,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     #[cfg(unix)]
     fn unpacking_writes_every_entry_with_owner_only_permissions() {
@@ -1020,6 +1025,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_tampered_entry_is_reported_as_a_digest_mismatch() {
         let dir = scratch_dir("tamper");
@@ -1051,6 +1057,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_encrypted_archive_needs_its_passphrase_and_then_reads_normally() {
         let dir = scratch_dir("encrypted");
@@ -1071,6 +1078,7 @@ mod tests {
     }
 
     /// Builds an archive by hand, to test entry types the writer never emits.
+    #[cfg(feature = "cli")]
     fn write_hostile_archive(path: &Path, entry: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
         let mut builder = tar::Builder::new(Vec::new());
         entry(&mut builder);
@@ -1090,6 +1098,7 @@ mod tests {
         encoder.finish().expect("the encoder closes");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_archive_whose_manifest_will_not_parse_says_which_archive() {
         let dir = scratch_dir("bad-manifest");
@@ -1139,6 +1148,7 @@ mod tests {
         assert!(reject_hostile_rid("rad:", archive).is_err());
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_archive_naming_a_repository_outside_the_home_is_refused_before_it_is_opened() {
         let dir = scratch_dir("hostile-rid");
@@ -1180,6 +1190,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_symlink_entry_is_refused_and_nothing_is_written_through_it() {
         let dir = scratch_dir("symlink");
@@ -1223,6 +1234,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_long_name_record_is_refused_before_its_body_is_read() {
         let dir = scratch_dir("long-name");
@@ -1252,6 +1264,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_archive_whose_entry_climbs_out_is_refused_before_anything_is_written() {
         let dir = scratch_dir("climb");
@@ -1477,6 +1490,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn repository_entry_names_are_the_same_on_every_platform() {
         for name in [

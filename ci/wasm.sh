@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Build the library without its `cli` feature for the browser's target, and hold that build to
-# reading no file system, environment, process or terminal
+# Test the library without its `cli` feature, then build it for the browser's target and hold
+# that build to reading no file system, environment, process or terminal
 
 set -euo pipefail
 
@@ -12,6 +12,10 @@ target=wasm32-unknown-unknown
 
 # `clippy.toml` lists the calls a tab cannot make, and this is the only build that denies them
 RUSTFLAGS="-D warnings" cargo clippy --lib --no-default-features --locked
+
+# Tests built with `cli` reach code the library leaves out, so only this run proves the library
+# alone passes its own tests and the format's
+RUSTFLAGS="-D warnings" cargo test --lib --test conformance --no-default-features --locked
 
 # A missing toolchain piece fails CI, which must run the build. Elsewhere it skips loudly, so a
 # contributor without a wasm clang can still run `just check`.

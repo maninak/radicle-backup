@@ -219,6 +219,7 @@ pub(crate) mod tests {
         assert_eq!(identity.public_key_bytes().as_slice(), expected.as_slice());
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_seed_round_trips_through_an_encrypted_key_file() {
         let seed = Zeroizing::new([7u8; 32]);
@@ -238,6 +239,7 @@ pub(crate) mod tests {
         ));
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_key_written_without_a_passphrase_reports_itself_as_plaintext() {
         let seed = Zeroizing::new([9u8; 32]);
@@ -250,6 +252,7 @@ pub(crate) mod tests {
         assert_eq!(*key.seed(None).expect("needs no passphrase"), *seed);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn the_identity_rebuilt_from_a_seed_matches_the_one_stored_beside_it() {
         let seed = Zeroizing::new([3u8; 32]);
@@ -267,6 +270,7 @@ pub(crate) mod tests {
 
     /// Writes a key file for a test, owner-only inside an owner-only directory, so it never
     /// sits in `/tmp` under a name anyone could guess from the pid.
+    #[cfg(feature = "cli")]
     fn scratch_file(scratch: &TestScratch, name: &str, contents: &str) -> std::path::PathBuf {
         use std::io::Write as _;
 
@@ -283,6 +287,7 @@ pub(crate) mod tests {
     /// `crate::cmd::Scratch` names its directory after the process id and refuses one that
     /// exists, so two tests in one binary would refuse each other. Each test gets its own
     /// parent, named after the test, with the `Scratch` inside it.
+    #[cfg(feature = "cli")]
     pub(crate) struct TestScratch {
         parent: std::path::PathBuf,
         // An `Option`, so `Drop` can remove the inner directory before the parent holding it,
@@ -290,6 +295,7 @@ pub(crate) mod tests {
         scratch: Option<crate::cmd::Scratch>,
     }
 
+    #[cfg(feature = "cli")]
     impl TestScratch {
         /// `name` must be unique across the test binary, because two tests sharing one refuse
         /// each other.
@@ -333,6 +339,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     impl Drop for TestScratch {
         fn drop(&mut self) {
             drop(self.scratch.take());
@@ -347,6 +354,7 @@ pub(crate) mod tests {
 
     /// Fixture key material must never sit in `/tmp` at the umask default, behind a guessable
     /// name a planted symlink can redirect.
+    #[cfg(feature = "cli")]
     #[test]
     #[cfg(unix)]
     fn a_fixture_key_file_sits_in_a_directory_nobody_else_can_enter() {

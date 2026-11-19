@@ -399,9 +399,12 @@ fn sanitise(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "cli")]
     const NODE: &str = "z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp";
+    #[cfg(feature = "cli")]
     const OTHER: &str = "z6MkvAFBkdph6yXSZDkkVqf9FfCcvkG29JD4KbwwnGphDRLV";
 
+    #[cfg(feature = "cli")]
     fn scratch_dir(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("rad-backup-archives-{name}-{}", std::process::id()));
@@ -411,14 +414,17 @@ mod tests {
     }
 
     /// Writes a file that begins with an age header.
+    #[cfg(feature = "cli")]
     fn touch_encrypted(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"age-encryption.org/v1\n").expect("fixture is writable");
     }
 
+    #[cfg(feature = "cli")]
     fn touch(dir: &Path, name: &str) {
         std::fs::write(dir.join(name), b"x").expect("the fixture file is writable");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn whether_an_archive_is_encrypted_is_read_from_it_and_not_from_its_name() {
         let dir = scratch_dir("header");
@@ -432,6 +438,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn archives_of_one_identity_come_back_newest_first_and_nothing_else_comes_back() {
         let dir = scratch_dir("listing");
@@ -487,6 +494,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_name_stamp_comes_back_as_the_instant_it_was_written_for() {
         let dir = scratch_dir("stamp");
@@ -532,6 +540,7 @@ mod tests {
         assert_eq!(name, "radicle-z6MkAAA-20260814T173500Z.tar.zst.age");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_archive_named_by_the_writer_is_found_again_by_the_reader() {
         let dir = scratch_dir("writer-and-reader");
@@ -546,6 +555,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[cfg(feature = "cli")]
     #[cfg(unix)]
     #[test]
     fn a_symlinked_archive_is_listed_with_the_size_of_what_it_points_at() {
@@ -567,6 +577,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
+    #[cfg(feature = "cli")]
     #[cfg(unix)]
     #[test]
     fn an_archive_that_cannot_be_examined_is_reported_rather_than_dropped() {
@@ -624,6 +635,7 @@ mod tests {
     }
 
     /// Each case is one way the archive holding what newer ones lack could be deleted.
+    #[cfg(feature = "cli")]
     #[test]
     fn retention_never_deletes_what_may_be_the_newest_complete_archive() {
         use Fate::{Deleted as D, Kept as K, Spared as S};
@@ -664,6 +676,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_note_says_complete_or_incomplete_only_in_rows_it_holds_once() {
         let settings = Settings::new("state", "private");
@@ -706,6 +719,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_directory_that_is_not_there_holds_no_archives_rather_than_failing() {
         let missing =

@@ -1131,6 +1131,7 @@ mod tests {
 
     /// `doctor` renders "not encrypted" as readable by anyone, so that claim must never come
     /// from a failed read.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_file_that_could_not_be_read_is_not_reported_as_unencrypted() {
         let dir = std::env::temp_dir().join(format!("rad-backup-looks-{}", std::process::id()));
@@ -1337,17 +1338,21 @@ mod tests {
         assert!(failure.to_string().contains("damaged"), "{failure}");
     }
 
+    #[cfg(feature = "cli")]
     use crate::key::tests::TestScratch;
 
     /// The refusal for a key that is not a recipient, which the other failures must not say.
+    #[cfg(feature = "cli")]
     const NO_KEY_OPENS_IT: &str = "none of the --identity keys opens this archive";
 
+    #[cfg(feature = "cli")]
     fn scratch_path(scratch: &TestScratch, name: &str) -> PathBuf {
         scratch.path_of(&format!("{name}.age"))
     }
 
     /// Owner-only, because an archive holds the secret its key unlocks, and `File::create`
     /// follows a symlink planted under the name.
+    #[cfg(feature = "cli")]
     fn written_archive(scratch: &TestScratch, name: &str, encryption: &Encryption) -> PathBuf {
         let path = scratch_path(scratch, name);
         let file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
@@ -1361,6 +1366,7 @@ mod tests {
     ///
     /// The key goes through `key::openssh_from_seed`, the path a key restored from words
     /// takes, so the fixture matches real keys. Two `seed` values give unrelated identities.
+    #[cfg(feature = "cli")]
     fn ssh_key_file(
         scratch: &TestScratch,
         name: &str,
@@ -1385,6 +1391,7 @@ mod tests {
 
     /// Owner-only, because `/tmp` is shared and SECURITY.md requires passphrase files to be
     /// private.
+    #[cfg(feature = "cli")]
     fn passphrase_file(scratch: &TestScratch, name: &str, passphrase: &str) -> PathBuf {
         let path = scratch_path(scratch, name);
         let mut file = crate::perms::create_private_file(&path).expect("scratch file is creatable");
@@ -1395,6 +1402,7 @@ mod tests {
 
     /// Opens a recipient-encrypted archive the way `--identity` does, with no terminal, which
     /// is how a timer meets every case below.
+    #[cfg(feature = "cli")]
     fn opened_with(
         archive: &Path,
         key_files: &[PathBuf],
@@ -1418,6 +1426,7 @@ mod tests {
         Ok(plaintext)
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_passphrase_protected_key_opens_the_archive_it_is_a_recipient_of() {
         let scratch = TestScratch::create("crypt-locked");
@@ -1433,6 +1442,7 @@ mod tests {
 
     /// An empty passphrase file is a mistake. After `touch pass`, a scheduled restore would
     /// otherwise hand age an empty string and report the key as the wrong one.
+    #[cfg(feature = "cli")]
     #[test]
     fn an_empty_identity_passphrase_file_is_refused_rather_than_offered_to_age() {
         let scratch = TestScratch::create("crypt-empty-pass");
@@ -1452,6 +1462,7 @@ mod tests {
         assert!(said.contains("is empty"), "{said}");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_wrong_passphrase_for_the_key_is_reported_as_that_and_not_as_a_key_that_does_not_match() {
         let scratch = TestScratch::create("crypt-wrong-pass");
@@ -1476,6 +1487,7 @@ mod tests {
 
     /// age stops at the first key it cannot use, so exactly one key is the failure, and a key
     /// that unlocked must not be named beside it.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_key_that_unlocked_is_not_named_beside_the_one_that_did_not() {
         let scratch = TestScratch::create("crypt-two");
@@ -1494,6 +1506,7 @@ mod tests {
         assert!(!said.contains(&first.display().to_string()), "{said}");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_key_that_stayed_locked_is_named_instead_of_being_called_the_wrong_key() {
         let scratch = TestScratch::create("crypt-no-pass");
@@ -1515,6 +1528,7 @@ mod tests {
         assert!(!said.contains(NO_KEY_OPENS_IT), "{said}");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn an_unrelated_key_is_still_reported_as_a_key_the_archive_was_not_encrypted_to() {
         let scratch = TestScratch::create("crypt-unrelated");
@@ -1536,6 +1550,7 @@ mod tests {
 
     /// An encrypted key in the PEM format `ssh-keygen` wrote before OpenSSH 7.8, which age
     /// recognises and cannot use. The body is filler, because nothing decodes that far.
+    #[cfg(feature = "cli")]
     const LEGACY_PEM_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----\n\
          Proc-Type: 4,ENCRYPTED\n\
          DEK-Info: AES-128-CBC,0123456789ABCDEF0123456789ABCDEF\n\
@@ -1545,6 +1560,7 @@ mod tests {
 
     /// Owner-only although the body is filler, because a key-shaped test file at the umask
     /// default is the pattern a real key gets copied from.
+    #[cfg(feature = "cli")]
     fn legacy_key_file(scratch: &TestScratch, name: &str) -> PathBuf {
         let path = scratch_path(scratch, name);
         let mut file = crate::perms::create_private_file(&path).expect("scratch key is creatable");
@@ -1553,6 +1569,7 @@ mod tests {
         path
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn a_key_age_cannot_use_is_named_as_that_rather_than_as_the_wrong_key() {
         let scratch = TestScratch::create("crypt-unsupported");
@@ -1577,6 +1594,7 @@ mod tests {
 
     /// `for k in ~/.ssh/id_*` passes `id_ecdsa` beside `id_ed25519`, so one unusable key must
     /// not stop a recovery that the key beside it can finish.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_key_age_cannot_use_does_not_stop_the_key_beside_it_from_opening_the_archive() {
         let scratch = TestScratch::create("crypt-mixed");
@@ -1592,6 +1610,7 @@ mod tests {
 
     /// With no usable key at all, the run stops with the reason. "No key matched" would send
     /// someone to look for a key they already hold.
+    #[cfg(feature = "cli")]
     #[test]
     fn a_run_with_no_usable_key_at_all_says_so_instead_of_reporting_no_match() {
         let scratch = TestScratch::create("crypt-none-usable");
@@ -1612,6 +1631,7 @@ mod tests {
         assert!(said.contains(&legacy.display().to_string()), "{said}");
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn only_a_passphrase_archive_is_the_one_that_asks_for_a_passphrase() {
         let scratch = TestScratch::create("crypt-needs-passphrase");
