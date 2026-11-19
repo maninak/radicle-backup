@@ -809,7 +809,7 @@ fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
             reason: format!(
                 "it holds a file named `{entry_path}`, which is not a name the format allows: \
                  `/`-separated parts of printable ASCII other than space, `\\`, `:` and `~`, \
-                 none of them empty or ending in `.`"
+                 none of them empty, ending in `.` or naming a Windows device"
             ),
         });
     }
@@ -818,7 +818,7 @@ fn reject_traversal(entry_path: &str, archive: &Path) -> Result<()> {
 
 /// Whether `entry_path` is the one spelling of a file under the target directory, judged the
 /// same on every platform: `/`-separated parts of printable ASCII other than space, `\`, `:`
-/// and `~`, none of them empty or ending in `.`.
+/// and `~`, none of them empty, ending in `.` or naming a Windows device.
 ///
 /// Windows drops a part's trailing `.`, reads `~` in 8.3 short names and `:` as a drive or a
 /// stream, and lands `/etc/passwd` at the drive root, so each would be a second spelling there.
@@ -828,7 +828,19 @@ fn is_portable_entry_name(entry_path: &str) -> bool {
         .all(|b| b.is_ascii_graphic() && !matches!(b, b'\\' | b':' | b'~'))
         && entry_path
             .split('/')
-            .all(|part| !part.is_empty() && !part.ends_with('.'))
+            .all(|part| !part.is_empty() && !part.ends_with('.') && !names_a_windows_device(part))
+}
+
+/// Whether Windows opens the device `part` names in place of a file: `CON`, `CONIN$`,
+/// `CONOUT$`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or `LPT1` to `LPT9` in any case, alone or
+/// before a `.`.
+fn names_a_windows_device(part: &str) -> bool {
+    let stem = part.split_once('.').map_or(part, |(stem, _)| stem);
+    match stem.to_ascii_uppercase().as_bytes() {
+        b"CON" | b"CONIN$" | b"CONOUT$" | b"PRN" | b"AUX" | b"NUL" => true,
+        [b'C', b'O', b'M', digit] | [b'L', b'P', b'T', digit] => matches!(digit, b'1'..=b'9'),
+        _ => false,
+    }
 }
 
 /// The entry names seen so far, keyed without case, because a file system that ignores case
@@ -1278,6 +1290,13 @@ mod tests {
         assert!(reject_traversal("C:evil", archive).is_err());
         assert!(reject_traversal("\\\\server\\share\\evil", archive).is_err());
         assert!(reject_traversal("keys\\radicle", archive).is_err());
+        // Windows opens a device for these in any directory, with or without an extension
+        assert!(reject_traversal("repos/con", archive).is_err());
+        assert!(reject_traversal("repos/NUL.bundle", archive).is_err());
+        assert!(reject_traversal("COM1/radicle", archive).is_err());
+        assert!(reject_traversal("repos/conout$", archive).is_err());
+        assert!(reject_traversal("repos/COM10.bundle", archive).is_ok());
+        assert!(reject_traversal("repos/console.bundle", archive).is_ok());
     }
 
     #[test]

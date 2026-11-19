@@ -35,7 +35,7 @@ Nothing in the format depends on a `rad` version. An archive written next to Rad
 
 `<rid>` is the repository identifier without its `rad:` prefix.
 
-Each path appears once, in exactly the form the manifest lists it: `/`-separated parts of printable ASCII other than space, `\`, `:` and `~`, none of them empty or ending in `.`, so no platform reads a second spelling of it. A reader refuses an archive that holds two paths equal when case is ignored, because a file system that ignores case writes both to one file.
+Each path appears once, in exactly the form the manifest lists it: `/`-separated parts of printable ASCII other than space, `\`, `:` and `~`, none of them empty, ending in `.`, or a name Windows gives a device (`CON`, `CONIN$`, `CONOUT$`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, in any case, alone or before a `.`), so no platform reads a second spelling of it or opens a device in its place. A reader refuses an archive that holds two paths equal when case is ignored, because a file system that ignores case writes both to one file.
 
 The manifest is written after every other entry, so the digests in it describe what was actually written rather than what was intended. A streaming reader learns the expected digests only at the end: hash as you go, compare at the close.
 
